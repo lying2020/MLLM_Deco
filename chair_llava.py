@@ -64,9 +64,9 @@ def load_images(image_files):
 
 
 def eval_model(args):
-    
+
     # set up gpu and logging
-    
+
     dist_util.setup_dist(args)
     device = dist_util.device()
 
@@ -83,14 +83,14 @@ def eval_model(args):
         logger.info(f"Experiment directory created at {experiment_dir}")
     else:
         logger = create_logger(None)
-    
+
     # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name,device="cuda:5")
     answers_file = os.path.expanduser(args.answers_file)
-    os.makedirs(os.path.dirname(answers_file), exist_ok=True)    
+    os.makedirs(os.path.dirname(answers_file), exist_ok=True)
     with open("../opera_log/llava-1.5/ours.jsonl", "r", encoding="utf-8") as f:
         for _, data_line in tqdm(enumerate(f.readlines()),total=500):
             line = json.loads(data_line)
@@ -98,7 +98,7 @@ def eval_model(args):
             image_file = ".../val2014/COCO_val2014_" + str(idx).zfill(12) + ".jpg"
             qs = "Please describe this image in detail."#line["query"]
             cur_prompt = qs
-    
+
             if model.config.mm_use_im_start_end:
                 qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
             else:
@@ -111,7 +111,7 @@ def eval_model(args):
 
             input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda(5)
             image = Image.open(image_file)
-            image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]            
+            image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
             keywords = [stop_str]
             stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
@@ -131,26 +131,26 @@ def eval_model(args):
                         stopping_criteria=[stopping_criteria],
                         use_deco = True,
                         alpha = args.alpha,
-                        threshold_top_p=args.threshold_top_p, 
+                        threshold_top_p=args.threshold_top_p,
                         threshold_top_k=args.threshold_top_k,
                         early_exit_layers=[i for i in range(args.start_layer, args.end_layer)],
                         return_dict=True
                         )
-                
+
             output_ids = output_dict.sequences
             input_token_len = input_ids.shape[1]
             outputs = tokenizer.batch_decode(
                     output_ids[:, input_token_len:], skip_special_tokens=True
                 )[0]
             outputs = outputs.strip()
-                
-                
+
+
             logger.info(f"[{image_file}]")
-            logger.info(f"prompt: {cur_prompt}") 
-            logger.info(f"text: {outputs}")  
+            logger.info(f"prompt: {cur_prompt}")
+            logger.info(f"text: {outputs}")
             res_dict = {"id": idx,"response": outputs}
             # ans_file.write(json.dumps(res_dict, ensure_ascii=False) + "\n")
-                
+
 
 
 if __name__ == "__main__":

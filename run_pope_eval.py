@@ -75,46 +75,49 @@ def load_image(image_file):
     return image
 
 
-def auto_detect_questions(visualized_dir="pope_visualized", config="Full", split="adversarial"):
+def auto_detect_questions(probe_exp_dir="probe_exp/train_set", split="adversarial", coco_root="/home/liying/Documents/dataset/coco"):
     """
-    自动从可视化数据集生成问题文件
+    从 probe_exp/train_set 目录读取问题文件
 
     Args:
-        visualized_dir: 可视化数据集目录
-        config: config 名称
-        split: split 名称
+        probe_exp_dir: probe_exp 目录路径
+        split: split 名称 (adversarial, popular, random)
+        coco_root: COCO 数据集根目录
     """
-    visualized_dir = Path(visualized_dir)
+    probe_exp_dir = Path(probe_exp_dir)
+    coco_root = Path(coco_root)
 
-    # 查找 summary.json 文件
-    if config == "Full":
-        summary_files = list((visualized_dir / config / split).rglob("summary.json"))
-    else:
-        summary_files = list((visualized_dir / config / split).rglob("summary.json"))
+    # 构建问题文件路径
+    question_file = probe_exp_dir / f"coco_pope_{split}.json"
 
-    if not summary_files:
-        raise FileNotFoundError(f"找不到 {config}/{split} 的 summary.json 文件")
+    if not question_file.exists():
+        raise FileNotFoundError(f"找不到问题文件: {question_file}")
 
     all_questions = []
 
-    for summary_file in sorted(summary_files):
-        with open(summary_file, 'r', encoding='utf-8') as f:
-            summary = json.load(f)
+    # 读取 JSONL 格式的文件（每行一个 JSON）
+    with open(question_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
 
-        for sample in summary.get('samples', []):
-            # 构建完整的图像路径（绝对路径）
-            sample_dir = summary_file.parent.parent
-            image_path = sample_dir / sample['image_path']
+            # 构建完整的图像路径
+            # sample['image'] 格式: "val2014/COCO_val2014_000000031041.jpg"
+            image_relative_path = sample['image']
+            image_path = coco_root / image_relative_path
             image_path = image_path.resolve()
 
-            # POPE GT 文件的 question_id 从 1 开始，而可视化数据集从 0 开始
-            # 所以需要加 1 以匹配 GT 文件格式
-            question_id = sample['id'] + 1
+            # 检查图像文件是否存在
+            if not image_path.exists():
+                print(f"⚠️  警告: 图像文件不存在: {image_path}")
+                continue
 
             all_questions.append({
-                "question_id": question_id,
+                "question_id": sample['question_id'],
                 "image": str(image_path),
-                "text": sample['question']
+                "text": sample['text']
             })
 
     # 按 question_id 排序
@@ -123,27 +126,28 @@ def auto_detect_questions(visualized_dir="pope_visualized", config="Full", split
     return all_questions
 
 
-def auto_generate_gt_file(visualized_dir="pope_visualized", config="Full", split="adversarial", output_file=None, results_dir=None):
+def auto_generate_gt_file(probe_exp_dir="probe_exp/train_set", split="adversarial", coco_root="/home/liying/Documents/dataset/coco", output_file=None, results_dir=None):
     """
-    从 metadata 文件夹中自动生成真值（Ground Truth）文件
+    从 probe_exp/train_set 目录读取真值（Ground Truth）文件
 
     Args:
-        visualized_dir: 可视化数据集目录
-        config: config 名称
-        split: split 名称
+        probe_exp_dir: probe_exp 目录路径
+        split: split 名称 (adversarial, popular, random)
+        coco_root: COCO 数据集根目录
         output_file: 输出文件路径（如果不指定，将自动生成）
         results_dir: 结果目录（如果不指定，将使用默认路径）
 
     Returns:
         真值文件路径
     """
-    visualized_dir = Path(visualized_dir)
+    probe_exp_dir = Path(probe_exp_dir)
+    coco_root = Path(coco_root)
 
-    # 查找 metadata 文件夹
-    metadata_dirs = list((visualized_dir / config / split).rglob("metadata"))
+    # 构建问题文件路径（GT 数据也在同一个文件中）
+    gt_file = probe_exp_dir / f"coco_pope_{split}.json"
 
-    if not metadata_dirs:
-        raise FileNotFoundError(f"找不到 {config}/{split} 的 metadata 文件夹")
+    if not gt_file.exists():
+        raise FileNotFoundError(f"找不到真值文件: {gt_file}")
 
     if output_file is None:
         # 如果未指定输出文件，保存到 results 目录
@@ -159,35 +163,25 @@ def auto_generate_gt_file(visualized_dir="pope_visualized", config="Full", split
 
     all_gt_data = []
 
-    # 遍历所有 metadata 文件夹
-    for metadata_dir in sorted(metadata_dirs):
-        # 获取所有 metadata JSON 文件
-        metadata_files = sorted(metadata_dir.glob("*_metadata.json"),
-                                key=lambda x: int(x.stem.split('_')[0]) if x.stem.split('_')[0].isdigit() else 0)
+    # 读取 JSONL 格式的文件（每行一个 JSON）
+    with open(gt_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
 
-        for metadata_file in metadata_files:
-            with open(metadata_file, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-
-            # 构建完整的图像路径（绝对路径）
-            images_dir = metadata_dir.parent / "images"
-            image_path = images_dir / meta['image_filename']
+            # 构建完整的图像路径
+            # sample['image'] 格式: "val2014/COCO_val2014_000000031041.jpg"
+            image_relative_path = sample['image']
+            image_path = coco_root / image_relative_path
             image_path = image_path.resolve()
 
-            # question_id 从 metadata 中获取（已经是字符串格式，需要转换为整数）
-            question_id = int(meta.get('question_id', meta.get('id', 0) + 1))
-
-            # 答案（label）从 metadata 中获取
-            answer = meta.get('answer', '').lower().strip()
-
-            # 问题文本
-            question_text = meta.get('question', '')
-
             all_gt_data.append({
-                "question_id": question_id,
+                "question_id": sample['question_id'],
                 "image": str(image_path),
-                "text": question_text,
-                "label": answer
+                "text": sample['text'],
+                "label": sample['label'].lower().strip()  # 确保 label 是小写
             })
 
     # 按 question_id 排序
@@ -202,7 +196,7 @@ def auto_generate_gt_file(visualized_dir="pope_visualized", config="Full", split
     return output_file
 
 
-def auto_generate_question_file(visualized_dir="pope_visualized", config="Full", split="adversarial", output_file=None, results_dir=None):
+def auto_generate_question_file(probe_exp_dir="probe_exp/train_set", split="adversarial", coco_root="/home/liying/Documents/dataset/coco", output_file=None, results_dir=None):
     """
     自动生成问题文件
 
@@ -221,7 +215,7 @@ def auto_generate_question_file(visualized_dir="pope_visualized", config="Full",
         output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."
         os.makedirs(output_dir, exist_ok=True)
 
-    questions = auto_detect_questions(visualized_dir, config, split)
+    questions = auto_detect_questions(probe_exp_dir, split, coco_root)
 
     # 保存问题文件
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -625,7 +619,6 @@ def main():
     """主函数 - 自动检测并使用默认配置"""
     # 项目根目录
     project_root = Path(__file__).parent
-    visualized_dir = project_root / "pope_visualized"
 
     # 自动检测可用 GPU
     if torch.cuda.is_available():
@@ -640,8 +633,8 @@ def main():
     default_config = {
         "model_path": llava_v15_7b_path,
         "device": device_str,
-        "visualized_dir": str(visualized_dir),
-        "config": "Full",
+        "probe_exp_dir": str(project_root / "probe_exp" / "train_set"),
+        "coco_root": "/home/liying/Documents/dataset/coco",
         "split": "adversarial",  # 默认评估 adversarial split
         "use_deco": False,
         "alpha": 0.6,
@@ -652,7 +645,7 @@ def main():
         "temperature": -1,
         "top_p": None,
         "max_new_tokens": 10,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 200,
+        "num_samples": 2000,
         "seed": 42
     }
 
@@ -660,12 +653,12 @@ def main():
     parser = argparse.ArgumentParser(description="POPE 评估 - 直接运行版本（所有参数可选）")
 
     # 数据集参数
-    parser.add_argument("--config", type=str, default=default_config["config"],
-                       choices=["Full", "default"], help="数据集 config")
     parser.add_argument("--split", type=str, default=default_config["split"],
-                       choices=["adversarial", "popular", "random", "test"], help="数据集 split")
-    parser.add_argument("--visualized-dir", type=str, default=default_config["visualized_dir"],
-                       help="可视化数据集目录")
+                       choices=["adversarial", "popular", "random"], help="数据集 split")
+    parser.add_argument("--probe-exp-dir", type=str, default=default_config["probe_exp_dir"],
+                       help="probe_exp/train_set 目录路径")
+    parser.add_argument("--coco-root", type=str, default=default_config["coco_root"],
+                       help="COCO 数据集根目录路径")
     parser.add_argument("--question-file", type=str, default=None,
                        help="问题文件路径（如果不指定，将自动生成）")
 
@@ -717,9 +710,9 @@ def main():
     print("自动生成真值文件（Ground Truth）")
     print("=" * 80)
     gt_file = auto_generate_gt_file(
-        visualized_dir=args.visualized_dir,
-        config=args.config,
+        probe_exp_dir=args.probe_exp_dir,
         split=args.split,
+        coco_root=args.coco_root,
         output_file=None,  # 使用默认路径（results/pope/pope_gt_{split}.json）
         results_dir=results_dir
     )
@@ -730,9 +723,9 @@ def main():
         print("自动生成问题文件")
         print("=" * 80)
         question_file = auto_generate_question_file(
-            visualized_dir=args.visualized_dir,
-            config=args.config,
+            probe_exp_dir=args.probe_exp_dir,
             split=args.split,
+            coco_root=args.coco_root,
             output_file=None,  # 使用默认路径（results/pope/pope_questions_{split}.jsonl）
             results_dir=results_dir
         )

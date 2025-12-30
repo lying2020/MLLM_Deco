@@ -86,8 +86,8 @@ def parse_args():
     # 默认图片路径（原先的路径）
     # img_default_path = os.path.join(project_root, "Qwen2.5-VL-7B-Instruct_Based/tests/input_image.png")
     # prompt_default_path = "Please describe this image in detail."
-    img_default_path = "/home/liying/Desktop/ACL2026/MLLM_Deco/pope_visualized/Full/adversarial/adversarial-00000-of-00001/images/9_COCO_val2014_000000210789.png"
-    prompt_default_path = "Is there a dining table in the image? Please answer with Yes or No only."
+    img_default_path = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    prompt_default_path =  "Is there a car in the image?"
     parser.add_argument("--image-file", type=str, default=img_default_path,
                        help=f"单张图片路径（默认: {img_default_path})")
     parser.add_argument("--prompt", type=str, default=None,
