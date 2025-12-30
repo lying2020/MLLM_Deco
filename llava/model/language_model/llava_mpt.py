@@ -17,8 +17,10 @@ from typing import Optional, Tuple
 
 import torch
 
-from transformers import AutoConfig, AutoModelForCausalLM, \
-                         MptConfig, MptForCausalLM, MptModel
+from transformers import AutoConfig, AutoModelForCausalLM
+# Use local MPT implementation instead of transformers' MPT (which may not be available)
+from llava.model.language_model.mpt.configuration_mpt import MPTConfig as MptConfig
+from llava.model.language_model.mpt.modeling_mpt import MPTModel as MptModel, MPTForCausalLM as MptForCausalLM
 from llava.model.llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 
 

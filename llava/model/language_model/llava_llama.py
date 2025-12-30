@@ -68,6 +68,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
+        early_exit_layers: Optional[List[int]] = None,  # DeCo parameter, accepted but not used in forward
+        **kwargs,  # Accept additional kwargs for compatibility
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         if inputs_embeds is None:
@@ -84,11 +86,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 attention_mask,
                 past_key_values,
                 labels,
-                images,
-                image_sizes
+                images
             )
 
-        return super().forward(
+        outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -100,6 +101,32 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict
         )
+
+        # For DeCo: return dict_outputs (intermediate layer logits) and outputs
+        if early_exit_layers is not None and output_hidden_states:
+            dict_outputs = {}
+            # Extract logits from intermediate layers for early exit
+            if return_dict:
+                hidden_states = outputs.hidden_states
+            else:
+                # If not return_dict, hidden_states might be in tuple
+                hidden_states = outputs[-1] if isinstance(outputs, tuple) else None
+
+            if hidden_states is not None:
+                # Get the model's language model head
+                lm_head = self.lm_head
+                # Extract logits for each early exit layer
+                for layer_idx in early_exit_layers:
+                    if layer_idx < len(hidden_states):
+                        # Get hidden state from this layer and compute logits
+                        layer_hidden = hidden_states[layer_idx]
+                        # Use the last token's hidden state
+                        layer_logits = lm_head(layer_hidden[:, -1:, :])
+                        dict_outputs[layer_idx] = layer_logits
+
+            return dict_outputs, outputs
+        else:
+            return outputs
 
     @torch.no_grad()
     def generate(
@@ -128,8 +155,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 attention_mask,
                 None,
                 None,
-                images,
-                image_sizes=image_sizes
+                images
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)

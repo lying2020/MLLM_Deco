@@ -1,0 +1,14 @@
+[
+  {
+    "image_path": "/home/liying/Desktop/ACL2026/MLLM_Deco/Qwen2.5-VL-7B-Instruct_Based/tests/input_image.png",
+    "prompt": "Please describe this image in detail."
+  },
+  {
+    "image_path": "/path/to/another/image.jpg",
+    "prompt": "What objects are in this image?"
+  },
+  {
+    "image_path": "/path/to/third/image.png",
+    "prompt": ""
+  }
+]
