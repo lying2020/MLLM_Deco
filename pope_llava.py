@@ -17,6 +17,10 @@ from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria, process_images
 
+from project import llava_v15_7b_path
+print("llava_v15_7b_path: ", llava_v15_7b_path)
+
+
 from PIL import Image
 import math
 import re
@@ -61,7 +65,8 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name,device="cuda:5")
+    device = f"cuda:{args.device}" if args.device >= 0 else "cpu"
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, device=device)
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
     answers_file = os.path.expanduser(args.answers_file)
@@ -93,7 +98,7 @@ def eval_model(args):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda(5)
+        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(device)
         image_files = [image_file]
         images = load_images(image_files)
         images_tensor = process_images(
@@ -116,8 +121,8 @@ def eval_model(args):
                 top_p=args.top_p,
                 top_k=args.top_k,
                 max_new_tokens=5,
-                use_deco=True,
-                alpha = args.aplha,
+                use_deco=False,
+                alpha = args.alpha,
                 threshold_top_p = args.threshold_top_p,
                 threshold_top_k = args.threshold_top_k,
                 early_exit_layers=[i for i in range(args.start_layer, args.end_layer)],
@@ -148,7 +153,7 @@ def eval_model(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default=".../llava-v1.5-7b")
+    parser.add_argument("--model-path", type=str, default=llava_v15_7b_path)
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--image-folder", type=str, default="")
     parser.add_argument("--question-file", type=str, default="")
@@ -166,6 +171,8 @@ if __name__ == "__main__":
 
 
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--answers-file", type=str, default="", required=True, help="输出答案文件路径")
+    parser.add_argument("--device", type=int, default=0, help="CUDA设备编号，-1表示使用CPU")
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)
