@@ -87,7 +87,7 @@ def parse_args():
     # img_default_path = os.path.join(project_root, "Qwen2.5-VL-7B-Instruct_Based/tests/input_image.png")
     # prompt_default_path = "Please describe this image in detail."
     img_default_path = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
-    prompt_default_path =  "Is there a car in the image?"
+    prompt_default_path =  "There is a bowl"
     parser.add_argument("--image-file", type=str, default=img_default_path,
                        help=f"单张图片路径（默认: {img_default_path})")
     parser.add_argument("--prompt", type=str, default=None,
@@ -611,7 +611,7 @@ def main():
                 })
 
         # 保存批量结果
-        output_file = os.path.join(output_dir, f"batch_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        output_file = os.path.join(output_dir, f"batch_results.json")
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(all_results, f, ensure_ascii=False, indent=2)
         print(f"\n✓ 批量处理完成，结果已保存到: {output_file}")
@@ -634,7 +634,7 @@ def main():
                                      image_file_to_use, prompt_to_use)
 
         # 保存单张结果
-        output_file = os.path.join(output_dir, f"single_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        output_file = os.path.join(output_dir, f"single_result.json")
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print(f"\n✓ 处理完成，结果已保存到: {output_file}")
