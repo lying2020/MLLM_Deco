@@ -31,7 +31,7 @@ def recorder(out):
         return "Yes"
     else:
         return "No"
-    
+
 # def image_parser(args):
 #     out = args.image_file.split(args.sep)
 #     return out
@@ -54,7 +54,7 @@ def load_images(image_files):
         image = load_image(image_file)
         out.append(image)
     return out
-    
+
 
 def eval_model(args):
     # Model
@@ -77,9 +77,9 @@ def eval_model(args):
         else:
             qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
-        
-        
-        
+
+
+
         if "llama-2" in model_name.lower():
             conv_mode = "llava_llama_2"
         elif "v1" in model_name.lower():
@@ -101,7 +101,7 @@ def eval_model(args):
                 image_processor, # clip
                 model.config
             ).to(model.device, dtype=torch.float16)
-            
+
 
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
         keywords = [stop_str]
@@ -118,7 +118,7 @@ def eval_model(args):
                 max_new_tokens=5,
                 use_deco=True,
                 alpha = args.aplha,
-                threshold_top_p = args.threshold_top_p, 
+                threshold_top_p = args.threshold_top_p,
                 threshold_top_k = args.threshold_top_k,
                 early_exit_layers=[i for i in range(args.start_layer, args.end_layer)],
                 output_hidden_states=True,
@@ -163,10 +163,9 @@ if __name__ == "__main__":
     parser.add_argument("--threshold_top_k", type=int, default=20)
     parser.add_argument("--start_layer", type=int, default=20)
     parser.add_argument("--end_layer", type=int, default=29)
-    
+
 
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)
-
