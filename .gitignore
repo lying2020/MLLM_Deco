@@ -2,7 +2,7 @@
 __pycache__
 *.py[cod]
 *$py.class
-
+pope_visualized/
 # C extensions
 *.so
 Qwen2.5-VL-7B-Instruct_Based
@@ -27,6 +27,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+probe_exp/224-px
+probe_exp/336-px
 
 # PyInstaller
 *.manifest
