@@ -1161,11 +1161,15 @@ def parse_args():
     parser.add_argument("--conv-mode", type=str, default="llava_v1",
                        help="对话模式")
 
-    # 输入参数
+    # # 输入参数
+    # default_image_file = "./image.png"
+    # default_prompt = "Please describe this image in detail."
+    default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     parser.add_argument("--image-file", type=str,
-                       default="/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg",
+                       default=default_image_file,
                        help="图像文件路径")
-    parser.add_argument("--prompt", type=str, default="there is a boy with blond hair and blue eyes, is this discription correct? Yes or No.",
+    parser.add_argument("--prompt", type=str, default=default_prompt,
                        help="提示词")
 
     # 分析参数

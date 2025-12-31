@@ -84,18 +84,22 @@ def parse_args():
 
     # 输入相关参数
     # 默认图片路径（原先的路径）
-    # img_default_path = os.path.join(project_root, "Qwen2.5-VL-7B-Instruct_Based/tests/input_image.png")
-    # prompt_default_path = "Please describe this image in detail."
-    img_default_path = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
-    prompt_default_path =  "There is a bowl"
-    parser.add_argument("--image-file", type=str, default=img_default_path,
-                       help=f"单张图片路径（默认: {img_default_path})")
+    # default_image_file = os.path.join(project_root, "Qwen2.5-VL-7B-Instruct_Based/tests/input_image.png")
+    # default_prompt = "Please describe this image in detail."
+    # default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    # default_prompt =  "There is a bowl"
+    # default_image_file = "./image.png"
+    # default_prompt = "Please describe this image in detail."
+    default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    default_prompt = "there is not a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
+    parser.add_argument("--image-file", type=str, default=default_image_file,
+                       help=f"单张图片路径（默认: {default_image_file})")
     parser.add_argument("--prompt", type=str, default=None,
                        help="单张图片的提示词（如果不指定，使用 --default-prompt)")
     parser.add_argument("--batch-file", type=str, default=None,
                        help="批量处理 JSON 文件路径，格式: [{\"image_path\": \"...\", \"prompt\": \"...\"}, ...]")
     parser.add_argument("--default-prompt", type=str,
-                       default=prompt_default_path,
+                       default=default_prompt,
                        help="默认提示词（当批量文件中 prompt 为空时，或单张图片未指定 --prompt 时使用）")
 
     # 生成参数
