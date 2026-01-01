@@ -1537,7 +1537,7 @@ class GenerationMixin:
                 streamer=streamer,
                 **model_kwargs,
             )
-        
+
         if is_greedy_gen_mode and use_deco:
             if generation_config.num_return_sequences > 1:
                 raise ValueError(
@@ -1562,7 +1562,7 @@ class GenerationMixin:
                 early_exit_layers=early_exit_layers,
                 **model_kwargs,
             )
-        
+
         elif is_greedy_gen_mode:
             if generation_config.num_return_sequences > 1:
                 raise ValueError(
@@ -1609,7 +1609,7 @@ class GenerationMixin:
             )
 
         elif is_sample_gen_mode and use_deco:
-            
+
             logits_warper = self._get_logits_warper(generation_config)
 
             # 12. expand input_ids with `num_return_sequences` additional sequences per batch
@@ -1637,7 +1637,7 @@ class GenerationMixin:
                 **model_kwargs
             )
 
-            
+
 
         elif is_sample_gen_mode:
             # 11. prepare logits warper
@@ -1665,7 +1665,7 @@ class GenerationMixin:
                 streamer=streamer,
                 **model_kwargs,
             )
-            
+
         elif is_beam_gen_mode and use_deco:
             # assert generation_config.output_attentions, "OPERA decoding requires output_attentions=True!"
 
@@ -2563,8 +2563,8 @@ class GenerationMixin:
                 )
         else:
             return input_ids
-        
-        
+
+
     def deco_greedy_search(
         self,
         input_ids: torch.LongTensor,
@@ -2585,7 +2585,7 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
-               
+
         # init values
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
@@ -2645,7 +2645,7 @@ class GenerationMixin:
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
-            
+
             dict_outputs, outputs = self(
                 **model_inputs,
                 return_dict=True,
@@ -2662,16 +2662,16 @@ class GenerationMixin:
             candidate_tokens_probs, candidate_tokens_ids = torch.topk(last_layer_tokens_probs, dim=-1, k=threshold_top_k)
             candidate_tokens_cumulative_probs = candidate_tokens_probs.cumsum(dim=-1)
             candidate_tokens_indices = torch.searchsorted(candidate_tokens_cumulative_probs, threshold_top_p, right=False)
-            candidate_tokens_cutoff_idx = torch.min(candidate_tokens_indices + 1, torch.tensor(threshold_top_k))    
+            candidate_tokens_cutoff_idx = torch.min(candidate_tokens_indices + 1, torch.tensor(threshold_top_k))
             candidate_tokens_ids = candidate_tokens_ids[:candidate_tokens_cutoff_idx]
-                
+
             stacked_early_exit_layers = torch.stack([dict_outputs[i][:, -1, :] for i in early_exit_layers], dim=0)
             softmax_early_exit_layers = F.softmax(stacked_early_exit_layers, dim=-1)
             candidate_tokens_early_exit_probs = softmax_early_exit_layers[:,:,candidate_tokens_ids].squeeze(dim=1) # [10 layers, 10 candidate tokens]
             max_candidate_tokens_idx = torch.argmax(candidate_tokens_early_exit_probs)
             premature_max_probs = candidate_tokens_early_exit_probs.max().item()
-            target_layers = max_candidate_tokens_idx // candidate_tokens_early_exit_probs.size(1) 
-                
+            target_layers = max_candidate_tokens_idx // candidate_tokens_early_exit_probs.size(1)
+
             selected_premature_layer_idx = early_exit_layers[target_layers.item()]
             selected_premature_layer_logits = dict_outputs[selected_premature_layer_idx][:, -1, :] # [1, vocab_size]
             indices_to_remove = torch.ones_like(selected_premature_layer_logits)
@@ -2689,7 +2689,7 @@ class GenerationMixin:
             final_token_scores = logits_processor(input_ids, final_token_logits)
             # final_probs = nn.functional.softmax(final_token_scores, dim=-1)
             next_tokens = torch.argmax(final_token_scores, dim=-1)
-            
+
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
                 if output_scores:
@@ -2707,7 +2707,7 @@ class GenerationMixin:
                         if self.config.is_encoder_decoder
                         else (outputs.hidden_states,)
                     )
-                    
+
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
                 if pad_token_id is None:
@@ -2738,8 +2738,8 @@ class GenerationMixin:
 
             if this_peer_finished and not synced_gpus:
                 break
-        
-        
+
+
         if streamer is not None:
             streamer.end()
 
@@ -2891,8 +2891,8 @@ class GenerationMixin:
         >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)
         ['Today is a beautiful day, and we must do everything possible to make it a day of celebration.']
         ```"""
-        
-        
+
+
         # init values
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
@@ -3047,7 +3047,7 @@ class GenerationMixin:
         else:
             return input_ids
 
-            
+
 
     def deco_sample_search(
         self,
@@ -3070,7 +3070,7 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         **model_kwargs,
     ) -> Union[SampleOutput, torch.LongTensor]:
-                
+
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
         if max_length is not None:
@@ -3098,8 +3098,8 @@ class GenerationMixin:
             if return_dict_in_generate is not None
             else self.generation_config.return_dict_in_generate
         )
-        
-        # init attention / hidden states / scores tuples        
+
+        # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
         decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
@@ -3116,7 +3116,7 @@ class GenerationMixin:
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
         this_peer_finished = False  # used by synced_gpus only
-        
+
         # auto-regressive generation
         while True:
             if synced_gpus:
@@ -3140,29 +3140,29 @@ class GenerationMixin:
                 output_hidden_states=output_hidden_states,
                 early_exit_layers = early_exit_layers
             )
-            
+
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
 
-            
+
             last_layer_tokens_logits = outputs.logits[:, -1, :]
-            # step1: get candidate tokens 
-            last_layer_tokens_probs = nn.functional.softmax(last_layer_tokens_logits, dim=-1).squeeze(dim=0).squeeze(dim=0)       
+            # step1: get candidate tokens
+            last_layer_tokens_probs = nn.functional.softmax(last_layer_tokens_logits, dim=-1).squeeze(dim=0).squeeze(dim=0)
             candidate_tokens_probs, candidate_tokens_ids = torch.topk(last_layer_tokens_probs, dim=-1, k=threshold_top_k)
             candidate_tokens_cumulative_probs = candidate_tokens_probs.cumsum(dim=-1)
             candidate_tokens_indices = torch.searchsorted(candidate_tokens_cumulative_probs, threshold_top_p, right=False)
             candidate_tokens_cutoff_idx = torch.min(candidate_tokens_indices + 1, torch.tensor(threshold_top_k))
             candidate_tokens_ids = candidate_tokens_ids[:candidate_tokens_cutoff_idx]
-                
+
             # step2: select anchor layer
             stacked_early_exit_layers = torch.stack([dict_outputs[i][:, -1, :] for i in early_exit_layers], dim=0)
             softmax_early_exit_layers = F.softmax(stacked_early_exit_layers, dim=-1) # (num_premature_layers, batch_size, num_features)
             candidate_tokens_early_exit_probs = softmax_early_exit_layers[:,:,candidate_tokens_ids].squeeze(dim=1) # [10 layers, 10 candidate tokens]
             max_candidate_tokens_idx = torch.argmax(candidate_tokens_early_exit_probs)
             premature_max_probs = candidate_tokens_early_exit_probs.max().item()
-            target_layers = max_candidate_tokens_idx // candidate_tokens_early_exit_probs.size(1) 
-                        
+            target_layers = max_candidate_tokens_idx // candidate_tokens_early_exit_probs.size(1)
+
             # step3: calibrate final logits
             selected_premature_layer_idx = early_exit_layers[target_layers.item()]
             selected_premature_layer_logits = dict_outputs[selected_premature_layer_idx][:, -1, :] # [1, vocab_size]
@@ -3188,7 +3188,7 @@ class GenerationMixin:
                     )
                     if self.config.is_encoder_decoder:
                         cross_attentions += (outputs.cross_attentions,)
-                        
+
                 if output_hidden_states:
                     decoder_hidden_states += (
                         (outputs.decoder_hidden_states,)
@@ -3199,11 +3199,11 @@ class GenerationMixin:
 
             final_token_scores = logits_processor(input_ids, final_token_logits)
             final_token_scores = logits_warper(input_ids, final_token_scores)
-                
+
             final_probs = nn.functional.softmax(final_token_scores, dim=-1)
             next_tokens = torch.multinomial(final_probs, num_samples=1).squeeze(1)
-            
-            
+
+
             if eos_token_id is not None:
                 if pad_token_id is None:
                     raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
@@ -3257,7 +3257,7 @@ class GenerationMixin:
                 )
         else:
             return input_ids
-        
+
 
     def beam_search(
         self,
@@ -3581,8 +3581,8 @@ class GenerationMixin:
                 )
         else:
             return sequence_outputs["sequences"]
-        
-        
+
+
     def deco_beam_search(
         self,
         input_ids: torch.LongTensor,
@@ -3791,13 +3791,13 @@ class GenerationMixin:
                 output_hidden_states=output_hidden_states,
                 early_exit_layers = early_exit_layers
             )
-            
+
 
             if synced_gpus and this_peer_finished:
                 cur_len = cur_len + 1
                 continue  # don't waste resources running the code we don't need
 
-            
+
             last_layer_tokens_logits = outputs.logits[:, -1, :]
             last_layer_tokens_probs = nn.functional.softmax(last_layer_tokens_logits, dim=-1)
             multi_candidate_tokens_probs, multi_candidate_tokens_ids = torch.topk(last_layer_tokens_probs, dim=-1, k=threshold_top_k)
@@ -3812,9 +3812,9 @@ class GenerationMixin:
                 candidate_tokens_early_exit_probs = softmax_early_exit_layers[:,candidate_tokens_ids] # [10 layers, 10 candidate tokens]
                 max_candidate_tokens_idx = torch.argmax(candidate_tokens_early_exit_probs)
                 premature_max_probs = candidate_tokens_early_exit_probs.max().item()
-                target_layers = max_candidate_tokens_idx // candidate_tokens_early_exit_probs.size(1) 
-                    
-                    
+                target_layers = max_candidate_tokens_idx // candidate_tokens_early_exit_probs.size(1)
+
+
 
                 selected_premature_layer_idx = early_exit_layers[target_layers.item()]
                 selected_premature_layer_logits = dict_outputs[selected_premature_layer_idx][seq_idx, -1, :] # [1, vocab_size]
@@ -3825,9 +3825,9 @@ class GenerationMixin:
                 final_token_logits = next_token_logits + alpha * premature_max_probs * selected_premature_layer_logits
                 final_token_logits = final_token_logits.masked_fill(indices_to_remove, -float("Inf"))
                 tensor_list.append(final_token_logits)
-                
+
             next_token_logits = torch.stack(tensor_list,dim=0)
-            
+
 
             # next_token_logits = outputs.logits[:, -1, :]
             # next_token_logits = final_token_logits
@@ -3944,12 +3944,12 @@ class GenerationMixin:
                 )
         else:
             return sequence_outputs["sequences"]
-        
-        
-        
-        
-        
-        
+
+
+
+
+
+
 
     def beam_sample(
         self,
@@ -4283,9 +4283,9 @@ class GenerationMixin:
                 )
         else:
             return sequence_outputs["sequences"]
-        
-        
-    
+
+
+
 
     def group_beam_search(
         self,

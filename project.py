@@ -3,7 +3,7 @@
 # LML-diffusion-sampler
 import os
 
-coco_data_path = "/home/liying/Desktop/HILDA-ICLR-2025/LML-diffusion-sampler/data/coco"
+coco_data_path = "/home/liying/Documents/dataset/coco"
 coco_annotations_path = os.path.join(coco_data_path, "annotations")
 coco_val2014_images_path = os.path.join(coco_data_path, "val2014")
 

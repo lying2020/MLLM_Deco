@@ -13,15 +13,49 @@ Modified by: Maxlinn
 
 import os
 import sys
-import nltk
 import json
 # from pattern.en import singularize
-from nltk.corpus import wordnet
-from nltk.stem import WordNetLemmatizer
 import argparse
 import tqdm
 import pickle
 from collections import defaultdict
+
+# 延迟导入 nltk，并提供友好的错误提示
+try:
+    import nltk
+    from nltk.corpus import wordnet
+    from nltk.stem import WordNetLemmatizer
+
+    # 检查并下载必要的 nltk 数据
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        print("正在下载 NLTK punkt tokenizer 数据...")
+        nltk.download('punkt', quiet=True)
+
+    try:
+        nltk.data.find('taggers/averaged_perceptron_tagger')
+    except LookupError:
+        print("正在下载 NLTK POS tagger 数据...")
+        nltk.download('averaged_perceptron_tagger', quiet=True)
+
+    try:
+        nltk.data.find('corpora/wordnet')
+    except LookupError:
+        print("正在下载 NLTK wordnet 数据...")
+        nltk.download('wordnet', quiet=True)
+
+except ImportError as e:
+    print("=" * 80)
+    print("错误: 缺少 NLTK 库")
+    print("=" * 80)
+    print("请安装 NLTK:")
+    print("  pip install nltk")
+    print("")
+    print("安装后，还需要下载 NLTK 数据:")
+    print("  python -c \"import nltk; nltk.download('punkt'); nltk.download('averaged_perceptron_tagger'); nltk.download('wordnet')\"")
+    print("=" * 80)
+    raise
 
 
 # copied from: https://github.com/LisaAnne/Hallucination/blob/master/data/synonyms.txt
@@ -45,7 +79,7 @@ cat, kitten, feline, tabby
 dog, puppy, beagle, pup, chihuahua, schnauzer, dachshund, rottweiler, canine, pitbull, collie, pug, terrier, poodle, labrador, doggie, doberman, mutt, doggy, spaniel, bulldog, sheepdog, weimaraner, corgi, cocker, greyhound, retriever, brindle, hound, whippet, husky
 horse, colt, pony, racehorse, stallion, equine, mare, foal, palomino, mustang, clydesdale, bronc, bronco
 sheep, lamb, ram, lamb, goat, ewe
-cow, cattle, oxen, ox, calf, cattle, holstein, heifer, buffalo, bull, zebu, bison 
+cow, cattle, oxen, ox, calf, cattle, holstein, heifer, buffalo, bull, zebu, bison
 elephant
 bear, panda
 zebra
@@ -83,7 +117,7 @@ pizza
 donut, doughnut, bagel
 cake,  cheesecake, cupcake, shortcake, coffeecake, pancake
 chair, seat, stool
-couch, sofa, recliner, futon, loveseat, settee, chesterfield 
+couch, sofa, recliner, futon, loveseat, settee, chesterfield
 potted plant, houseplant
 bed
 dining table, table, desk
@@ -123,7 +157,7 @@ def combine_coco_captions(annotation_path):
                 'images': val_caps['images'] + train_caps['images'],
                 'annotations': val_caps['annotations'] + train_caps['annotations']}
 
-    return all_caps 
+    return all_caps
 
 def combine_coco_instances(annotation_path):
 
@@ -141,7 +175,7 @@ def combine_coco_instances(annotation_path):
                      'images': train_instances['images'] + val_instances['images'],
                      'annotations': val_instances['annotations'] + train_instances['annotations']}
 
-    return all_instances 
+    return all_instances
 
 class CHAIR(object):
 
@@ -162,18 +196,18 @@ class CHAIR(object):
                 self.inverse_synonym_dict[s] = synonym[0]
 
         #Some hard coded rules for implementing CHAIR metrics on MSCOCO
-        
+
         #common 'double words' in MSCOCO that should be treated as a single word
         coco_double_words = ['motor bike', 'motor cycle', 'air plane', 'traffic light', 'street light', 'traffic signal', 'stop light', 'fire hydrant', 'stop sign', 'parking meter', 'suit case', 'sports ball', 'baseball bat', 'baseball glove', 'tennis racket', 'wine glass', 'hot dog', 'cell phone', 'mobile phone', 'teddy bear', 'hair drier', 'potted plant', 'bow tie', 'laptop computer', 'stove top oven', 'hot dog', 'teddy bear', 'home plate', 'train track']
-        
+
         #Hard code some rules for special cases in MSCOCO
         #qualifiers like 'baby' or 'adult' animal will lead to a false fire for the MSCOCO object 'person'.  'baby bird' --> 'bird'.
         animal_words = ['bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'animal', 'cub']
         #qualifiers like 'passenger' vehicle will lead to a false fire for the MSCOCO object 'person'.  'passenger jet' --> 'jet'.
         vehicle_words = ['jet', 'train']
-        
+
         #double_word_dict will map double words to the word they should be treated as in our analysis
-        
+
         self.double_word_dict = {}
         for double_word in coco_double_words:
             self.double_word_dict[double_word] = double_word
@@ -185,7 +219,7 @@ class CHAIR(object):
         self.double_word_dict['bow tie'] = 'tie'
         self.double_word_dict['toilet seat'] = 'toilet'
         self.double_word_dict['wine glas'] = 'wine glass'
-        
+
         self.get_annotations()
 
     def _load_generated_captions_into_evaluator(self, cap_file, image_id_key, caption_key):
@@ -193,7 +227,7 @@ class CHAIR(object):
         '''
         Meant to save time so imid_to_objects does not always need to be recomputed.
         '''
-        #Read in captions        
+        #Read in captions
         self.caps, self.eval_imids = load_generated_captions(cap_file, image_id_key, caption_key)
         assert len(self.caps) == len(self.eval_imids)
 
@@ -210,12 +244,12 @@ class CHAIR(object):
             return None
 
     def caption_to_words(self, caption):
-    
+
         '''
         Input: caption
         Output: MSCOCO words in the caption
         '''
-    
+
         #standard preprocessing
         words = nltk.word_tokenize(caption.lower())
         tagged_sent = nltk.pos_tag(words)
@@ -226,25 +260,25 @@ class CHAIR(object):
             lemmas_sent.append(wnl.lemmatize(tag[0], pos=wordnet_pos))
         # words = [singularize(w) for w in words]
         words = lemmas_sent
-    
+
         #replace double words
         i = 0
         double_words = []
         idxs = []
         while i < len(words):
-           idxs.append(i) 
+           idxs.append(i)
            double_word = ' '.join(words[i:i+2])
-           if double_word in self.double_word_dict: 
+           if double_word in self.double_word_dict:
                double_words.append(self.double_word_dict[double_word])
                i += 2
            else:
                double_words.append(words[i])
                i += 1
         words = double_words
-    
+
         #toilet seat is not chair (sentences like "the seat of the toilet" will fire for "chair" if we do not include this line)
         if ('toilet' in words) & ('seat' in words): words = [word for word in words if word != 'seat']
-    
+
         #get synonyms for all words in the caption
         idxs = [idxs[idx] for idx, word in enumerate(words) \
                 if word in set(self.mscoco_objects)]
@@ -264,32 +298,32 @@ class CHAIR(object):
         segment_annotations = coco_segments['annotations']
 
         #make dict linking object name to ids
-        id_to_name = {} #dict with id to synsets 
+        id_to_name = {} #dict with id to synsets
         for cat in coco_segments['categories']:
             id_to_name[cat['id']] = cat['name']
 
         for i, annotation in enumerate(segment_annotations):
-            sys.stdout.write("\rGetting annotations for %d/%d segmentation masks" 
+            sys.stdout.write("\rGetting annotations for %d/%d segmentation masks"
                               %(i, len(segment_annotations)))
             imid = annotation['image_id']
-            
+
             node_word = self.inverse_synonym_dict[id_to_name[annotation['category_id']]]
             self.imid_to_objects[imid].append(node_word)
         print("\n")
 
     def get_annotations_from_captions(self):
         '''
-        Add objects taken from MSCOCO ground truth captions 
+        Add objects taken from MSCOCO ground truth captions
         '''
 
         coco_caps = combine_coco_captions(self.coco_path)
         caption_annotations = coco_caps['annotations']
 
         for i, annotation in enumerate(caption_annotations):
-            sys.stdout.write('\rGetting annotations for %d/%d ground truth captions' 
+            sys.stdout.write('\rGetting annotations for %d/%d ground truth captions'
                               %(i, len(coco_caps['annotations'])))
             imid = annotation['image_id']
-            
+
             _, node_words, _, _ = self.caption_to_words(annotation['caption'])
             # note here is update, so call get_annotations_from_segments first
             self.imid_to_objects[imid].extend(node_words)
@@ -301,8 +335,8 @@ class CHAIR(object):
         '''
         Get annotations from both segmentation and captions.  Need both annotation types for CHAIR metric.
         '''
-        
-        self.get_annotations_from_segments() 
+
+        self.get_annotations_from_segments()
         self.get_annotations_from_captions()
         # deduplicate
         for imid in self.imid_to_objects:
@@ -313,40 +347,40 @@ class CHAIR(object):
         Given ground truth objects and generated captions, determine which sentences have hallucinated words.
         '''
         self._load_generated_captions_into_evaluator(cap_file, image_id_key, caption_key)
-        
+
         imid_to_objects = self.imid_to_objects
         caps = self.caps
         eval_imids = self.eval_imids
- 
+
         num_caps = 0.
         num_hallucinated_caps = 0.
         hallucinated_word_count = 0.
         coco_word_count = 0.
         len_caps = 0.
-        
+
         # :add:
         num_recall_gt_objects = 0.
         num_gt_objects = 0.
 
-        output = {'sentences': []} 
-        
+        output = {'sentences': []}
+
         for i in tqdm.trange(len(caps)):
             cap :str = caps[i]
             imid :int = eval_imids[i]
-    
+
             #get all words in the caption, as well as corresponding node word
             # pos = cap.rfind('.')
             # cap = cap[:pos+1]
-            words, node_words, idxs, raw_words = self.caption_to_words(cap) 
- 
+            words, node_words, idxs, raw_words = self.caption_to_words(cap)
+
             gt_objects = imid_to_objects[imid]
-            cap_dict = {'image_id': imid, 
+            cap_dict = {'image_id': imid,
                         'caption': cap,
                         'mscoco_hallucinated_words': [],
                         'mscoco_gt_words': list(gt_objects),
                         'mscoco_generated_words': list(node_words),
-                        'hallucination_idxs': [], 
-                        'words': raw_words 
+                        'hallucination_idxs': [],
+                        'words': raw_words
                         }
 
             # :add:
@@ -355,62 +389,62 @@ class CHAIR(object):
                                    'Recall': 0,
                                    'Len': 0,
                                    }
- 
+
             #count hallucinated words
-            coco_word_count += len(node_words) 
+            coco_word_count += len(node_words)
             hallucinated = False
-            
+
             # add
             recall_gt_objects = set()
             for word, node_word, idx in zip(words, node_words, idxs):
                 if node_word not in gt_objects:
-                    hallucinated_word_count += 1 
+                    hallucinated_word_count += 1
                     cap_dict['mscoco_hallucinated_words'].append((word, node_word))
                     cap_dict['hallucination_idxs'].append(idx)
                     hallucinated = True
                 else:
                     recall_gt_objects.add(node_word)
-    
+
             #count hallucinated caps
             num_caps += 1
             len_caps += len(raw_words)
             if hallucinated:
                num_hallucinated_caps += 1
-            
+
             # add
             num_gt_objects += len(gt_objects)
             num_recall_gt_objects += len(recall_gt_objects)
-    
+
             cap_dict['metrics']['CHAIRs'] = int(hallucinated)
             cap_dict['metrics']['CHAIRi'] = 0.
             cap_dict['metrics']['Recall'] = 0.
             cap_dict['metrics']['Len'] = 0.
 
-            
+
             if len(words) > 0:
                 cap_dict['metrics']['CHAIRi'] = len(cap_dict['mscoco_hallucinated_words'])/float(len(words))
-            
+
             # add
             if len(gt_objects) > 0:
                 cap_dict['metrics']['Recall'] = len(recall_gt_objects) / len(gt_objects)
-   
+
             output['sentences'].append(cap_dict)
- 
+
         chair_s = (num_hallucinated_caps/num_caps)
         chair_i = (hallucinated_word_count/coco_word_count)
         # add
         recall = num_recall_gt_objects / num_gt_objects
         avg_len = (0.01*len_caps/num_caps)
-    
+
         output['overall_metrics'] = {'CHAIRs': chair_s,
                                      'CHAIRi': chair_i,
                                      'Recall': recall,
                                      'Len': avg_len,}
-    
-        return output 
+
+        return output
 
 def load_generated_captions(cap_file, image_id_key:str, caption_key:str):
-    #Read in captions        
+    #Read in captions
     # it should be list of dict
     ext = os.path.splitext(cap_file)[-1]
     if ext == '.json':
@@ -422,42 +456,173 @@ def load_generated_captions(cap_file, image_id_key:str, caption_key:str):
 
     # list of int
     imids = [obj[image_id_key] for obj in caps]
-    
+
     # list of str
     caps = [obj[caption_key] for obj in caps]
-       
+
     return caps, imids
 
-def save_hallucinated_words(cap_file, cap_dict): 
+def save_hallucinated_words(cap_file, cap_dict):
     with open(cap_file, 'w') as f:
         json.dump(cap_dict, f, indent=2, ensure_ascii=False)
 
 def print_metrics(hallucination_cap_dict, quiet=False):
     sentence_metrics = hallucination_cap_dict['overall_metrics']
-    
+
     for k, v in sentence_metrics.items():
         k_str = str(k).ljust(10)
         v_str = f'{v * 100:.01f}'
         print(k_str, v_str, sep=': ')
- 
+
+
+def get_chair_evaluator(coco_path, cache_file=None, use_cache=True):
+    """
+    获取或创建 CHAIR 评估器对象，支持缓存机制
+
+    Args:
+        coco_path: COCO annotations 目录路径
+        cache_file: 缓存文件路径（如果为 None，则不使用缓存）
+        use_cache: 是否使用缓存（如果为 False，即使缓存存在也会重新创建）
+
+    Returns:
+        CHAIR: CHAIR 评估器对象
+    """
+    if use_cache and cache_file and os.path.exists(cache_file):
+        try:
+            evaluator = pickle.load(open(cache_file, 'rb'))
+            print(f"✓ 从缓存加载 CHAIR 评估器: {cache_file}")
+            return evaluator
+        except Exception as e:
+            print(f"⚠️  警告: 加载缓存失败: {e}，将重新创建评估器")
+
+    print(f"正在创建 CHAIR 评估器（这可能需要一些时间）...")
+    evaluator = CHAIR(coco_path)
+
+    if cache_file:
+        try:
+            pickle.dump(evaluator, open(cache_file, 'wb'))
+            print(f"✓ CHAIR 评估器已缓存到: {cache_file}")
+        except Exception as e:
+            print(f"⚠️  警告: 保存缓存失败: {e}")
+
+    return evaluator
+
+
+def evaluate_chair(cap_file, coco_path, image_id_key="image_id", caption_key="caption",
+                   cache_file=None, use_cache=True, save_path=None, verbose=True):
+    """
+    计算 CHAIR 指标的高级接口函数
+
+    Args:
+        cap_file: 描述文件路径（JSON 或 JSONL 格式）
+        coco_path: COCO annotations 目录路径
+        image_id_key: 描述文件中图像 ID 的键名（默认："image_id"）
+        caption_key: 描述文件中描述的键名（默认："caption"）
+        cache_file: 缓存文件路径（可选，用于加速重复评估）
+        use_cache: 是否使用缓存（默认：True）
+        save_path: 保存详细结果的路径（可选，JSON 格式）
+        verbose: 是否输出详细信息（默认：True）
+
+    Returns:
+        dict: 包含以下键的字典：
+            - 'overall_metrics': 总体指标（CHAIRs, CHAIRi, Recall, Len）
+            - 'sentences': 每个句子的详细结果
+            - 'evaluator': CHAIR 评估器对象（可用于后续评估）
+    """
+    # 获取或创建评估器
+    evaluator = get_chair_evaluator(coco_path, cache_file, use_cache)
+
+    # 计算 CHAIR 指标
+    if verbose:
+        print(f"\n正在计算 CHAIR 指标...")
+        print(f"  描述文件: {cap_file}")
+        print(f"  图像 ID 键: {image_id_key}")
+        print(f"  描述键: {caption_key}")
+
+    results = evaluator.compute_chair(cap_file, image_id_key, caption_key)
+
+    # 打印指标
+    if verbose:
+        print("\n" + "=" * 80)
+        print("CHAIR 评估结果")
+        print("=" * 80)
+        print_metrics(results)
+        print("=" * 80)
+
+    # 保存详细结果
+    if save_path:
+        save_hallucinated_words(save_path, results)
+        if verbose:
+            print(f"\n✓ 详细结果已保存到: {save_path}")
+
+    # 返回结果和评估器（评估器可以重复使用）
+    results['evaluator'] = evaluator
+    return results
+
+
+def evaluate_chair_from_dict(captions_dict, coco_path, image_id_key="image_id", caption_key="caption",
+                             cache_file=None, use_cache=True, save_path=None, verbose=True):
+    """
+    从字典列表计算 CHAIR 指标（不需要先保存到文件）
+
+    Args:
+        captions_dict: 描述字典列表，每个字典包含 image_id 和 caption
+        coco_path: COCO annotations 目录路径
+        image_id_key: 字典中图像 ID 的键名（默认："image_id"）
+        caption_key: 字典中描述的键名（默认："caption"）
+        cache_file: 缓存文件路径（可选）
+        use_cache: 是否使用缓存（默认：True）
+        save_path: 保存详细结果的路径（可选）
+        verbose: 是否输出详细信息（默认：True）
+
+    Returns:
+        dict: 包含 overall_metrics 和 sentences 的字典
+    """
+    import tempfile
+
+    # 创建临时文件
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8') as f:
+        for item in captions_dict:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+        temp_file = f.name
+
+    try:
+        # 使用临时文件调用 evaluate_chair
+        results = evaluate_chair(
+            cap_file=temp_file,
+            coco_path=coco_path,
+            image_id_key=image_id_key,
+            caption_key=caption_key,
+            cache_file=cache_file,
+            use_cache=use_cache,
+            save_path=save_path,
+            verbose=verbose
+        )
+        return results
+    finally:
+        # 清理临时文件
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    
+
     parser.add_argument("--cap_file", type=str, default='',
                         help="path towards json or jsonl saving image ids and their captions in list of dict.")
     parser.add_argument("--image_id_key", type=str, default="image_id",
                         help="in each dict of cap_file, which key stores image id of coco.")
     parser.add_argument("--caption_key", type=str, default="caption",
                         help="in each dict of cap_file, which key stores caption of the image.")
-    
+
     parser.add_argument("--cache", type=str, default="chair.pkl",
                         help="pre inited CHAIR evaluator object, for fast loading.")
     parser.add_argument("--coco_path", type=str, default='.../val2014/annotations',
                         help="only use for regenerating CHAIR evaluator object, will be ignored if uses cached evaluator.")
-    
+
     parser.add_argument("--save_path", type=str, default="...",
                         help="saving CHAIR evaluate and results to json, useful for debugging the caption model.")
-    
+
     args = parser.parse_args()
 
     if args.cache and os.path.exists(args.cache):
@@ -469,10 +634,10 @@ if __name__ == '__main__':
         pickle.dump(evaluator, open(args.cache, 'wb'))
         print(f"cached evaluator to: {args.cache}")
 
-    cap_dict = evaluator.compute_chair(args.cap_file, args.image_id_key, args.caption_key) 
-    
+    cap_dict = evaluator.compute_chair(args.cap_file, args.image_id_key, args.caption_key)
+
     print_metrics(cap_dict)
-    
+
     if args.save_path:
         save_hallucinated_words(args.save_path, cap_dict)
 

@@ -169,12 +169,24 @@ def auto_detect_questions(probe_exp_dir="probe_exp/train_set", split="adversaria
                         object_word = object_word[:-len(suffix)]
                 object_word = object_word.strip()
 
+            # 转换标签：Yes -> 1 (存在), No -> 0 (不存在)
+            raw_label = sample.get('label', '').lower().strip()
+            if raw_label == 'yes':
+                label = 1  # 物体存在
+            elif raw_label == 'no':
+                label = 0  # 物体不存在
+            else:
+                # 如果标签格式异常，给出警告并使用默认值
+                print(f"⚠️  警告: 未知标签格式 '{sample.get('label', '')}'，默认设为 0")
+                label = 0
+
             all_questions.append({
                 "question_id": sample['question_id'],
                 "image": str(image_path),
                 "text": object_word,  # 物体词
-                "label": 1 if sample['label'].lower().strip() == 'yes' else 0,  # 转换为 0/1
-                "question": question_text  # 保留原始问题
+                "label": label,  # 0/1: 0=不存在(No), 1=存在(Yes)
+                "question": question_text,  # 保留原始问题
+                "raw_label": sample.get('label', '')  # 保留原始标签用于调试
             })
 
     all_questions.sort(key=lambda x: x['question_id'])
@@ -340,7 +352,7 @@ def split_dataset(dataset: ProbingDataset, train_ratio: float = 0.5):
 
 def train_classifiers(dataset: ProbingDataset, num_layers: int, hidden_size: int,
                      device: str, num_epochs: int = 10, batch_size: int = 32,
-                     learning_rate: float = 0.001, verbose: bool = False):
+                     learning_rate: float = 0.001, weight_decay: float = 0.01, verbose: bool = False):
     """
     训练所有层的分类器
 
@@ -361,7 +373,7 @@ def train_classifiers(dataset: ProbingDataset, num_layers: int, hidden_size: int
 
     for layer_idx in range(num_layers):
         classifier = LayerClassifier(hidden_size).to(device)
-        optimizer = optim.Adam(classifier.parameters(), lr=learning_rate)
+        optimizer = optim.Adam(classifier.parameters(), lr=learning_rate, weight_decay=weight_decay)
         classifiers[layer_idx] = classifier
         optimizers[layer_idx] = optimizer
 
@@ -402,10 +414,22 @@ def train_classifiers(dataset: ProbingDataset, num_layers: int, hidden_size: int
             avg_loss = np.mean(epoch_losses[layer_idx])
             train_losses[layer_idx].append(avg_loss)
 
-        if verbose:
-            print(f"Epoch {epoch+1}: 平均损失 = {np.mean([np.mean(epoch_losses[i]) for i in range(num_layers)]):.4f}")
+        # 记录并显示训练进度
+        avg_loss = np.mean([np.mean(epoch_losses[i]) for i in range(num_layers)])
+        if verbose or (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"Epoch {epoch+1}/{num_epochs}: 平均损失 = {avg_loss:.4f}")
+            # 显示损失最高的几层
+            layer_avg_losses = {i: np.mean(epoch_losses[i]) for i in range(num_layers)}
+            top_loss_layers = sorted(layer_avg_losses.items(), key=lambda x: x[1], reverse=True)[:3]
+            if verbose:
+                print(f"  损失最高的3层: {', '.join([f'Layer {l}: {loss:.4f}' for l, loss in top_loss_layers])}")
 
     print("✓ 分类器训练完成")
+
+    # 显示最终训练损失
+    final_losses = {i: train_losses[i][-1] if train_losses[i] else 0.0 for i in range(num_layers)}
+    print(f"最终训练损失范围: {min(final_losses.values()):.4f} - {max(final_losses.values()):.4f}")
+
     return classifiers, train_losses
 
 
@@ -501,12 +525,14 @@ def main():
                        help="设备")
 
     # 训练参数
-    parser.add_argument("--num-epochs", type=int, default=10,
-                       help="训练轮数")
+    parser.add_argument("--num-epochs", type=int, default=50,
+                       help="训练轮数（默认: 50，增加轮数以获得更好的效果）")
     parser.add_argument("--batch-size", type=int, default=32,
                        help="批次大小")
     parser.add_argument("--learning-rate", type=float, default=0.001,
                        help="学习率")
+    parser.add_argument("--weight-decay", type=float, default=0.01,
+                       help="权重衰减（L2正则化）")
 
     # 输出参数
     parser.add_argument("--output-dir", type=str, default=None,
@@ -582,17 +608,49 @@ def main():
     print(f"✓ 数据集创建完成: {len(full_dataset)} 个样本")
 
     # 分割数据集（前一半训练，后一半测试）
-    print(f"\n[4/5] 分割数据集...")
+    print(f"\n[4/6] 分割数据集...")
     train_dataset, test_dataset = split_dataset(full_dataset, train_ratio=0.5)
     print(f"  - 训练集: {len(train_dataset)} 个样本")
     print(f"  - 测试集: {len(test_dataset)} 个样本")
+
+    # 检查数据标签分布
+    train_labels = [sample['label'] for sample in train_dataset.data]
+    test_labels = [sample['label'] for sample in test_dataset.data]
+    train_pos = sum(train_labels)  # label=1 (Yes, 存在)
+    train_neg = len(train_labels) - train_pos  # label=0 (No, 不存在)
+    test_pos = sum(test_labels)
+    test_neg = len(test_labels) - test_pos
+    print(f"\n数据标签分布:")
+    print(f"  标签定义: 0 = No (不存在), 1 = Yes (存在)")
+    print(f"  - 训练集: 正样本(Yes/1)={train_pos} ({train_pos/len(train_labels)*100:.1f}%), 负样本(No/0)={train_neg} ({train_neg/len(train_labels)*100:.1f}%)")
+    print(f"  - 测试集: 正样本(Yes/1)={test_pos} ({test_pos/len(test_labels)*100:.1f}%), 负样本(No/0)={test_neg} ({test_neg/len(test_labels)*100:.1f}%)")
+
+    # 如果数据严重不平衡，给出警告
+    train_imbalance = abs(train_pos - train_neg) / len(train_labels)
+    test_imbalance = abs(test_pos - test_neg) / len(test_labels)
+    if train_imbalance > 0.3:
+        print(f"  ⚠️  警告: 训练集标签分布不平衡 (差异={train_imbalance*100:.1f}%)，可能影响训练效果")
+        print(f"     建议: 使用类别权重或平衡采样")
+    if test_imbalance > 0.3:
+        print(f"  ⚠️  警告: 测试集标签分布不平衡 (差异={test_imbalance*100:.1f}%)")
+
+    # 如果数据完全平衡，也给出提示
+    if train_imbalance < 0.05 and test_imbalance < 0.05:
+        print(f"  ✓ 数据标签分布较为平衡")
 
     # 训练分类器（使用训练集）
     print(f"\n[5/6] 训练分类器（使用训练集）...")
     classifiers, train_losses = train_classifiers(
         train_dataset, num_layers, hidden_size, args.device,
-        args.num_epochs, args.batch_size, args.learning_rate, verbose=args.verbose
+        args.num_epochs, args.batch_size, args.learning_rate,
+        args.weight_decay, verbose=args.verbose
     )
+
+    # 在训练集上评估，检查是否过拟合
+    print(f"\n在训练集上评估（检查过拟合）...")
+    train_accuracies = evaluate_classifiers(classifiers, train_dataset, args.device, verbose=False)
+    print(f"训练集平均准确率: {np.mean(list(train_accuracies.values())):.4f}")
+    print(f"训练集最高准确率: {max(train_accuracies.values()):.4f} @ Layer {max(train_accuracies, key=train_accuracies.get)}")
 
     # 评估分类器（使用测试集）
     print(f"\n[6/6] 评估分类器（使用测试集）...")
@@ -612,10 +670,12 @@ def main():
         "hidden_size": hidden_size,
         "accuracies": accuracies,
         "train_losses": {str(k): v for k, v in train_losses.items()},
+        "train_accuracies": train_accuracies,
         "config": {
             "num_epochs": args.num_epochs,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
             "train_ratio": 0.5
         }
     }
@@ -635,9 +695,25 @@ def main():
     print(f"训练集样本数: {len(train_dataset)}")
     print(f"测试集样本数: {len(test_dataset)}")
     print(f"层数范围: 0 - {num_layers-1}")
-    print(f"最高准确率: {max(accuracies.values()):.4f} @ Layer {max(accuracies, key=accuracies.get)}")
-    print(f"最低准确率: {min(accuracies.values()):.4f} @ Layer {min(accuracies, key=accuracies.get)}")
-    print(f"平均准确率: {np.mean(list(accuracies.values())):.4f}")
+    print(f"\n测试集结果:")
+    print(f"  最高准确率: {max(accuracies.values()):.4f} @ Layer {max(accuracies, key=accuracies.get)}")
+    print(f"  最低准确率: {min(accuracies.values()):.4f} @ Layer {min(accuracies, key=accuracies.get)}")
+    print(f"  平均准确率: {np.mean(list(accuracies.values())):.4f}")
+    print(f"\n训练集结果（参考）:")
+    print(f"  最高准确率: {max(train_accuracies.values()):.4f} @ Layer {max(train_accuracies, key=train_accuracies.get)}")
+    print(f"  平均准确率: {np.mean(list(train_accuracies.values())):.4f}")
+
+    # 分析结果
+    test_avg = np.mean(list(accuracies.values()))
+    train_avg = np.mean(list(train_accuracies.values()))
+    if test_avg < 0.55:
+        print(f"\n⚠️  警告: 测试集准确率 ({test_avg:.4f}) 接近随机猜测 (0.5)，可能的原因:")
+        print(f"   1. 训练轮数不足（当前: {args.num_epochs}）")
+        print(f"   2. 隐藏状态特征区分度不够")
+        print(f"   3. 数据标签分布不平衡")
+        print(f"   4. 学习率或正则化参数需要调整")
+    elif abs(train_avg - test_avg) > 0.1:
+        print(f"\n⚠️  警告: 训练集和测试集准确率差距较大，可能存在过拟合")
     print("=" * 80)
 
     # 打印每层准确率（表格形式）
