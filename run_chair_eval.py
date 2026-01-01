@@ -311,24 +311,35 @@ def eval_model(args):
     print(f"\n[3/3] 开始生成描述...")
     prompt = "Please describe this image in detail."
 
-    # 计算需要输出详细信息的样本索引(最多10个，均匀分布)
+    # 计算需要输出详细信息的样本索引（如果启用debug模式）
+    debug_mode = getattr(args, 'debug', False)
     total_samples = len(images)
-    max_debug_samples = min(10, total_samples)
-    if total_samples > 0:
-        debug_indices = set()
-        if total_samples <= max_debug_samples:
+    debug_indices = set()
+
+    if debug_mode:
+        # Debug模式：输出所有样本的详细信息（因为只有10个样本）
+        if total_samples > 0:
             debug_indices = set(range(total_samples))
-        else:
-            step = total_samples / max_debug_samples
-            for i in range(max_debug_samples):
-                idx = int(i * step)
-                debug_indices.add(idx)
+            print(f"Debug模式: 将输出所有 {len(debug_indices)} 个样本的详细信息")
+    else:
+        # 非Debug模式：最多输出10个样本的详细信息（均匀分布）
+        max_debug_samples = min(10, total_samples)
+        if total_samples > 0:
+            if total_samples <= max_debug_samples:
+                debug_indices = set(range(total_samples))
+            else:
+                step = total_samples / max_debug_samples
+                for i in range(max_debug_samples):
+                    idx = int(i * step)
+                    debug_indices.add(idx)
+            if len(debug_indices) > 0:
+                print(f"将输出 {len(debug_indices)} 个样本的详细信息用于调试（样本索引: {sorted(debug_indices)}）")
 
     for sample_idx, image_info in enumerate(tqdm(images, desc="处理进度")):
         image_id = image_info["image_id"]
         image_file = image_info["image_path"]
 
-        # 判断是否需要输出详细信息
+        # 判断是否需要输出详细信息（debug模式或选中的样本）
         verbose = sample_idx in debug_indices
 
         if verbose:
@@ -415,9 +426,34 @@ def eval_model(args):
             print("自动计算 CHAIR 指标...")
             print("=" * 80)
 
-            # 生成结果文件路径
+            # 生成结果文件路径（参考run_pope_eval.py的路径结构）
             results_dir = os.path.dirname(output_file)
+            # 保存详细结果（包含所有中间信息）
             chair_results_file = output_file.replace('.jsonl', '_chair_results.json')
+            # 保存错误样本（如果有）
+            chair_errors_file = output_file.replace('.jsonl', '_chair_errors.json')
+
+            # 计算需要输出详细信息的样本索引（如果启用debug模式）
+            debug_indices = None
+            if getattr(args, 'debug', False):
+                # 读取生成的描述文件，确定样本数量
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    total_samples = sum(1 for _ in f)
+
+                if total_samples > 0:
+                    # 如果样本数少于等于10个，全部输出详细信息
+                    if total_samples <= 10:
+                        debug_indices = set(range(total_samples))
+                    else:
+                        # 均匀分布选择样本（最多10个）
+                        max_debug_samples = min(10, total_samples)
+                        step = total_samples / max_debug_samples
+                        debug_indices = set()
+                        for i in range(max_debug_samples):
+                            idx = int(i * step)
+                            debug_indices.add(idx)
+
+                    print(f"Debug模式: 将输出 {len(debug_indices)} 个样本的详细信息（样本索引: {sorted(debug_indices)}）")
 
             # 调用 evaluate_chair 函数
             results = evaluate_chair(
@@ -428,7 +464,9 @@ def eval_model(args):
                 cache_file=os.path.join(results_dir, "chair_evaluator.pkl"),
                 use_cache=True,
                 save_path=chair_results_file,
-                verbose=True
+                verbose=True,
+                debug=getattr(args, 'debug', False),
+                debug_indices=debug_indices
             )
 
             print("\n" + "=" * 80)
@@ -436,6 +474,21 @@ def eval_model(args):
             print("=" * 80)
             print(f"详细结果文件: {chair_results_file}")
             print(f"输出文件: {output_file}")
+
+            # 保存错误样本（包含幻觉的样本）
+            if results and 'sentences' in results:
+                error_samples = [
+                    s for s in results['sentences']
+                    if s.get('metrics', {}).get('CHAIRs', 0) > 0
+                ]
+                if error_samples:
+                    with open(chair_errors_file, 'w', encoding='utf-8') as f:
+                        json.dump({
+                            'error_count': len(error_samples),
+                            'total_samples': len(results['sentences']),
+                            'error_samples': error_samples
+                        }, f, indent=2, ensure_ascii=False)
+                    print(f"错误样本文件: {chair_errors_file} ({len(error_samples)} 个包含幻觉的样本)")
 
         except Exception as e:
             print(f"\n⚠️  自动计算 CHAIR 指标时出错: {e}")
@@ -477,7 +530,7 @@ def main():
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
-        "num_samples": 40,  # 0 表示处理所有图像
+        "num_samples": 10,  # 0 表示处理所有图像
         "seed": 42
     }
 
@@ -530,6 +583,8 @@ def main():
     parser.add_argument("--seed", type=int, default=default_config["seed"], help="随机种子")
     parser.add_argument("--no-auto-evaluate", action="store_true", default=False,
                        help="禁用自动计算 CHAIR 指标（默认会自动计算）")
+    parser.add_argument("--debug", action="store_true", default=False,
+                       help="启用debug模式，输出每个样本的详细处理过程")
 
     args = parser.parse_args()
     set_seed(args.seed)

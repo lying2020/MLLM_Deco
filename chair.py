@@ -27,11 +27,32 @@ try:
     from nltk.stem import WordNetLemmatizer
 
     # 检查并下载必要的 nltk 数据
+    # 新版本的 NLTK (3.8.1+) 使用 punkt_tab，旧版本使用 punkt
+    punkt_available = False
     try:
-        nltk.data.find('tokenizers/punkt')
+        nltk.data.find('tokenizers/punkt_tab')
+        punkt_available = True
     except LookupError:
+        try:
+            nltk.data.find('tokenizers/punkt')
+            punkt_available = True
+        except LookupError:
+            pass
+
+    if not punkt_available:
         print("正在下载 NLTK punkt tokenizer 数据...")
-        nltk.download('punkt', quiet=True)
+        # 优先尝试下载新版本的 punkt_tab
+        try:
+            nltk.download('punkt_tab', quiet=True)
+            print("✓ 已下载 punkt_tab")
+        except Exception as e:
+            # 如果失败，尝试旧版本的 punkt
+            try:
+                nltk.download('punkt', quiet=True)
+                print("✓ 已下载 punkt (旧版本)")
+            except Exception as e2:
+                print(f"⚠️  警告: 下载 punkt 数据失败: {e2}")
+                raise
 
     try:
         nltk.data.find('taggers/averaged_perceptron_tagger')
@@ -53,6 +74,8 @@ except ImportError as e:
     print("  pip install nltk")
     print("")
     print("安装后，还需要下载 NLTK 数据:")
+    print("  python -c \"import nltk; nltk.download('punkt_tab'); nltk.download('averaged_perceptron_tagger'); nltk.download('wordnet')\"")
+    print("  或者（旧版本 NLTK < 3.8.1）:")
     print("  python -c \"import nltk; nltk.download('punkt'); nltk.download('averaged_perceptron_tagger'); nltk.download('wordnet')\"")
     print("=" * 80)
     raise
@@ -342,9 +365,16 @@ class CHAIR(object):
         for imid in self.imid_to_objects:
             self.imid_to_objects[imid] = set(self.imid_to_objects[imid])
 
-    def compute_chair(self, cap_file, image_id_key, caption_key):
+    def compute_chair(self, cap_file, image_id_key, caption_key, debug=False, debug_indices=None):
         '''
         Given ground truth objects and generated captions, determine which sentences have hallucinated words.
+
+        Args:
+            cap_file: 描述文件路径
+            image_id_key: 图像ID键名
+            caption_key: 描述键名
+            debug: 是否启用debug模式，输出详细信息
+            debug_indices: 需要输出详细信息的样本索引集合（如果为None且debug=True，则输出所有样本）
         '''
         self._load_generated_captions_into_evaluator(cap_file, image_id_key, caption_key)
 
@@ -364,9 +394,17 @@ class CHAIR(object):
 
         output = {'sentences': []}
 
+        # 确定需要输出详细信息的样本
+        if debug and debug_indices is None:
+            debug_indices = set(range(len(caps)))
+        elif not debug:
+            debug_indices = set()
+
         for i in tqdm.trange(len(caps)):
             cap :str = caps[i]
             imid :int = eval_imids[i]
+
+            is_debug = i in debug_indices
 
             #get all words in the caption, as well as corresponding node word
             # pos = cap.rfind('.')
@@ -374,13 +412,29 @@ class CHAIR(object):
             words, node_words, idxs, raw_words = self.caption_to_words(cap)
 
             gt_objects = imid_to_objects[imid]
+
+            # Debug输出：处理过程
+            if is_debug:
+                print("\n" + "=" * 80)
+                print(f"[样本 {i+1}/{len(caps)}] Image ID: {imid}")
+                print("=" * 80)
+                print(f"原始描述: {cap}")
+                print(f"\n[1] 分词和预处理:")
+                print(f"  - 原始分词: {raw_words[:20]}..." if len(raw_words) > 20 else f"  - 原始分词: {raw_words}")
+                print(f"  - 词形还原后: {words[:20]}..." if len(words) > 20 else f"  - 词形还原后: {words}")
+                print(f"  - 识别到的MSCOCO对象: {node_words}")
+                print(f"  - 对象数量: {len(node_words)}")
+
             cap_dict = {'image_id': imid,
                         'caption': cap,
                         'mscoco_hallucinated_words': [],
                         'mscoco_gt_words': list(gt_objects),
                         'mscoco_generated_words': list(node_words),
                         'hallucination_idxs': [],
-                        'words': raw_words
+                        'words': raw_words,
+                        'processed_words': words,  # 添加处理后的词
+                        'node_words': node_words,  # 添加标准化后的对象名
+                        'word_indices': idxs  # 添加词的位置索引
                         }
 
             # :add:
@@ -396,14 +450,32 @@ class CHAIR(object):
 
             # add
             recall_gt_objects = set()
+            hallucinated_details = []  # 详细幻觉信息
+
+            if is_debug:
+                print(f"\n[2] Ground Truth 对象:")
+                print(f"  - GT对象集合: {sorted(gt_objects)}")
+                print(f"  - GT对象数量: {len(gt_objects)}")
+                print(f"\n[3] 幻觉检测:")
+
             for word, node_word, idx in zip(words, node_words, idxs):
                 if node_word not in gt_objects:
                     hallucinated_word_count += 1
                     cap_dict['mscoco_hallucinated_words'].append((word, node_word))
                     cap_dict['hallucination_idxs'].append(idx)
                     hallucinated = True
+                    hallucinated_details.append({
+                        'word': word,
+                        'node_word': node_word,
+                        'position': idx,
+                        'reason': f"'{node_word}' 不在GT对象集合中"
+                    })
+                    if is_debug:
+                        print(f"  ✗ 幻觉: '{word}' -> '{node_word}' (位置: {idx})")
                 else:
                     recall_gt_objects.add(node_word)
+                    if is_debug:
+                        print(f"  ✓ 正确: '{word}' -> '{node_word}' (位置: {idx})")
 
             #count hallucinated caps
             num_caps += 1
@@ -420,6 +492,11 @@ class CHAIR(object):
             cap_dict['metrics']['Recall'] = 0.
             cap_dict['metrics']['Len'] = 0.
 
+            # 添加详细的幻觉信息
+            cap_dict['hallucination_details'] = hallucinated_details
+            cap_dict['recall_gt_objects'] = list(recall_gt_objects)
+            cap_dict['recall_count'] = len(recall_gt_objects)
+
 
             if len(words) > 0:
                 cap_dict['metrics']['CHAIRi'] = len(cap_dict['mscoco_hallucinated_words'])/float(len(words))
@@ -427,6 +504,22 @@ class CHAIR(object):
             # add
             if len(gt_objects) > 0:
                 cap_dict['metrics']['Recall'] = len(recall_gt_objects) / len(gt_objects)
+
+            # 计算平均长度（以0.01为单位）
+            cap_dict['metrics']['Len'] = len(raw_words) * 0.01
+
+            # Debug输出：结果摘要
+            if is_debug:
+                print(f"\n[4] 结果摘要:")
+                print(f"  - 是否包含幻觉: {'是' if hallucinated else '否'}")
+                print(f"  - 幻觉对象数量: {len(cap_dict['mscoco_hallucinated_words'])}")
+                print(f"  - 正确对象数量: {len(recall_gt_objects)}")
+                print(f"  - 总词数: {len(raw_words)}")
+                print(f"  - CHAIRs (句子级别): {cap_dict['metrics']['CHAIRs']}")
+                print(f"  - CHAIRi (实例级别): {cap_dict['metrics']['CHAIRi']:.4f}")
+                print(f"  - Recall (召回率): {cap_dict['metrics']['Recall']:.4f}")
+                print(f"  - Len (平均长度): {cap_dict['metrics']['Len']:.4f}")
+                print("=" * 80)
 
             output['sentences'].append(cap_dict)
 
@@ -463,7 +556,27 @@ def load_generated_captions(cap_file, image_id_key:str, caption_key:str):
     return caps, imids
 
 def save_hallucinated_words(cap_file, cap_dict):
-    with open(cap_file, 'w') as f:
+    """
+    保存详细的CHAIR评估结果到JSON文件
+
+    保存的内容包括：
+    - overall_metrics: 总体指标（CHAIRs, CHAIRi, Recall, Len）
+    - sentences: 每个样本的详细信息，包括：
+      - image_id: 图像ID
+      - caption: 原始描述
+      - mscoco_gt_words: Ground Truth对象列表
+      - mscoco_generated_words: 生成描述中的对象列表
+      - mscoco_hallucinated_words: 幻觉对象列表（(word, node_word)元组）
+      - hallucination_details: 详细的幻觉信息（包含原因）
+      - recall_gt_objects: 正确识别的GT对象
+      - recall_count: 正确识别的对象数量
+      - processed_words: 处理后的词列表
+      - node_words: 标准化后的对象名
+      - word_indices: 词的位置索引
+      - words: 原始分词结果
+      - metrics: CHAIRs, CHAIRi, Recall, Len等指标
+    """
+    with open(cap_file, 'w', encoding='utf-8') as f:
         json.dump(cap_dict, f, indent=2, ensure_ascii=False)
 
 def print_metrics(hallucination_cap_dict, quiet=False):
@@ -509,7 +622,7 @@ def get_chair_evaluator(coco_path, cache_file=None, use_cache=True):
 
 
 def evaluate_chair(cap_file, coco_path, image_id_key="image_id", caption_key="caption",
-                   cache_file=None, use_cache=True, save_path=None, verbose=True):
+                   cache_file=None, use_cache=True, save_path=None, verbose=True, debug=False, debug_indices=None):
     """
     计算 CHAIR 指标的高级接口函数
 
@@ -522,6 +635,8 @@ def evaluate_chair(cap_file, coco_path, image_id_key="image_id", caption_key="ca
         use_cache: 是否使用缓存（默认：True）
         save_path: 保存详细结果的路径（可选，JSON 格式）
         verbose: 是否输出详细信息（默认：True）
+        debug: 是否启用debug模式，输出每个样本的详细处理过程（默认：False）
+        debug_indices: 需要输出详细信息的样本索引集合（如果为None且debug=True，则输出所有样本）
 
     Returns:
         dict: 包含以下键的字典：
@@ -538,8 +653,13 @@ def evaluate_chair(cap_file, coco_path, image_id_key="image_id", caption_key="ca
         print(f"  描述文件: {cap_file}")
         print(f"  图像 ID 键: {image_id_key}")
         print(f"  描述键: {caption_key}")
+        if debug:
+            if debug_indices is None:
+                print(f"  Debug模式: 启用（输出所有样本的详细信息）")
+            else:
+                print(f"  Debug模式: 启用（输出 {len(debug_indices)} 个样本的详细信息）")
 
-    results = evaluator.compute_chair(cap_file, image_id_key, caption_key)
+    results = evaluator.compute_chair(cap_file, image_id_key, caption_key, debug=debug, debug_indices=debug_indices)
 
     # 打印指标
     if verbose:
