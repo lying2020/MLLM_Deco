@@ -243,6 +243,255 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     return outputs, output_token_len, input_token_len
 
 
+def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
+                            output_file):
+    """
+    对比 Deco 和 Vanilla 的结果，生成对比表格和不一致 case 的 JSON 文件
+
+    Args:
+        deco_results: Deco 版本的评估结果
+        vanilla_results: Vanilla 版本的评估结果
+        deco_captions_file: Deco 版本的描述文件路径
+        vanilla_captions_file: Vanilla 版本的描述文件路径
+        output_file: 输出 JSON 文件路径
+    """
+    # 加载描述文件
+    deco_captions = {}
+    with open(deco_captions_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            item = json.loads(line.strip())
+            image_id = item.get("image_id")
+            if image_id is not None:
+                deco_captions[image_id] = item
+
+    vanilla_captions = {}
+    with open(vanilla_captions_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            item = json.loads(line.strip())
+            image_id = item.get("image_id")
+            if image_id is not None:
+                vanilla_captions[image_id] = item
+
+    # 找到描述不一致的 case
+    inconsistent_cases = []
+    common_image_ids = set(deco_captions.keys()) & set(vanilla_captions.keys())
+
+    for image_id in common_image_ids:
+        deco_caption = deco_captions[image_id].get("caption", "").strip()
+        vanilla_caption = vanilla_captions[image_id].get("caption", "").strip()
+
+        # 如果描述不同，记录这个 case
+        if deco_caption != vanilla_caption:
+            # 获取图片文件名（不包含路径）
+            # image_id 是数字，需要构造文件名
+            image_filename = f"COCO_val2014_{str(image_id).zfill(12)}.jpg"
+
+            # 获取两个版本的 CHAIR 指标（如果可用）
+            deco_sentence_metrics = None
+            vanilla_sentence_metrics = None
+
+            if deco_results and 'sentences' in deco_results:
+                for s in deco_results['sentences']:
+                    if s.get('image_id') == image_id:
+                        deco_sentence_metrics = s.get('metrics', {})
+                        break
+
+            if vanilla_results and 'sentences' in vanilla_results:
+                for s in vanilla_results['sentences']:
+                    if s.get('image_id') == image_id:
+                        vanilla_sentence_metrics = s.get('metrics', {})
+                        break
+
+            case_info = {
+                "image_id": image_id,
+                "image": image_filename,  # 只保存文件名
+                "vanilla_caption": vanilla_caption,
+                "deco_caption": deco_caption,
+                "vanilla_metrics": vanilla_sentence_metrics,
+                "deco_metrics": deco_sentence_metrics
+            }
+            inconsistent_cases.append(case_info)
+
+    # 保存不一致的 case 到 JSON 文件
+    comparison_result = {
+        "summary": {
+            "total_cases": len(common_image_ids),
+            "inconsistent_cases": len(inconsistent_cases),
+            "consistent_cases": len(common_image_ids) - len(inconsistent_cases),
+            "inconsistency_rate": len(inconsistent_cases) / len(common_image_ids) if len(common_image_ids) > 0 else 0
+        },
+        "metrics_comparison": {
+            "vanilla": {
+                "CHAIRs": vanilla_results.get('overall_metrics', {}).get('CHAIRs', 0) if vanilla_results else 0,
+                "CHAIRi": vanilla_results.get('overall_metrics', {}).get('CHAIRi', 0) if vanilla_results else 0,
+                "Recall": vanilla_results.get('overall_metrics', {}).get('Recall', 0) if vanilla_results else 0,
+                "Len": vanilla_results.get('overall_metrics', {}).get('Len', 0) if vanilla_results else 0
+            },
+            "deco": {
+                "CHAIRs": deco_results.get('overall_metrics', {}).get('CHAIRs', 0) if deco_results else 0,
+                "CHAIRi": deco_results.get('overall_metrics', {}).get('CHAIRi', 0) if deco_results else 0,
+                "Recall": deco_results.get('overall_metrics', {}).get('Recall', 0) if deco_results else 0,
+                "Len": deco_results.get('overall_metrics', {}).get('Len', 0) if deco_results else 0
+            },
+            "difference": {
+                "CHAIRs": (deco_results.get('overall_metrics', {}).get('CHAIRs', 0) if deco_results else 0) -
+                          (vanilla_results.get('overall_metrics', {}).get('CHAIRs', 0) if vanilla_results else 0),
+                "CHAIRi": (deco_results.get('overall_metrics', {}).get('CHAIRi', 0) if deco_results else 0) -
+                          (vanilla_results.get('overall_metrics', {}).get('CHAIRi', 0) if vanilla_results else 0),
+                "Recall": (deco_results.get('overall_metrics', {}).get('Recall', 0) if deco_results else 0) -
+                          (vanilla_results.get('overall_metrics', {}).get('Recall', 0) if vanilla_results else 0),
+                "Len": (deco_results.get('overall_metrics', {}).get('Len', 0) if deco_results else 0) -
+                       (vanilla_results.get('overall_metrics', {}).get('Len', 0) if vanilla_results else 0)
+            }
+        },
+        "inconsistent_cases": inconsistent_cases
+    }
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(comparison_result, f, ensure_ascii=False, indent=2)
+
+    return comparison_result
+
+
+def print_comparison_table(deco_results, vanilla_results):
+    """
+    打印 Deco vs Vanilla 的对比表格
+
+    Args:
+        deco_results: Deco 版本的评估结果
+        vanilla_results: Vanilla 版本的评估结果
+    """
+    deco_metrics = deco_results.get('overall_metrics', {}) if deco_results else {}
+    vanilla_metrics = vanilla_results.get('overall_metrics', {}) if vanilla_results else {}
+
+    print("\n" + "=" * 80)
+    print("Deco vs Vanilla 对比")
+    print("=" * 80)
+    print(f"{'指标':<15} {'Vanilla':<12} {'Deco':<12} {'差异':<12} {'变化':<10}")
+    print("-" * 80)
+
+    metrics_list = [
+        ('CHAIRs', 'CHAIRs'),
+        ('CHAIRi', 'CHAIRi'),
+        ('Recall', 'Recall'),
+        ('Len', 'Len')
+    ]
+
+    for metric_name, metric_key in metrics_list:
+        vanilla_val = vanilla_metrics.get(metric_key, 0)
+        deco_val = deco_metrics.get(metric_key, 0)
+        diff = deco_val - vanilla_val
+        change = f"{diff:+.4f}" if diff != 0 else "0.0000"
+        change_symbol = "↑" if diff > 0 else "↓" if diff < 0 else "="
+
+        # 对于 CHAIRs 和 CHAIRi，越小越好，所以符号相反
+        if metric_key in ['CHAIRs', 'CHAIRi']:
+            change_symbol = "↓" if diff > 0 else "↑" if diff < 0 else "="
+
+        print(f"{metric_name:<15} {vanilla_val:<12.4f} {deco_val:<12.4f} {diff:<12.4f} {change_symbol} {change}")
+
+    print("=" * 80)
+
+
+def save_summary_to_file(summary_file, args, output_file, chair_results_file=None,
+                         chair_errors_file=None, results=None, model_name=None, error=None):
+    """
+    保存 CHAIR 评估结果总结到txt文件
+
+    Args:
+        summary_file: 总结文件路径
+        args: 命令行参数
+        output_file: 输出描述文件路径
+        chair_results_file: CHAIR 详细结果文件路径（可选）
+        chair_errors_file: CHAIR 错误样本文件路径（可选）
+        results: 评估结果字典（如果评估成功）
+        model_name: 模型名称
+        error: 错误信息（如果评估失败）
+    """
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("CHAIR 评估结果总结\n")
+        f.write("=" * 80 + "\n\n")
+
+        # 基本信息
+        f.write("【基本信息】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"评估时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"模型路径: {args.model_path}\n")
+        if model_name:
+            f.write(f"模型名称: {model_name}\n")
+        f.write(f"设备: {args.device}\n")
+        f.write(f"COCO 根目录: {args.coco_root}\n")
+        f.write(f"评测样本数: {args.num_samples if args.num_samples > 0 else '全部'}\n")
+        f.write("\n")
+
+        # Deco配置
+        f.write("【Deco 配置】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"使用 Deco: {'是' if args.use_deco else '否'}\n")
+        if args.use_deco:
+            f.write(f"  - Alpha: {args.alpha}\n")
+            f.write(f"  - Threshold Top-p: {args.threshold_top_p}\n")
+            f.write(f"  - Threshold Top-k: {args.threshold_top_k}\n")
+            f.write(f"  - Early Exit Layers: {args.start_layer}-{args.end_layer}\n")
+        f.write("\n")
+
+        # 生成参数
+        f.write("【生成参数】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Temperature: {args.temperature if args.temperature > 0 else 'None (greedy)'}\n")
+        f.write(f"Top-p: {args.top_p if args.top_p else 'None'}\n")
+        f.write(f"Max New Tokens: {args.max_new_tokens}\n")
+        f.write(f"Num Beams: {args.num_beams}\n")
+        f.write(f"Random Seed: {args.seed}\n")
+        f.write("\n")
+
+        # 文件路径
+        f.write("【文件路径】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"输出描述文件: {output_file}\n")
+        if chair_results_file:
+            f.write(f"CHAIR 详细结果文件: {chair_results_file}\n")
+        if chair_errors_file:
+            f.write(f"CHAIR 错误样本文件: {chair_errors_file}\n")
+        f.write(f"总结文件: {summary_file}\n")
+        f.write("\n")
+
+        # 评估结果
+        f.write("【评估结果】\n")
+        f.write("-" * 80 + "\n")
+        if results is not None:
+            if 'overall_metrics' in results:
+                metrics = results['overall_metrics']
+                f.write(f"CHAIRs (句子级别): {metrics.get('CHAIRs', 0):.4f}\n")
+                f.write(f"CHAIRi (实例级别): {metrics.get('CHAIRi', 0):.4f}\n")
+                f.write(f"Recall (召回率):   {metrics.get('Recall', 0):.4f}\n")
+                f.write(f"Len (平均长度):    {metrics.get('Len', 0):.4f}\n")
+
+            # 统计错误样本
+            if 'sentences' in results:
+                total_samples = len(results['sentences'])
+                error_samples = [
+                    s for s in results['sentences']
+                    if s.get('metrics', {}).get('CHAIRs', 0) > 0
+                ]
+                error_count = len(error_samples)
+                f.write(f"\n总样本数: {total_samples}\n")
+                f.write(f"包含幻觉的样本数: {error_count}\n")
+                if total_samples > 0:
+                    f.write(f"幻觉样本比例: {error_count / total_samples * 100:.2f}%\n")
+        elif error:
+            f.write(f"评估失败: {error}\n")
+        else:
+            f.write("评估结果未生成\n")
+        f.write("\n")
+
+        # 分隔线
+        f.write("=" * 80 + "\n")
+        f.write("总结文件生成时间: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\n")
+        f.write("=" * 80 + "\n")
+
+
 def eval_model(args):
     """评估模型，生成图像描述"""
     print("=" * 80)
@@ -432,6 +681,8 @@ def eval_model(args):
             chair_results_file = output_file.replace('.jsonl', '_chair_results.json')
             # 保存错误样本（如果有）
             chair_errors_file = output_file.replace('.jsonl', '_chair_errors.json')
+            # 生成总结文件路径
+            summary_file = output_file.replace('.jsonl', '_summary.txt')
 
             # 计算需要输出详细信息的样本索引（如果启用debug模式）
             debug_indices = None
@@ -476,11 +727,13 @@ def eval_model(args):
             print(f"输出文件: {output_file}")
 
             # 保存错误样本（包含幻觉的样本）
+            error_count = 0
             if results and 'sentences' in results:
                 error_samples = [
                     s for s in results['sentences']
                     if s.get('metrics', {}).get('CHAIRs', 0) > 0
                 ]
+                error_count = len(error_samples)
                 if error_samples:
                     with open(chair_errors_file, 'w', encoding='utf-8') as f:
                         json.dump({
@@ -490,6 +743,19 @@ def eval_model(args):
                         }, f, indent=2, ensure_ascii=False)
                     print(f"错误样本文件: {chair_errors_file} ({len(error_samples)} 个包含幻觉的样本)")
 
+            # 保存总结到txt文件
+            model_name = get_model_name_from_path(args.model_path)
+            save_summary_to_file(
+                summary_file=summary_file,
+                args=args,
+                output_file=output_file,
+                chair_results_file=chair_results_file,
+                chair_errors_file=chair_errors_file if error_count > 0 else None,
+                results=results,
+                model_name=model_name
+            )
+            print(f"\n✓ 结果总结已保存到: {summary_file}")
+
         except Exception as e:
             print(f"\n⚠️  自动计算 CHAIR 指标时出错: {e}")
             import traceback
@@ -497,6 +763,24 @@ def eval_model(args):
             print("\n可以手动运行以下命令计算 CHAIR 指标：")
             print(f"  python chair.py --cap_file {output_file} --image_id_key image_id --caption_key caption \\")
             print(f"                  --coco_path {args.coco_root}/annotations_trainval2014/annotations/")
+
+            # 即使评估失败，也保存基本信息到总结文件
+            try:
+                summary_file = output_file.replace('.jsonl', '_summary.txt')
+                model_name = get_model_name_from_path(args.model_path)
+                save_summary_to_file(
+                    summary_file=summary_file,
+                    args=args,
+                    output_file=output_file,
+                    chair_results_file=None,
+                    chair_errors_file=None,
+                    results=None,
+                    model_name=model_name,
+                    error=str(e)
+                )
+                print(f"✓ 基本信息已保存到: {summary_file}")
+            except Exception as save_error:
+                print(f"⚠️  保存总结文件时出错: {save_error}")
     else:
         print(f"\n下一步：使用 chair.py 计算 CHAIR 指标")
         print(f"  python chair.py --cap_file {output_file} --image_id_key image_id --caption_key caption \\")
@@ -520,7 +804,7 @@ def main():
         "model_path": project.llava_v15_7b_path,
         "device": device,
         "coco_root": project.coco_data_path,  # 需要根据实际情况修改
-        "use_deco": False,
+        "use_deco": True,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
@@ -529,8 +813,8 @@ def main():
         "temperature": -1,
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
-        "num_beams": 1,
-        "num_samples": 10,  # 0 表示处理所有图像
+        "num_beams": 10,
+        "num_samples": 1000,  # 0 表示处理所有图像
         "seed": 42
     }
 
@@ -589,18 +873,91 @@ def main():
     args = parser.parse_args()
     set_seed(args.seed)
 
-    # 自动生成输出文件路径(如果未指定)
-    if args.output_file is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join(project_root, "results", "chair")
-        os.makedirs(output_dir, exist_ok=True)
-        args.output_file = os.path.join(output_dir, f"chair_captions_{timestamp}.jsonl")
-
     # 设置 auto_evaluate 参数（默认启用，除非指定 --no-auto-evaluate）
     args.auto_evaluate = not args.no_auto_evaluate
 
-    # 运行评估
-    eval_model(args)
+    # 自动生成输出文件路径(如果未指定)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(project_root, "results", "chair")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 如果使用 Deco，需要同时运行 vanilla 版本进行对比
+    vanilla_output_file = None
+    vanilla_results = None
+
+    if args.use_deco:
+        print("\n" + "=" * 80)
+        print("检测到使用 Deco，将同时运行 Vanilla 版本进行对比")
+        print("=" * 80)
+
+        # 先运行 Vanilla 版本
+        print("\n" + "-" * 80)
+        print("[1/2] 运行 Vanilla 版本")
+        print("-" * 80)
+        vanilla_args = argparse.Namespace(**vars(args))
+        vanilla_args.use_deco = False
+        vanilla_args.output_file = os.path.join(output_dir, f"chair_captions_vanilla_{timestamp}.jsonl")
+        vanilla_args.auto_evaluate = args.auto_evaluate  # 保持相同的 auto_evaluate 设置
+
+        eval_model(vanilla_args)
+        vanilla_output_file = vanilla_args.output_file
+
+        # 然后运行 Deco 版本
+        print("\n" + "-" * 80)
+        print("[2/2] 运行 Deco 版本")
+        print("-" * 80)
+        if args.output_file is None:
+            args.output_file = os.path.join(output_dir, f"chair_captions_deco_{timestamp}.jsonl")
+
+        eval_model(args)
+
+        # 如果两个版本都完成了评估，进行对比
+        if vanilla_args.auto_evaluate and args.auto_evaluate:
+            print("\n" + "=" * 80)
+            print("对比 Deco vs Vanilla")
+            print("=" * 80)
+
+            # 加载两个版本的结果
+            try:
+                vanilla_results_file = vanilla_output_file.replace('.jsonl', '_chair_results.json')
+                deco_results_file = args.output_file.replace('.jsonl', '_chair_results.json')
+
+                if os.path.exists(vanilla_results_file) and os.path.exists(deco_results_file):
+                    with open(vanilla_results_file, 'r', encoding='utf-8') as f:
+                        vanilla_results = json.load(f)
+                    with open(deco_results_file, 'r', encoding='utf-8') as f:
+                        deco_results = json.load(f)
+
+                    # 生成对比 JSON 文件
+                    comparison_file = args.output_file.replace('.jsonl', '_comparison.json')
+                    comparison_result = compare_deco_vs_vanilla(
+                        deco_results=deco_results,
+                        vanilla_results=vanilla_results,
+                        deco_captions_file=args.output_file,
+                        vanilla_captions_file=vanilla_output_file,
+                        output_file=comparison_file
+                    )
+
+                    # 打印对比表格
+                    print_comparison_table(deco_results=deco_results, vanilla_results=vanilla_results)
+
+                    print(f"\n✓ 对比结果已保存到: {comparison_file}")
+                    print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
+                    print(f"  - 描述不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
+                    print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
+                else:
+                    print("⚠️  无法找到评估结果文件，跳过对比")
+            except Exception as e:
+                print(f"⚠️  对比时出错: {e}")
+                import traceback
+                traceback.print_exc()
+    else:
+        # 不使用 Deco，正常处理
+        if args.output_file is None:
+            args.output_file = os.path.join(output_dir, f"chair_captions_vanilla_{timestamp}.jsonl")
+
+        # 运行评估
+        eval_model(args)
 
     print("\n" + "=" * 80)
     print("✓ 所有评估完成！")

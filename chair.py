@@ -575,9 +575,99 @@ def save_hallucinated_words(cap_file, cap_dict):
       - word_indices: 词的位置索引
       - words: 原始分词结果
       - metrics: CHAIRs, CHAIRi, Recall, Len等指标
+
+    注意：列表字段（如 mscoco_gt_words, mscoco_generated_words, words 等）会以紧凑格式（单行）保存
     """
+    # 需要紧凑格式的列表字段（单行显示）
+    compact_list_fields = {
+        'mscoco_gt_words', 'mscoco_generated_words', 'mscoco_hallucinated_words',
+        'words', 'processed_words', 'node_words', 'word_indices',
+        'recall_gt_objects', 'hallucination_idxs'
+    }
+
+    def format_json_compact(obj, indent_level=0, compact_fields=None):
+        """
+        自定义JSON格式化函数，对指定的列表字段使用紧凑格式（单行）
+        """
+        if compact_fields is None:
+            compact_fields = set()
+
+        indent = '  ' * indent_level
+        next_indent = '  ' * (indent_level + 1)
+
+        if isinstance(obj, dict):
+            if not obj:
+                return '{}'
+
+            lines = []
+            items = list(obj.items())
+            for i, (key, value) in enumerate(items):
+                # 检查是否是需要紧凑格式的字段
+                is_compact = key in compact_fields
+
+                if isinstance(value, (list, tuple)) and is_compact:
+                    # 列表字段：紧凑格式（单行）
+                    if isinstance(value, tuple):
+                        value = list(value)
+                    json_value = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+                    lines.append(f'{next_indent}"{key}": {json_value}')
+                elif isinstance(value, dict):
+                    # 嵌套字典：递归处理
+                    formatted_value = format_json_compact(value, indent_level + 1, compact_fields)
+                    lines.append(f'{next_indent}"{key}": {formatted_value}')
+                elif isinstance(value, (list, tuple)):
+                    # 其他列表：正常格式（多行）
+                    if isinstance(value, tuple):
+                        value = list(value)
+                    if not value:
+                        lines.append(f'{next_indent}"{key}": []')
+                    else:
+                        list_lines = [f'{next_indent}"{key}": [']
+                        for item in value:
+                            if isinstance(item, (dict, list)):
+                                formatted_item = format_json_compact(item, indent_level + 2, compact_fields)
+                                list_lines.append(f'{next_indent}  {formatted_item},')
+                            else:
+                                json_item = json.dumps(item, ensure_ascii=False)
+                                list_lines.append(f'{next_indent}  {json_item},')
+                        # 移除最后一个逗号
+                        if list_lines[-1].endswith(','):
+                            list_lines[-1] = list_lines[-1][:-1]
+                        list_lines.append(f'{next_indent}]')
+                        lines.append('\n'.join(list_lines))
+                else:
+                    # 其他类型：正常格式
+                    json_value = json.dumps(value, ensure_ascii=False)
+                    lines.append(f'{next_indent}"{key}": {json_value}')
+
+            return '{\n' + ',\n'.join(lines) + '\n' + indent + '}'
+
+        elif isinstance(obj, (list, tuple)):
+            if isinstance(obj, tuple):
+                obj = list(obj)
+            if not obj:
+                return '[]'
+            # 列表：正常格式（多行）
+            lines = []
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    formatted_item = format_json_compact(item, indent_level + 1, compact_fields)
+                    lines.append(f'{next_indent}{formatted_item},')
+                else:
+                    json_item = json.dumps(item, ensure_ascii=False)
+                    lines.append(f'{next_indent}{json_item},')
+            # 移除最后一个逗号
+            if lines and lines[-1].endswith(','):
+                lines[-1] = lines[-1][:-1]
+            return '[\n' + '\n'.join(lines) + '\n' + indent + ']'
+
+        else:
+            # 基本类型：直接JSON编码
+            return json.dumps(obj, ensure_ascii=False)
+
     with open(cap_file, 'w', encoding='utf-8') as f:
-        json.dump(cap_dict, f, indent=2, ensure_ascii=False)
+        formatted_json = format_json_compact(cap_dict, indent_level=0, compact_fields=compact_list_fields)
+        f.write(formatted_json)
 
 def print_metrics(hallucination_cap_dict, quiet=False):
     sentence_metrics = hallucination_cap_dict['overall_metrics']

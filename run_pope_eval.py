@@ -439,6 +439,219 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     return outputs, output_token_len, input_token_len
 
 
+def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_answers_file, vanilla_answers_file,
+                            gt_file, output_file):
+    """
+    对比 Deco 和 Vanilla 的结果，生成对比表格和不一致 case 的 JSON 文件
+
+    Args:
+        deco_results: Deco 版本的评估结果
+        vanilla_results: Vanilla 版本的评估结果
+        deco_answers_file: Deco 版本的答案文件路径
+        vanilla_answers_file: Vanilla 版本的答案文件路径
+        gt_file: 真值文件路径
+        output_file: 输出 JSON 文件路径
+    """
+    # 加载答案文件
+    deco_answers = {item["question_id"]: item for item in [json.loads(line) for line in open(deco_answers_file, 'r', encoding='utf-8')]}
+    vanilla_answers = {item["question_id"]: item for item in [json.loads(line) for line in open(vanilla_answers_file, 'r', encoding='utf-8')]}
+    gt_data = {item["question_id"]: item for item in [json.loads(line) for line in open(gt_file, 'r', encoding='utf-8')]}
+
+    # 找到结果不一致的 case
+    inconsistent_cases = []
+    common_question_ids = set(deco_answers.keys()) & set(vanilla_answers.keys())
+
+    for qid in common_question_ids:
+        deco_answer = deco_answers[qid].get("text", "").strip()
+        vanilla_answer = vanilla_answers[qid].get("text", "").strip()
+
+        if deco_answer != vanilla_answer:
+            # 获取图片文件名（不包含路径）
+            image_path = deco_answers[qid].get("image", "")
+            image_filename = os.path.basename(image_path) if image_path else ""
+
+            # 获取 GT 答案
+            gt_answer = gt_data.get(qid, {}).get("label", "").strip().lower()
+
+            case_info = {
+                "question_id": qid,
+                "question": deco_answers[qid].get("prompt", ""),
+                "image": image_filename,  # 只保存文件名
+                "gt_answer": gt_answer,
+                "vanilla_answer": vanilla_answer,
+                "deco_answer": deco_answer,
+                "vanilla_correct": vanilla_answer.lower() == gt_answer,
+                "deco_correct": deco_answer.lower() == gt_answer,
+                "vanilla_raw_output": vanilla_answers[qid].get("metadata", {}).get("raw_output", ""),
+                "deco_raw_output": deco_answers[qid].get("metadata", {}).get("raw_output", "")
+            }
+            inconsistent_cases.append(case_info)
+
+    # 保存不一致的 case 到 JSON 文件
+    comparison_result = {
+        "summary": {
+            "total_cases": len(common_question_ids),
+            "inconsistent_cases": len(inconsistent_cases),
+            "consistent_cases": len(common_question_ids) - len(inconsistent_cases),
+            "inconsistency_rate": len(inconsistent_cases) / len(common_question_ids) if len(common_question_ids) > 0 else 0
+        },
+        "metrics_comparison": {
+            "vanilla": {
+                "accuracy": vanilla_results.get('metrics', {}).get('accuracy', 0),
+                "precision": vanilla_results.get('metrics', {}).get('precision', 0),
+                "recall": vanilla_results.get('metrics', {}).get('recall', 0),
+                "f1": vanilla_results.get('metrics', {}).get('f1', 0)
+            },
+            "deco": {
+                "accuracy": deco_results.get('metrics', {}).get('accuracy', 0),
+                "precision": deco_results.get('metrics', {}).get('precision', 0),
+                "recall": deco_results.get('metrics', {}).get('recall', 0),
+                "f1": deco_results.get('metrics', {}).get('f1', 0)
+            },
+            "difference": {
+                "accuracy": deco_results.get('metrics', {}).get('accuracy', 0) - vanilla_results.get('metrics', {}).get('accuracy', 0),
+                "precision": deco_results.get('metrics', {}).get('precision', 0) - vanilla_results.get('metrics', {}).get('precision', 0),
+                "recall": deco_results.get('metrics', {}).get('recall', 0) - vanilla_results.get('metrics', {}).get('recall', 0),
+                "f1": deco_results.get('metrics', {}).get('f1', 0) - vanilla_results.get('metrics', {}).get('f1', 0)
+            }
+        },
+        "inconsistent_cases": inconsistent_cases
+    }
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(comparison_result, f, ensure_ascii=False, indent=2)
+
+    return comparison_result
+
+
+def print_comparison_table(deco_results, vanilla_results, split_name=""):
+    """
+    打印 Deco vs Vanilla 的对比表格
+
+    Args:
+        deco_results: Deco 版本的评估结果
+        vanilla_results: Vanilla 版本的评估结果
+        split_name: Split 名称（可选）
+    """
+    deco_metrics = deco_results.get('metrics', {})
+    vanilla_metrics = vanilla_results.get('metrics', {})
+
+    title = f"Deco vs Vanilla 对比{' - ' + split_name if split_name else ''}"
+    print("\n" + "=" * 80)
+    print(title)
+    print("=" * 80)
+    print(f"{'指标':<15} {'Vanilla':<12} {'Deco':<12} {'差异':<12} {'变化':<10}")
+    print("-" * 80)
+
+    metrics_list = [
+        ('Accuracy', 'accuracy'),
+        ('Precision', 'precision'),
+        ('Recall', 'recall'),
+        ('F1 Score', 'f1')
+    ]
+
+    for metric_name, metric_key in metrics_list:
+        vanilla_val = vanilla_metrics.get(metric_key, 0)
+        deco_val = deco_metrics.get(metric_key, 0)
+        diff = deco_val - vanilla_val
+        change = f"{diff:+.4f}" if diff != 0 else "0.0000"
+        change_symbol = "↑" if diff > 0 else "↓" if diff < 0 else "="
+
+        print(f"{metric_name:<15} {vanilla_val:<12.4f} {deco_val:<12.4f} {diff:<12.4f} {change_symbol} {change}")
+
+    print("=" * 80)
+
+
+def save_summary_to_file(summary_file, args, gt_file, question_file, answers_file, errors_file,
+                         results=None, model_name=None, error=None):
+    """
+    保存评估结果总结到txt文件
+
+    Args:
+        summary_file: 总结文件路径
+        args: 命令行参数
+        gt_file: 真值文件路径
+        question_file: 问题文件路径
+        answers_file: 答案文件路径
+        errors_file: 错误样本文件路径
+        results: 评估结果字典（如果评估成功）
+        model_name: 模型名称
+        error: 错误信息（如果评估失败）
+    """
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("POPE 评估结果总结\n")
+        f.write("=" * 80 + "\n\n")
+
+        # 基本信息
+        f.write("【基本信息】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"评估时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"数据集 Split: {args.split}\n")
+        f.write(f"模型路径: {args.model_path}\n")
+        if model_name:
+            f.write(f"模型名称: {model_name}\n")
+        f.write(f"设备: {args.device}\n")
+        f.write(f"评测样本数: {args.num_samples if args.num_samples > 0 else '全部'}\n")
+        f.write("\n")
+
+        # Deco配置
+        f.write("【Deco 配置】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"使用 Deco: {'是' if args.use_deco else '否'}\n")
+        if args.use_deco:
+            f.write(f"  - Alpha: {args.alpha}\n")
+            f.write(f"  - Threshold Top-p: {args.threshold_top_p}\n")
+            f.write(f"  - Threshold Top-k: {args.threshold_top_k}\n")
+            f.write(f"  - Early Exit Layers: {args.start_layer}-{args.end_layer}\n")
+        f.write("\n")
+
+        # 生成参数
+        f.write("【生成参数】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Temperature: {args.temperature if args.temperature > 0 else 'None (greedy)'}\n")
+        f.write(f"Top-p: {args.top_p if args.top_p else 'None'}\n")
+        f.write(f"Max New Tokens: {args.max_new_tokens}\n")
+        f.write(f"Random Seed: {args.seed}\n")
+        f.write("\n")
+
+        # 文件路径
+        f.write("【文件路径】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"真值文件 (GT): {gt_file}\n")
+        f.write(f"问题文件: {question_file}\n")
+        f.write(f"答案文件: {answers_file}\n")
+        f.write(f"错误样本文件: {errors_file}\n")
+        f.write(f"总结文件: {summary_file}\n")
+        f.write("\n")
+
+        # 评估结果
+        f.write("【评估结果】\n")
+        f.write("-" * 80 + "\n")
+        if results is not None:
+            metrics = results.get('metrics', {})
+            f.write(f"Accuracy:  {metrics.get('accuracy', 0):.4f}\n")
+            f.write(f"Precision: {metrics.get('precision', 0):.4f}\n")
+            f.write(f"Recall:    {metrics.get('recall', 0):.4f}\n")
+            f.write(f"F1 Score:  {metrics.get('f1', 0):.4f}\n")
+
+            # 如果有错误样本信息
+            if 'error_samples' in results:
+                error_count = len(results['error_samples'])
+                total_count = results.get('total_count', 0)
+                f.write(f"\n错误样本数: {error_count} / {total_count}\n")
+        elif error:
+            f.write(f"评估失败: {error}\n")
+        else:
+            f.write("评估结果未生成\n")
+        f.write("\n")
+
+        # 分隔线
+        f.write("=" * 80 + "\n")
+        f.write("总结文件生成时间: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\n")
+        f.write("=" * 80 + "\n")
+
+
 def eval_model(args):
     """评估模型"""
     print("=" * 80)
@@ -635,17 +848,17 @@ def main():
         "device": device_str,
         "probe_exp_dir": str(project_root / "probe_exp" / "train_set"),
         "coco_root": "/home/liying/Documents/dataset/coco",
-        "split": "adversarial",  # 默认评估 adversarial split
-        "use_deco": False,
-        "alpha": 0.6,
+        "split": ["adversarial", "popular", "random"],  # 默认评估 adversarial split
+        "use_deco": True,
+        "alpha": 0.8,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
         "start_layer": 20,
         "end_layer": 29,
         "temperature": -1,
         "top_p": None,
-        "max_new_tokens": 10,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 2000,
+        "max_new_tokens": 15,  # POPE 只需要 Yes/No，但给一些缓冲
+        "num_samples": 500,
         "seed": 42
     }
 
@@ -653,8 +866,16 @@ def main():
     parser = argparse.ArgumentParser(description="POPE 评估 - 直接运行版本（所有参数可选）")
 
     # 数据集参数
-    parser.add_argument("--split", type=str, default=default_config["split"],
-                       choices=["adversarial", "popular", "random"], help="数据集 split")
+    # 注意：如果默认值是列表，argparse 需要特殊处理
+    default_split = default_config["split"]
+    if isinstance(default_split, list):
+        # 如果默认值是列表，转换为逗号分隔的字符串
+        default_split_str = ','.join(default_split)
+    else:
+        default_split_str = str(default_split)
+
+    parser.add_argument("--split", type=str, default=default_split_str,
+                       help="数据集 split，可以是单个值或逗号分隔的多个值（例如: adversarial,popular,random）")
     parser.add_argument("--probe-exp-dir", type=str, default=default_config["probe_exp_dir"],
                        help="probe_exp/train_set 目录路径")
     parser.add_argument("--coco-root", type=str, default=default_config["coco_root"],
@@ -702,89 +923,299 @@ def main():
     args = parser.parse_args()
     set_seed(args.seed)
 
+    # 解析 split 参数（支持单个值、逗号分隔的多个值，或列表）
+    if isinstance(args.split, list):
+        # 如果已经是列表，直接使用
+        splits = [s.strip() if isinstance(s, str) else str(s) for s in args.split]
+    elif isinstance(args.split, str):
+        # 如果是字符串，检查是否包含逗号
+        split_input = args.split.strip()
+        if ',' in split_input:
+            splits = [s.strip() for s in split_input.split(',')]
+        else:
+            splits = [split_input]
+    else:
+        # 其他类型，转换为字符串列表
+        splits = [str(args.split)]
+
+    # 验证 split 值
+    valid_splits = ["adversarial", "popular", "random"]
+    for split in splits:
+        if split not in valid_splits:
+            raise ValueError(f"无效的 split 值: {split}。有效值: {valid_splits}")
+
+    print("=" * 80)
+    print(f"将处理 {len(splits)} 个 split: {', '.join(splits)}")
+    print("=" * 80)
+
     # 准备 results 目录
     results_dir = os.path.join(project_root, "results", "pope")
 
-    # 自动生成真值文件（GT 文件）
-    print("=" * 80)
-    print("自动生成真值文件（Ground Truth）")
-    print("=" * 80)
-    gt_file = auto_generate_gt_file(
-        probe_exp_dir=args.probe_exp_dir,
-        split=args.split,
-        coco_root=args.coco_root,
-        output_file=None,  # 使用默认路径（results/pope/pope_gt_{split}.json）
-        results_dir=results_dir
-    )
+    # 存储所有结果
+    all_results = []
 
-    # 自动生成问题文件（如果未指定）
-    if args.question_file is None:
+    # 循环处理每个 split
+    for split_idx, current_split in enumerate(splits, 1):
+        print("\n" + "=" * 80)
+        print(f"[{split_idx}/{len(splits)}] 处理 split: {current_split}")
         print("=" * 80)
-        print("自动生成问题文件")
-        print("=" * 80)
-        question_file = auto_generate_question_file(
-            probe_exp_dir=args.probe_exp_dir,
-            split=args.split,
-            coco_root=args.coco_root,
-            output_file=None,  # 使用默认路径（results/pope/pope_questions_{split}.jsonl）
+
+        # 为当前 split 创建 args 副本
+        split_args = argparse.Namespace(**vars(args))
+        split_args.split = current_split
+
+        # 自动生成真值文件（GT 文件）
+        print("\n" + "-" * 80)
+        print(f"自动生成真值文件（Ground Truth）- {current_split}")
+        print("-" * 80)
+        gt_file = auto_generate_gt_file(
+            probe_exp_dir=split_args.probe_exp_dir,
+            split=current_split,
+            coco_root=split_args.coco_root,
+            output_file=None,  # 使用默认路径（results/pope/pope_gt_{split}.json）
             results_dir=results_dir
         )
-        args.question_file = question_file
-    else:
-        # 检查问题文件是否存在
-        if not os.path.exists(args.question_file):
-            raise FileNotFoundError(f"问题文件不存在: {args.question_file}")
 
-    # 自动生成答案文件路径（如果未指定）
-    if args.answers_file is None:
+        # 自动生成问题文件（如果未指定）
+        if split_args.question_file is None:
+            print("\n" + "-" * 80)
+            print(f"自动生成问题文件 - {current_split}")
+            print("-" * 80)
+            question_file = auto_generate_question_file(
+                probe_exp_dir=split_args.probe_exp_dir,
+                split=current_split,
+                coco_root=split_args.coco_root,
+                output_file=None,  # 使用默认路径（results/pope/pope_questions_{split}.jsonl）
+                results_dir=results_dir
+            )
+            split_args.question_file = question_file
+        else:
+            # 如果指定了问题文件，只对第一个 split 使用，其他 split 会报错
+            if split_idx > 1:
+                raise ValueError(f"当处理多个 split 时，不能指定 --question-file。请移除该参数以自动生成问题文件。")
+            # 检查问题文件是否存在
+            if not os.path.exists(split_args.question_file):
+                raise FileNotFoundError(f"问题文件不存在: {split_args.question_file}")
+
+        # 自动生成答案文件路径（如果未指定）
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         answers_dir = os.path.join(project_root, "results", "pope")
         os.makedirs(answers_dir, exist_ok=True)
-        args.answers_file = os.path.join(answers_dir, f"pope_{args.split}.jsonl")
 
-    # 运行评估
-    eval_model(args)
+        # 如果使用 Deco，需要同时运行 vanilla 版本进行对比
+        vanilla_answers_file = None
+        if split_args.use_deco:
+            print("\n" + "=" * 80)
+            print(f"检测到使用 Deco，将同时运行 Vanilla 版本进行对比")
+            print("=" * 80)
 
-    print("\n" + "=" * 80)
-    print("模型评估完成！")
-    print("=" * 80)
-    print(f"真值文件（GT）: {gt_file}")
-    print(f"问题文件: {args.question_file}")
-    print(f"答案文件: {args.answers_file}")
+            # 先运行 Vanilla 版本
+            print("\n" + "-" * 80)
+            print(f"[1/2] 运行 Vanilla 版本 - {current_split}")
+            print("-" * 80)
+            vanilla_args = argparse.Namespace(**vars(split_args))
+            vanilla_args.use_deco = False
+            vanilla_args.answers_file = os.path.join(answers_dir, f"pope_{current_split}_vanilla_{timestamp}.jsonl")
 
-    # 自动执行评估
-    print("\n" + "=" * 80)
-    print("自动执行结果评估...")
-    print("=" * 80)
+            eval_model(vanilla_args)
+            vanilla_answers_file = vanilla_args.answers_file
 
-    errors_file = args.answers_file.replace('.jsonl', '_errors.json')
+            # 然后运行 Deco 版本
+            print("\n" + "-" * 80)
+            print(f"[2/2] 运行 Deco 版本 - {current_split}")
+            print("-" * 80)
+            if split_args.answers_file is None:
+                split_args.answers_file = os.path.join(answers_dir, f"pope_{current_split}_deco_{timestamp}.jsonl")
 
-    try:
-        # 直接调用评估函数
-        results = evaluate_pope(
-            gt_files_path=gt_file,
-            gen_files_path=args.answers_file,
-            output_errors_path=errors_file,
-            verbose=True
-        )
+            eval_model(split_args)
+        else:
+            # 不使用 Deco，正常处理
+            if split_args.answers_file is None:
+                split_args.answers_file = os.path.join(answers_dir, f"pope_{current_split}_vanilla_{timestamp}.jsonl")
+            else:
+                # 如果指定了答案文件，只对第一个 split 使用，其他 split 会报错
+                if split_idx > 1:
+                    raise ValueError(f"当处理多个 split 时，不能指定 --answers-file。请移除该参数以自动生成答案文件。")
+
+            # 运行评估
+            eval_model(split_args)
 
         print("\n" + "=" * 80)
-        print("✓ 结果评估完成！")
+        print(f"模型评估完成 - {current_split}")
         print("=" * 80)
-        print(f"错误样本文件: {errors_file}")
-        print(f"\n关键指标:")
-        print(f"  - Accuracy: {results['metrics']['accuracy']:.4f}")
-        print(f"  - Precision: {results['metrics']['precision']:.4f}")
-        print(f"  - Recall: {results['metrics']['recall']:.4f}")
-        print(f"  - F1: {results['metrics']['f1']:.4f}")
-    except Exception as e:
-        print(f"\n✗ 执行评估时出错: {e}")
-        import traceback
-        traceback.print_exc()
-        print("\n可以手动运行以下命令:")
-        print(f"  python3 eval_tool/eval_pope.py --gt_files {gt_file} --gen_files {args.answers_file} --output-errors {errors_file}")
+        print(f"真值文件（GT）: {gt_file}")
+        print(f"问题文件: {split_args.question_file}")
+        print(f"答案文件: {split_args.answers_file}")
 
-    print("=" * 80)
+        # 自动执行评估
+        print("\n" + "=" * 80)
+        print(f"自动执行结果评估 - {current_split}")
+        print("=" * 80)
+
+        # 生成错误文件路径（保持与答案文件相同的命名规则）
+        errors_file = split_args.answers_file.replace('.jsonl', '_errors.json')
+        # 生成总结文件路径
+        summary_file = split_args.answers_file.replace('.jsonl', '_summary.txt')
+
+        try:
+            # 直接调用评估函数
+            results = evaluate_pope(
+                gt_files_path=gt_file,
+                gen_files_path=split_args.answers_file,
+                output_errors_path=errors_file,
+                verbose=True
+            )
+
+            print("\n" + "=" * 80)
+            print(f"✓ 结果评估完成 - {current_split}")
+            print("=" * 80)
+            print(f"错误样本文件: {errors_file}")
+            print(f"\n关键指标:")
+            print(f"  - Accuracy: {results['metrics']['accuracy']:.4f}")
+            print(f"  - Precision: {results['metrics']['precision']:.4f}")
+            print(f"  - Recall: {results['metrics']['recall']:.4f}")
+            print(f"  - F1: {results['metrics']['f1']:.4f}")
+
+            # 保存总结到txt文件
+            save_summary_to_file(
+                summary_file=summary_file,
+                args=split_args,
+                gt_file=gt_file,
+                question_file=split_args.question_file,
+                answers_file=split_args.answers_file,
+                errors_file=errors_file,
+                results=results,
+                model_name=get_model_name_from_path(split_args.model_path)
+            )
+            print(f"\n✓ 结果总结已保存到: {summary_file}")
+
+            # 如果使用 Deco，进行对比
+            if split_args.use_deco and vanilla_answers_file:
+                print("\n" + "=" * 80)
+                print(f"对比 Deco vs Vanilla - {current_split}")
+                print("=" * 80)
+
+                # 评估 Vanilla 版本
+                vanilla_errors_file = vanilla_answers_file.replace('.jsonl', '_errors.json')
+                vanilla_results = evaluate_pope(
+                    gt_files_path=gt_file,
+                    gen_files_path=vanilla_answers_file,
+                    output_errors_path=vanilla_errors_file,
+                    verbose=False  # 不重复打印详细信息
+                )
+
+                # 生成对比 JSON 文件
+                comparison_file = split_args.answers_file.replace('.jsonl', '_comparison.json')
+                comparison_result = compare_deco_vs_vanilla(
+                    deco_results=results,
+                    vanilla_results=vanilla_results,
+                    deco_answers_file=split_args.answers_file,
+                    vanilla_answers_file=vanilla_answers_file,
+                    gt_file=gt_file,
+                    output_file=comparison_file
+                )
+
+                # 打印对比表格
+                print_comparison_table(deco_results=results, vanilla_results=vanilla_results, split_name=current_split)
+
+                print(f"\n✓ 对比结果已保存到: {comparison_file}")
+                print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
+                print(f"  - 不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
+                print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
+
+                # 保存结果到列表（包含对比信息）
+                all_results.append({
+                    'split': current_split,
+                    'gt_file': gt_file,
+                    'question_file': split_args.question_file,
+                    'answers_file': split_args.answers_file,
+                    'vanilla_answers_file': vanilla_answers_file,
+                    'errors_file': errors_file,
+                    'summary_file': summary_file,
+                    'comparison_file': comparison_file,
+                    'metrics': results['metrics'],
+                    'vanilla_metrics': vanilla_results['metrics'],
+                    'comparison': comparison_result
+                })
+            else:
+                # 不使用 Deco，只保存当前结果
+                all_results.append({
+                    'split': current_split,
+                    'gt_file': gt_file,
+                    'question_file': split_args.question_file,
+                    'answers_file': split_args.answers_file,
+                    'errors_file': errors_file,
+                    'summary_file': summary_file,
+                    'metrics': results['metrics']
+                })
+
+        except Exception as e:
+            print(f"\n✗ 执行评估时出错 - {current_split}: {e}")
+            import traceback
+            traceback.print_exc()
+            print("\n可以手动运行以下命令:")
+            print(f"  python3 eval_tool/eval_pope.py --gt_files {gt_file} --gen_files {split_args.answers_file} --output-errors {errors_file}")
+
+            # 即使评估失败，也保存基本信息到总结文件
+            try:
+                save_summary_to_file(
+                    summary_file=summary_file,
+                    args=split_args,
+                    gt_file=gt_file,
+                    question_file=split_args.question_file,
+                    answers_file=split_args.answers_file,
+                    errors_file=errors_file,
+                    results=None,
+                    model_name=get_model_name_from_path(split_args.model_path),
+                    error=str(e)
+                )
+                print(f"✓ 基本信息已保存到: {summary_file}")
+            except Exception as save_error:
+                print(f"⚠️  保存总结文件时出错: {save_error}")
+
+            # 记录失败的结果
+            all_results.append({
+                'split': current_split,
+                'gt_file': gt_file,
+                'question_file': split_args.question_file,
+                'answers_file': split_args.answers_file,
+                'errors_file': errors_file,
+                'summary_file': summary_file,
+                'error': str(e)
+            })
+
+        print("=" * 80)
+
+    # 打印所有结果的总结
+    if len(splits) > 1:
+        print("\n" + "=" * 80)
+        print("所有 Split 评估总结")
+        print("=" * 80)
+        print(f"{'Split':<15} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1 Score':<12}")
+        print("-" * 80)
+        for result in all_results:
+            if 'metrics' in result:
+                metrics = result['metrics']
+                print(f"{result['split']:<15} {metrics.get('accuracy', 0):<12.4f} {metrics.get('precision', 0):<12.4f} {metrics.get('recall', 0):<12.4f} {metrics.get('f1', 0):<12.4f}")
+            else:
+                print(f"{result['split']:<15} {'ERROR':<12}")
+        print("=" * 80)
+
+        # 计算平均指标（如果所有都成功）
+        successful_results = [r for r in all_results if 'metrics' in r]
+        if successful_results:
+            avg_metrics = {
+                'accuracy': sum(r['metrics']['accuracy'] for r in successful_results) / len(successful_results),
+                'precision': sum(r['metrics']['precision'] for r in successful_results) / len(successful_results),
+                'recall': sum(r['metrics']['recall'] for r in successful_results) / len(successful_results),
+                'f1': sum(r['metrics']['f1'] for r in successful_results) / len(successful_results),
+            }
+            print(f"\n平均指标（{len(successful_results)} 个 split）:")
+            print(f"  - Accuracy:  {avg_metrics['accuracy']:.4f}")
+            print(f"  - Precision: {avg_metrics['precision']:.4f}")
+            print(f"  - Recall:    {avg_metrics['recall']:.4f}")
+            print(f"  - F1 Score:  {avg_metrics['f1']:.4f}")
+        print("=" * 80)
 
 
 if __name__ == "__main__":
