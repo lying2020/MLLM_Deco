@@ -75,20 +75,20 @@ def load_image(image_file):
     return image
 
 
-def auto_detect_questions(probe_exp_dir="probe_exp/train_set", split="adversarial", coco_root="/home/liying/Documents/dataset/coco"):
+def auto_detect_questions(coco_baseline_dir="pope_coco", split="adversarial", coco_root="/home/liying/Documents/dataset/coco"):
     """
-    从 probe_exp/train_set 目录读取问题文件
+    从 pope_coco 目录读取问题文件
 
     Args:
-        probe_exp_dir: probe_exp 目录路径
+        coco_baseline_dir: pope_coco 目录路径
         split: split 名称 (adversarial, popular, random)
         coco_root: COCO 数据集根目录
     """
-    probe_exp_dir = Path(probe_exp_dir)
+    coco_baseline_dir = Path(coco_baseline_dir)
     coco_root = Path(coco_root)
 
     # 构建问题文件路径
-    question_file = probe_exp_dir / f"coco_pope_{split}.json"
+    question_file = coco_baseline_dir / f"coco_pope_{split}.json"
 
     if not question_file.exists():
         raise FileNotFoundError(f"找不到问题文件: {question_file}")
@@ -126,12 +126,12 @@ def auto_detect_questions(probe_exp_dir="probe_exp/train_set", split="adversaria
     return all_questions
 
 
-def auto_generate_gt_file(probe_exp_dir="probe_exp/train_set", split="adversarial", coco_root="/home/liying/Documents/dataset/coco", output_file=None, results_dir=None):
+def auto_generate_gt_file(coco_baseline_dir="pope_coco", split="adversarial", coco_root="/home/liying/Documents/dataset/coco", output_file=None, results_dir=None):
     """
-    从 probe_exp/train_set 目录读取真值（Ground Truth）文件
+    从 pope_coco 目录读取真值（Ground Truth）文件
 
     Args:
-        probe_exp_dir: probe_exp 目录路径
+        coco_baseline_dir: pope_coco 目录路径
         split: split 名称 (adversarial, popular, random)
         coco_root: COCO 数据集根目录
         output_file: 输出文件路径（如果不指定，将自动生成）
@@ -140,11 +140,11 @@ def auto_generate_gt_file(probe_exp_dir="probe_exp/train_set", split="adversaria
     Returns:
         真值文件路径
     """
-    probe_exp_dir = Path(probe_exp_dir)
+    coco_baseline_dir = Path(coco_baseline_dir)
     coco_root = Path(coco_root)
 
     # 构建问题文件路径（GT 数据也在同一个文件中）
-    gt_file = probe_exp_dir / f"coco_pope_{split}.json"
+    gt_file = coco_baseline_dir / f"coco_pope_{split}.json"
 
     if not gt_file.exists():
         raise FileNotFoundError(f"找不到真值文件: {gt_file}")
@@ -198,7 +198,7 @@ def auto_generate_gt_file(probe_exp_dir="probe_exp/train_set", split="adversaria
     return output_file
 
 
-def auto_generate_question_file(probe_exp_dir="probe_exp/train_set", split="adversarial", coco_root="/home/liying/Documents/dataset/coco", output_file=None, results_dir=None):
+def auto_generate_question_file(coco_baseline_dir="pope_coco", split="adversarial", coco_root="/home/liying/Documents/dataset/coco", output_file=None, results_dir=None):
     """
     自动生成问题文件
 
@@ -219,7 +219,7 @@ def auto_generate_question_file(probe_exp_dir="probe_exp/train_set", split="adve
             os.makedirs(output_dir, exist_ok=True)
         # 如果 output_dir 为空字符串，说明文件在当前目录，不需要创建目录
 
-    questions = auto_detect_questions(probe_exp_dir, split, coco_root)
+    questions = auto_detect_questions(coco_baseline_dir, split, coco_root)
 
     # 保存问题文件
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -407,11 +407,8 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
             generated_ids = output_ids[:, input_token_len:]
             print(f"    - 生成的 token IDs 形状: {generated_ids.shape}")
             print(f"    - 生成的 token IDs: {generated_ids[0].tolist()}")
-            try:
-                generated_decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=False)[0]
-                print(f"    - 生成的 token 解码（带特殊token）: {repr(generated_decoded)}")
-            except Exception as e:
-                print(f"    - 生成的 token 解码失败: {e}")
+            generated_decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=False)[0]
+            print(f"    - 生成的 token 解码（带特殊token）: {repr(generated_decoded)}")
         else:
             print(f"    - ⚠️  警告: 没有生成新的 token！")
 
@@ -720,11 +717,11 @@ def eval_model(args):
 
     # 计算需要输出详细信息的样本索引（最多10个，均匀分布）
     total_samples = len(questions)
-    max_debug_samples = min(10, total_samples)
+    max_debug_samples = min(5, total_samples)
     if total_samples > 0:
         debug_indices = set()
         if total_samples <= max_debug_samples:
-            # 如果样本数少于等于10个，全部输出详细信息
+            # 如果样本数少于等于5个，全部输出详细信息
             debug_indices = set(range(total_samples))
         else:
             # 均匀分布选择样本
@@ -751,82 +748,67 @@ def eval_model(args):
             print(f"问题: {qs}")
             print(f"图像: {image_file}")
 
-        try:
-            # 准备输入
+        # 准备输入
+        if verbose:
+            print("\n" + "-" * 80)
+            print("[准备输入]")
+            print("-" * 80)
+        input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
+            model, tokenizer, image_processor, image_file, qs, conv_mode, device, verbose=verbose
+        )
+
+        # 生成回答
+        if verbose:
+            print("\n" + "-" * 80)
+            print("[生成回答]")
+            print("-" * 80)
+        outputs, output_token_len, input_token_len = generate_response(
+            model, tokenizer, input_ids, image_tensor, stopping_criteria,
+            args.temperature, args.top_p, args.max_new_tokens, device,
+            use_deco=args.use_deco,
+            alpha=args.alpha,
+            threshold_top_p=args.threshold_top_p,
+            threshold_top_k=args.threshold_top_k,
+            early_exit_layers=early_exit_layers,
+            num_beams=1,  # 添加 num_beams 参数，默认值为 1（贪婪搜索）
+            verbose=verbose
+        )
+
+        # 移除停止字符串
+        if outputs and outputs.endswith(stop_str):
+            outputs = outputs[:-len(stop_str)]
+        outputs = outputs.strip()
+
+        # 如果输出为空，记录警告
+        if not outputs:
             if verbose:
-                print("\n" + "-" * 80)
-                print("[准备输入]")
-                print("-" * 80)
-            input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
-                model, tokenizer, image_processor, image_file, qs, conv_mode, device, verbose=verbose
-            )
+                print(f"\n  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
+            else:
+                print(f"  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
 
-            # 生成回答
-            if verbose:
-                print("\n" + "-" * 80)
-                print("[生成回答]")
-                print("-" * 80)
-            outputs, output_token_len, input_token_len = generate_response(
-                model, tokenizer, input_ids, image_tensor, stopping_criteria,
-                args.temperature, args.top_p, args.max_new_tokens, device,
-                use_deco=args.use_deco,
-                alpha=args.alpha,
-                threshold_top_p=args.threshold_top_p,
-                threshold_top_k=args.threshold_top_k,
-                early_exit_layers=early_exit_layers,
-                num_beams=1,  # 添加 num_beams 参数，默认值为 1（贪婪搜索）
-                verbose=verbose
-            )
+        # 转换为 Yes/No
+        answer = recorder(outputs)
 
-            # 移除停止字符串
-            if outputs and outputs.endswith(stop_str):
-                outputs = outputs[:-len(stop_str)]
-            outputs = outputs.strip()
+        if verbose:
+            print(f"\n  [后处理] 结果转换:")
+            print(f"    - 原始输出: '{outputs}'")
+            print(f"    - 转换后答案: '{answer}'")
+            print("=" * 80)
 
-            # 如果输出为空，记录警告
-            if not outputs:
-                if verbose:
-                    print(f"\n  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
-                else:
-                    print(f"  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
-
-            # 转换为 Yes/No
-            answer = recorder(outputs)
-
-            if verbose:
-                print(f"\n  [后处理] 结果转换:")
-                print(f"    - 原始输出: '{outputs}'")
-                print(f"    - 转换后答案: '{answer}'")
-                print("=" * 80)
-
-            # 保存结果
-            ans_file.write(json.dumps({
-                "question_id": idx,
-                "prompt": cur_prompt,
-                "text": answer,
-                "model_id": model_name,
-                "image": image_file,
-                "metadata": {
-                    "output_token_len": output_token_len,
-                    "input_token_len": input_token_len,
-                    "raw_output": outputs
-                }
-            }, ensure_ascii=False) + "\n")
-            ans_file.flush()
-
-        except Exception as e:
-            print(f"\n[Error] 处理问题 {idx} 时出错: {e}")
-            # 保存错误信息
-            ans_file.write(json.dumps({
-                "question_id": idx,
-                "prompt": cur_prompt,
-                "text": "Error",
-                "model_id": model_name,
-                "image": image_file,
-                "metadata": {"error": str(e)}
-            }, ensure_ascii=False) + "\n")
-            ans_file.flush()
-            continue
+        # 保存结果
+        ans_file.write(json.dumps({
+            "question_id": idx,
+            "prompt": cur_prompt,
+            "text": answer,
+            "model_id": model_name,
+            "image": image_file,
+            "metadata": {
+                "output_token_len": output_token_len,
+                "input_token_len": input_token_len,
+                "raw_output": outputs
+            }
+        }, ensure_ascii=False) + "\n")
+        ans_file.flush()
 
     ans_file.close()
     print(f"\n✓ 评估完成！结果已保存到: {answers_file}")
@@ -850,7 +832,7 @@ def main():
     default_config = {
         "model_path": llava_v15_7b_path,
         "device": device_str,
-        "probe_exp_dir": str(project_root / "probe_exp" / "train_set"),
+        "coco_baseline_dir": str(project_root / "pope_coco"),
         "coco_root": "/home/liying/Documents/dataset/coco",
         "split": ["adversarial", "popular", "random"],  # 默认评估 adversarial split
         "use_deco": True,
@@ -862,7 +844,7 @@ def main():
         "temperature": 0,
         "top_p": None,
         "max_new_tokens": 15,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 200,
+        "num_samples": 0,
         "seed": 42
     }
 
@@ -880,8 +862,8 @@ def main():
 
     parser.add_argument("--split", type=str, default=default_split_str,
                        help="数据集 split，可以是单个值或逗号分隔的多个值（例如: adversarial,popular,random）")
-    parser.add_argument("--probe-exp-dir", type=str, default=default_config["probe_exp_dir"],
-                       help="probe_exp/train_set 目录路径")
+    parser.add_argument("--coco-baseline-dir", type=str, default=default_config["coco_baseline_dir"],
+                       help="coco_baseline_dir 目录路径")
     parser.add_argument("--coco-root", type=str, default=default_config["coco_root"],
                        help="COCO 数据集根目录路径")
     parser.add_argument("--question-file", type=str, default=None,
@@ -973,7 +955,7 @@ def main():
         print(f"自动生成真值文件（Ground Truth）- {current_split}")
         print("-" * 80)
         gt_file = auto_generate_gt_file(
-            probe_exp_dir=split_args.probe_exp_dir,
+            coco_baseline_dir=split_args.coco_baseline_dir,
             split=current_split,
             coco_root=split_args.coco_root,
             output_file=None,  # 使用默认路径（results/pope/pope_gt_{split}.json）
@@ -986,7 +968,7 @@ def main():
             print(f"自动生成问题文件 - {current_split}")
             print("-" * 80)
             question_file = auto_generate_question_file(
-                probe_exp_dir=split_args.probe_exp_dir,
+                coco_baseline_dir=split_args.coco_baseline_dir,
                 split=current_split,
                 coco_root=split_args.coco_root,
                 output_file=None,  # 使用默认路径（results/pope/pope_questions_{split}.jsonl）
@@ -1061,123 +1043,87 @@ def main():
         # 生成总结文件路径
         summary_file = split_args.answers_file.replace('.jsonl', '_summary.txt')
 
-        try:
-            # 直接调用评估函数
-            results = evaluate_pope(
-                gt_files_path=gt_file,
-                gen_files_path=split_args.answers_file,
-                output_errors_path=errors_file,
-                verbose=True
-            )
+        # 直接调用评估函数
+        results = evaluate_pope(
+            gt_files_path=gt_file,
+            gen_files_path=split_args.answers_file,
+            output_errors_path=errors_file,
+            verbose=True
+        )
 
+        print("\n" + "=" * 80)
+        print(f"✓ 结果评估完成 - {current_split}")
+        print("=" * 80)
+        print(f"错误样本文件: {errors_file}")
+        print(f"\n关键指标:")
+        print(f"  - Accuracy: {results['metrics']['accuracy']:.4f}")
+        print(f"  - Precision: {results['metrics']['precision']:.4f}")
+        print(f"  - Recall: {results['metrics']['recall']:.4f}")
+        print(f"  - F1: {results['metrics']['f1']:.4f}")
+
+        # 保存总结到txt文件
+        save_summary_to_file(
+            summary_file=summary_file,
+            args=split_args,
+            gt_file=gt_file,
+            question_file=split_args.question_file,
+            answers_file=split_args.answers_file,
+            errors_file=errors_file,
+            results=results,
+            model_name=get_model_name_from_path(split_args.model_path)
+        )
+        print(f"\n✓ 结果总结已保存到: {summary_file}")
+
+        # 如果使用 Deco，进行对比
+        if split_args.use_deco and vanilla_answers_file:
             print("\n" + "=" * 80)
-            print(f"✓ 结果评估完成 - {current_split}")
+            print(f"对比 Deco vs Vanilla - {current_split}")
             print("=" * 80)
-            print(f"错误样本文件: {errors_file}")
-            print(f"\n关键指标:")
-            print(f"  - Accuracy: {results['metrics']['accuracy']:.4f}")
-            print(f"  - Precision: {results['metrics']['precision']:.4f}")
-            print(f"  - Recall: {results['metrics']['recall']:.4f}")
-            print(f"  - F1: {results['metrics']['f1']:.4f}")
 
-            # 保存总结到txt文件
-            save_summary_to_file(
-                summary_file=summary_file,
-                args=split_args,
-                gt_file=gt_file,
-                question_file=split_args.question_file,
-                answers_file=split_args.answers_file,
-                errors_file=errors_file,
-                results=results,
-                model_name=get_model_name_from_path(split_args.model_path)
+            # 评估 Vanilla 版本
+            vanilla_errors_file = vanilla_answers_file.replace('.jsonl', '_errors.json')
+            vanilla_results = evaluate_pope(
+                gt_files_path=gt_file,
+                gen_files_path=vanilla_answers_file,
+                output_errors_path=vanilla_errors_file,
+                verbose=False  # 不重复打印详细信息
             )
-            print(f"\n✓ 结果总结已保存到: {summary_file}")
 
-            # 如果使用 Deco，进行对比
-            if split_args.use_deco and vanilla_answers_file:
-                print("\n" + "=" * 80)
-                print(f"对比 Deco vs Vanilla - {current_split}")
-                print("=" * 80)
+            # 生成对比 JSON 文件
+            comparison_file = split_args.answers_file.replace('.jsonl', '_comparison.json')
+            comparison_result = compare_deco_vs_vanilla(
+                deco_results=results,
+                vanilla_results=vanilla_results,
+                deco_answers_file=split_args.answers_file,
+                vanilla_answers_file=vanilla_answers_file,
+                gt_file=gt_file,
+                output_file=comparison_file
+            )
 
-                # 评估 Vanilla 版本
-                vanilla_errors_file = vanilla_answers_file.replace('.jsonl', '_errors.json')
-                vanilla_results = evaluate_pope(
-                    gt_files_path=gt_file,
-                    gen_files_path=vanilla_answers_file,
-                    output_errors_path=vanilla_errors_file,
-                    verbose=False  # 不重复打印详细信息
-                )
+            # 打印对比表格
+            print_comparison_table(deco_results=results, vanilla_results=vanilla_results, split_name=current_split)
 
-                # 生成对比 JSON 文件
-                comparison_file = split_args.answers_file.replace('.jsonl', '_comparison.json')
-                comparison_result = compare_deco_vs_vanilla(
-                    deco_results=results,
-                    vanilla_results=vanilla_results,
-                    deco_answers_file=split_args.answers_file,
-                    vanilla_answers_file=vanilla_answers_file,
-                    gt_file=gt_file,
-                    output_file=comparison_file
-                )
+            print(f"\n✓ 对比结果已保存到: {comparison_file}")
+            print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
+            print(f"  - 不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
+            print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
 
-                # 打印对比表格
-                print_comparison_table(deco_results=results, vanilla_results=vanilla_results, split_name=current_split)
-
-                print(f"\n✓ 对比结果已保存到: {comparison_file}")
-                print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
-                print(f"  - 不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
-                print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
-
-                # 保存结果到列表（包含对比信息）
-                all_results.append({
-                    'split': current_split,
-                    'gt_file': gt_file,
-                    'question_file': split_args.question_file,
-                    'answers_file': split_args.answers_file,
-                    'vanilla_answers_file': vanilla_answers_file,
-                    'errors_file': errors_file,
-                    'summary_file': summary_file,
-                    'comparison_file': comparison_file,
-                    'metrics': results['metrics'],
-                    'vanilla_metrics': vanilla_results['metrics'],
-                    'comparison': comparison_result
-                })
-            else:
-                # 不使用 Deco，只保存当前结果
-                all_results.append({
-                    'split': current_split,
-                    'gt_file': gt_file,
-                    'question_file': split_args.question_file,
-                    'answers_file': split_args.answers_file,
-                    'errors_file': errors_file,
-                    'summary_file': summary_file,
-                    'metrics': results['metrics']
-                })
-
-        except Exception as e:
-            print(f"\n✗ 执行评估时出错 - {current_split}: {e}")
-            import traceback
-            traceback.print_exc()
-            print("\n可以手动运行以下命令:")
-            print(f"  python3 eval_tool/eval_pope.py --gt_files {gt_file} --gen_files {split_args.answers_file} --output-errors {errors_file}")
-
-            # 即使评估失败，也保存基本信息到总结文件
-            try:
-                save_summary_to_file(
-                    summary_file=summary_file,
-                    args=split_args,
-                    gt_file=gt_file,
-                    question_file=split_args.question_file,
-                    answers_file=split_args.answers_file,
-                    errors_file=errors_file,
-                    results=None,
-                    model_name=get_model_name_from_path(split_args.model_path),
-                    error=str(e)
-                )
-                print(f"✓ 基本信息已保存到: {summary_file}")
-            except Exception as save_error:
-                print(f"⚠️  保存总结文件时出错: {save_error}")
-
-            # 记录失败的结果
+            # 保存结果到列表（包含对比信息）
+            all_results.append({
+                'split': current_split,
+                'gt_file': gt_file,
+                'question_file': split_args.question_file,
+                'answers_file': split_args.answers_file,
+                'vanilla_answers_file': vanilla_answers_file,
+                'errors_file': errors_file,
+                'summary_file': summary_file,
+                'comparison_file': comparison_file,
+                'metrics': results['metrics'],
+                'vanilla_metrics': vanilla_results['metrics'],
+                'comparison': comparison_result
+            })
+        else:
+            # 不使用 Deco，只保存当前结果
             all_results.append({
                 'split': current_split,
                 'gt_file': gt_file,
@@ -1185,7 +1131,7 @@ def main():
                 'answers_file': split_args.answers_file,
                 'errors_file': errors_file,
                 'summary_file': summary_file,
-                'error': str(e)
+                'metrics': results['metrics']
             })
 
         print("=" * 80)

@@ -72,6 +72,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         **kwargs,  # Accept additional kwargs for compatibility
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        # prepare_inputs_labels_for_multimodal
         if inputs_embeds is None:
             (
                 input_ids,

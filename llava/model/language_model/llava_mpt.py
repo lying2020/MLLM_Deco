@@ -39,7 +39,7 @@ class LlavaMptModel(LlavaMetaModel, MptModel):
         return self.wte(x)
 
 
-class LlavaMptForCausalLM(MptForCausalLM, LlavaMetaForCausalLM):
+class LlavaMPTForCausalLM(MptForCausalLM, LlavaMetaForCausalLM):
     config_class = LlavaMptConfig
     supports_gradient_checkpointing = True
 
@@ -96,4 +96,4 @@ class LlavaMptForCausalLM(MptForCausalLM, LlavaMetaForCausalLM):
 
 
 AutoConfig.register("llava_mpt", LlavaMptConfig)
-AutoModelForCausalLM.register(LlavaMptConfig, LlavaMptForCausalLM)
+AutoModelForCausalLM.register(LlavaMptConfig, LlavaMPTForCausalLM)

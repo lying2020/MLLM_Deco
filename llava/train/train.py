@@ -786,10 +786,7 @@ def train():
         if 'mpt' in model_args.model_name_or_path:
             config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
             config.attn_config['attn_impl'] = training_args.mpt_attn_impl
-            # Lazy import MPT only when needed
-            if LlavaMptForCausalLM is None:
-                from llava.model.language_model.llava_mpt import LlavaMptForCausalLM
-            model = LlavaMptForCausalLM.from_pretrained(
+            model = LlavaMPTForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,

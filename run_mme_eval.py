@@ -345,26 +345,23 @@ def save_summary_to_file(summary_file, args, answers_file, model_name=None, erro
             f.write(f"评估失败: {error}\n")
         else:
             # 统计答案数量
-            try:
-                with open(answers_file, 'r', encoding='utf-8') as af:
-                    total_answers = sum(1 for _ in af)
-                f.write(f"总答案数: {total_answers}\n")
+            with open(answers_file, 'r', encoding='utf-8') as af:
+                total_answers = sum(1 for _ in af)
+            f.write(f"总答案数: {total_answers}\n")
 
-                # 统计 Yes/No 分布
-                with open(answers_file, 'r', encoding='utf-8') as af:
-                    yes_count = 0
-                    no_count = 0
-                    for line in af:
-                        item = json.loads(line.strip())
-                        answer = item.get("text", "").strip()
-                        if answer.lower() == "yes":
-                            yes_count += 1
-                        elif answer.lower() == "no":
-                            no_count += 1
-                f.write(f"Yes 答案数: {yes_count}\n")
-                f.write(f"No 答案数: {no_count}\n")
-            except Exception as e:
-                f.write(f"无法读取答案文件: {e}\n")
+            # 统计 Yes/No 分布
+            with open(answers_file, 'r', encoding='utf-8') as af:
+                yes_count = 0
+                no_count = 0
+                for line in af:
+                    item = json.loads(line.strip())
+                    answer = item.get("text", "").strip()
+                    if answer.lower() == "yes":
+                        yes_count += 1
+                    elif answer.lower() == "no":
+                        no_count += 1
+            f.write(f"Yes 答案数: {yes_count}\n")
+            f.write(f"No 答案数: {no_count}\n")
         f.write("\n")
 
         # 分隔线
@@ -509,77 +506,59 @@ def eval_model(args):
             print(f"问题: {qs}")
             print(f"图像: {image_path}")
 
-        try:
+        # 准备输入
+        input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
+            model, tokenizer, image_processor, image_path, qs, conv_mode, device, verbose=verbose
+        )
 
-            # 准备输入
-            input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
-                model, tokenizer, image_processor, image_path, qs, conv_mode, device, verbose=verbose
-            )
+        # 生成回答
+        outputs, output_token_len, input_token_len = generate_response(
+            model, tokenizer, input_ids, image_tensor, stopping_criteria,
+            args.temperature, args.top_p, args.top_k, args.max_new_tokens, device,
+            use_deco=args.use_deco,
+            alpha=args.alpha,
+            threshold_top_p=args.threshold_top_p,
+            threshold_top_k=args.threshold_top_k,
+            early_exit_layers=early_exit_layers,
+            verbose=verbose
+        )
 
-            # 生成回答
-            outputs, output_token_len, input_token_len = generate_response(
-                model, tokenizer, input_ids, image_tensor, stopping_criteria,
-                args.temperature, args.top_p, args.top_k, args.max_new_tokens, device,
-                use_deco=args.use_deco,
-                alpha=args.alpha,
-                threshold_top_p=args.threshold_top_p,
-                threshold_top_k=args.threshold_top_k,
-                early_exit_layers=early_exit_layers,
-                verbose=verbose
-            )
+        # 移除停止字符串
+        if outputs and outputs.endswith(stop_str):
+            outputs = outputs[:-len(stop_str)]
+        outputs = outputs.strip()
 
-            # 移除停止字符串
-            if outputs and outputs.endswith(stop_str):
-                outputs = outputs[:-len(stop_str)]
-            outputs = outputs.strip()
-
-            # 如果输出为空，记录警告
-            if not outputs:
-                if verbose:
-                    print(f"\n  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
-                else:
-                    print(f"  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
-
-            # 转换为 Yes/No
-            raw_output = outputs
-            answer = recorder(outputs)
-
+        # 如果输出为空，记录警告
+        if not outputs:
             if verbose:
-                print(f"\n  [后处理] 结果转换:")
-                print(f"    - 原始输出: '{raw_output}'")
-                print(f"    - 转换后答案: '{answer}'")
-                print("=" * 80)
+                print(f"\n  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
+            else:
+                print(f"  [Warning] 问题 {idx} 生成结果为空，output_token_len={output_token_len}")
 
-            # 保存结果
-            ans_file.write(json.dumps({
-                "question_id": idx,
-                "prompt": cur_prompt,
-                "text": answer,
-                "model_id": model_name,
-                "image": image_file_for_output,  # 只保存文件名或相对路径
-                "metadata": {
-                    "output_token_len": output_token_len,
-                    "input_token_len": input_token_len,
-                    "raw_output": raw_output
-                }
-            }, ensure_ascii=False) + "\n")
-            ans_file.flush()
+        # 转换为 Yes/No
+        raw_output = outputs
+        answer = recorder(outputs)
 
-        except Exception as e:
-            print(f"\n[Error] 处理问题 {idx} 时出错: {e}")
-            import traceback
-            traceback.print_exc()
-            # 保存错误信息
-            ans_file.write(json.dumps({
-                "question_id": idx,
-                "prompt": cur_prompt,
-                "text": "Error",
-                "model_id": model_name,
-                "image": image_file_for_output if 'image_file_for_output' in locals() else "",
-                "metadata": {"error": str(e)}
-            }, ensure_ascii=False) + "\n")
-            ans_file.flush()
-            continue
+        if verbose:
+            print(f"\n  [后处理] 结果转换:")
+            print(f"    - 原始输出: '{raw_output}'")
+            print(f"    - 转换后答案: '{answer}'")
+            print("=" * 80)
+
+        # 保存结果
+        ans_file.write(json.dumps({
+            "question_id": idx,
+            "prompt": cur_prompt,
+            "text": answer,
+            "model_id": model_name,
+            "image": image_file_for_output,  # 只保存文件名或相对路径
+            "metadata": {
+                "output_token_len": output_token_len,
+                "input_token_len": input_token_len,
+                "raw_output": raw_output
+            }
+        }, ensure_ascii=False) + "\n")
+        ans_file.flush()
 
     ans_file.close()
     print(f"\n✓ 评估完成！结果已保存到: {answers_file}")
@@ -715,26 +694,21 @@ def main():
         print("对比 Deco vs Vanilla")
         print("=" * 80)
 
-        try:
-            # 打印对比表格
-            print_comparison_table(deco_answers_file=args.answers_file, vanilla_answers_file=vanilla_answers_file)
+        # 打印对比表格
+        print_comparison_table(deco_answers_file=args.answers_file, vanilla_answers_file=vanilla_answers_file)
 
-            # 生成对比 JSON 文件
-            comparison_file = args.answers_file.replace('.jsonl', '_comparison.json')
-            comparison_result = compare_deco_vs_vanilla(
-                deco_answers_file=args.answers_file,
-                vanilla_answers_file=vanilla_answers_file,
-                output_file=comparison_file
-            )
+        # 生成对比 JSON 文件
+        comparison_file = args.answers_file.replace('.jsonl', '_comparison.json')
+        comparison_result = compare_deco_vs_vanilla(
+            deco_answers_file=args.answers_file,
+            vanilla_answers_file=vanilla_answers_file,
+            output_file=comparison_file
+        )
 
-            print(f"\n✓ 对比结果已保存到: {comparison_file}")
-            print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
-            print(f"  - 答案不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
-            print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
-        except Exception as e:
-            print(f"⚠️  对比时出错: {e}")
-            import traceback
-            traceback.print_exc()
+        print(f"\n✓ 对比结果已保存到: {comparison_file}")
+        print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
+        print(f"  - 答案不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
+        print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
     else:
         # 不使用 Deco，正常处理
         if args.answers_file is None:

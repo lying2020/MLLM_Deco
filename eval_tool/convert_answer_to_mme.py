@@ -41,7 +41,7 @@ def get_gt(data_path):
 if __name__ == "__main__":
 
     args = get_args()
-    GT = get_gt(data_path='/data1/wcx/MME_Benchmark_release_version/')# /path/to/experiments/data/MME_Benchmark_release_version')
+    GT = get_gt(data_path='MME_Benchmark_release_version/')# /path/to/experiments/data/MME_Benchmark_release_version')
     result_dir = os.path.join(args.log_path, file_name)
     os.makedirs(result_dir, exist_ok=True)
 
