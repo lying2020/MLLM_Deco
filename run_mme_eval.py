@@ -306,7 +306,7 @@ def save_summary_to_file(summary_file, args, answers_file, model_name=None, erro
         if model_name:
             f.write(f"模型名称: {model_name}\n")
         f.write(f"设备: {args.device}\n")
-        f.write(f"图像文件夹: {args.image_folder}\n")
+        f.write(f"MME 数据路径: {args.mme_data_path}\n")
         f.write(f"问题文件: {args.question_file}\n")
         f.write("\n")
 
@@ -380,7 +380,7 @@ def eval_model(args):
     print("=" * 80)
     print(f"模型路径: {args.model_path}")
     print(f"设备: {args.device}")
-    print(f"图像文件夹: {args.image_folder}")
+    print(f"MME 数据路径: {args.mme_data_path}")
     print(f"问题文件: {args.question_file}")
     print(f"答案文件: {args.answers_file}")
     if args.use_deco:
@@ -413,7 +413,20 @@ def eval_model(args):
 
     # 加载问题
     print(f"\n[2/3] 正在加载问题文件: {args.question_file}")
-    questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
+    question_file_path = os.path.expanduser(args.question_file)
+
+    # 判断文件格式：JSON 数组或 JSONL
+    with open(question_file_path, 'r', encoding='utf-8') as f:
+        first_line = f.readline().strip()
+        f.seek(0)  # 重置文件指针
+
+        if first_line.startswith('['):
+            # JSON 数组格式（all_metadata.json）
+            questions = json.load(f)
+        else:
+            # JSONL 格式（每行一个 JSON）
+            questions = [json.loads(line) for line in f if line.strip()]
+
     total_questions = len(questions)
     print(f"✓ 加载了 {total_questions} 个问题")
 
@@ -445,13 +458,46 @@ def eval_model(args):
             print(f"将输出 {len(debug_indices)} 个样本的详细信息用于调试（样本索引: {sorted(debug_indices)}）")
 
     for sample_idx, line in enumerate(tqdm(questions, desc="处理进度")):
-        idx = line["question_id"]
-        image_file = line["image"]
-        qs = line["text"]
+        # 处理不同的数据格式
+        if "question_id" in line:
+            idx = line["question_id"]
+        else:
+            idx = line.get("question_id", sample_idx)
+
+        # 获取问题文本
+        if "question" in line:
+            qs = line["question"]
+        elif "text" in line:
+            qs = line["text"]
+        else:
+            qs = line.get("prompt", "")
+
         cur_prompt = qs
 
         # one word processing (保持原有逻辑)
         qs = qs.split('\n')[0]
+
+        # 获取图像文件路径
+        if "image_file" in line:
+            # all_metadata.json 格式：image_file 是相对路径
+            image_file_rel = line["image_file"]
+            image_path = os.path.join(args.mme_data_path, image_file_rel)
+            image_file_for_output = image_file_rel  # 用于输出
+        elif "image" in line:
+            # JSONL 格式：image 可能是相对路径或文件名
+            image_file = line["image"]
+            if os.path.isabs(image_file):
+                image_path = image_file
+                image_file_for_output = os.path.basename(image_file)
+            else:
+                # 尝试在 extracted_images 目录下查找
+                image_path = os.path.join(args.mme_data_path, "extracted_images", image_file)
+                if not os.path.exists(image_path):
+                    # 如果不在 extracted_images，尝试直接在 mme_data_path 下
+                    image_path = os.path.join(args.mme_data_path, image_file)
+                image_file_for_output = image_file
+        else:
+            raise ValueError(f"问题 {idx} 中找不到图像路径字段")
 
         # 判断是否需要输出详细信息
         verbose = sample_idx in debug_indices
@@ -461,11 +507,9 @@ def eval_model(args):
             print(f"[样本 {sample_idx + 1}/{total_questions}] Question ID: {idx}")
             print("=" * 80)
             print(f"问题: {qs}")
-            print(f"图像: {image_file}")
+            print(f"图像: {image_path}")
 
         try:
-            # 构建完整图像路径
-            image_path = os.path.join(args.image_folder, image_file)
 
             # 准备输入
             input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
@@ -512,7 +556,7 @@ def eval_model(args):
                 "prompt": cur_prompt,
                 "text": answer,
                 "model_id": model_name,
-                "image": image_file,
+                "image": image_file_for_output,  # 只保存文件名或相对路径
                 "metadata": {
                     "output_token_len": output_token_len,
                     "input_token_len": input_token_len,
@@ -531,7 +575,7 @@ def eval_model(args):
                 "prompt": cur_prompt,
                 "text": "Error",
                 "model_id": model_name,
-                "image": image_file,
+                "image": image_file_for_output if 'image_file_for_output' in locals() else "",
                 "metadata": {"error": str(e)}
             }, ensure_ascii=False) + "\n")
             ans_file.flush()
@@ -568,9 +612,9 @@ def main():
     default_config = {
         "model_path": project.llava_v15_7b_path,
         "device": device,
-        "image_folder": "/path/to/MME_Benchmark_release_version",  # 需要根据实际情况修改
-        "question_file": "/path/to/MME/llava_hallu_mme.jsonl",  # 需要根据实际情况修改
-        "use_deco": True,
+        "mme_data_path": project.mme_data_path,  # MME 数据根目录
+        "question_file": os.path.join(project.mme_data_path, "metadata", "all_metadata.json"),  # 问题文件路径
+        "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
@@ -587,10 +631,10 @@ def main():
     parser = argparse.ArgumentParser(description="MME 评估 - 生成答案(所有参数可选)")
 
     # 数据集参数
-    parser.add_argument("--image-folder", type=str, default=default_config["image_folder"],
-                       help="MME 图像文件夹路径")
+    parser.add_argument("--mme-data-path", type=str, default=default_config["mme_data_path"],
+                       help="MME 数据根目录路径（包含 extracted_images 和 metadata 目录）")
     parser.add_argument("--question-file", type=str, default=default_config["question_file"],
-                       help="问题文件路径(JSONL 格式)")
+                       help="问题文件路径（JSON 格式，包含问题数组）")
 
     # 模型参数
     parser.add_argument("--model-path", type=str, default=default_config["model_path"],

@@ -158,8 +158,10 @@ def auto_generate_gt_file(probe_exp_dir="probe_exp/train_set", split="adversaria
         output_file = os.path.join(results_dir, f"pope_gt_{split}.json")
     else:
         # 如果指定了输出文件，确保目录存在
-        output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = os.path.dirname(output_file)
+        if output_dir:  # 如果 output_dir 不为空字符串，创建目录
+            os.makedirs(output_dir, exist_ok=True)
+        # 如果 output_dir 为空字符串，说明文件在当前目录，不需要创建目录
 
     all_gt_data = []
 
@@ -212,8 +214,10 @@ def auto_generate_question_file(probe_exp_dir="probe_exp/train_set", split="adve
         output_file = os.path.join(results_dir, f"pope_questions_{split}.jsonl")
     else:
         # 如果指定了输出文件，确保目录存在
-        output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = os.path.dirname(output_file)
+        if output_dir:  # 如果 output_dir 不为空字符串，创建目录
+            os.makedirs(output_dir, exist_ok=True)
+        # 如果 output_dir 为空字符串，说明文件在当前目录，不需要创建目录
 
     questions = auto_detect_questions(probe_exp_dir, split, coco_root)
 
@@ -855,10 +859,10 @@ def main():
         "threshold_top_k": 20,
         "start_layer": 20,
         "end_layer": 29,
-        "temperature": -1,
+        "temperature": 0,
         "top_p": None,
         "max_new_tokens": 15,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 500,
+        "num_samples": 200,
         "seed": 42
     }
 

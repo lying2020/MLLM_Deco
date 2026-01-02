@@ -50,7 +50,7 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
-    
+
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
@@ -63,9 +63,9 @@ def get_chunk(lst, n, k):
 
 
 def eval_model(args):
-    
+
     # set up gpu and logging
-    
+
     dist_util.setup_dist(args)
     device = dist_util.device()
 
@@ -86,8 +86,8 @@ def eval_model(args):
     logger.info(f"question_file : {args.question_file}")
 
 
-    
-    
+
+
     # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -107,7 +107,7 @@ def eval_model(args):
         qs = line["text"]
         cur_prompt = qs
         # one word processing
-        qs = qs.split('\n')[0] 
+        qs = qs.split('\n')[0]
 
         if model.config.mm_use_im_start_end:
             qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
@@ -123,7 +123,7 @@ def eval_model(args):
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda(0)
 
         image = Image.open(os.path.join(args.image_folder, image_file))
-        image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0] 
+        image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
         keywords = [stop_str]
         stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
@@ -138,7 +138,7 @@ def eval_model(args):
                 max_new_tokens=1024,
                 use_deco=True,
                 alpha = args.alpha,
-                threshold_top_p=args.threshold_top_p, 
+                threshold_top_p=args.threshold_top_p,
                 threshold_top_k=args.threshold_top_k,
                 early_exit_layers=[i for i in range(args.start_layer, args.end_layer)],
                 output_hidden_states=True,
@@ -156,9 +156,9 @@ def eval_model(args):
             outputs = outputs[:-len(stop_str)]
         outputs = outputs.strip()
         logger.info(f"[{image_file}]")
-        logger.info(f"prompt: {cur_prompt}") 
-        logger.info(f"text: {outputs}")  
-        outputs = recorder(outputs)          
+        logger.info(f"prompt: {cur_prompt}")
+        logger.info(f"text: {outputs}")
+        outputs = recorder(outputs)
 
         ans_file.write(json.dumps({"question_id": idx,
                                    "prompt": cur_prompt,
@@ -182,7 +182,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--top_k", type=int, default=None)
-    
+
     parser.add_argument("--log_path", type=str, default=".../code/DoLa_MLLM")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--noise_step", type=int, default=500)
@@ -190,7 +190,7 @@ if __name__ == "__main__":
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-    
+
     parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--threshold_top_p", type=float, default=0.9)
     parser.add_argument("--threshold_top_k", type=int, default=20)
