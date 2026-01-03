@@ -990,7 +990,7 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                 vision_hidden = model.mm_projector(vision_hidden)
                 num_image_tokens = vision_hidden.shape[1]
 
-    image_token_start = 1  # 跳过BOS token
+    image_token_start = 35  # 跳过BOS token
     image_token_end = image_token_start + (num_image_tokens if num_image_tokens > 0 else 576)
 
     # 为每个生成步骤收集所有层的logits信息（用于生成5×32 heatmap）

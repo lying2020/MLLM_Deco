@@ -29,6 +29,8 @@ import numpy as np
 from datetime import datetime
 from typing import List, Dict, Optional, Union, Tuple
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端，不显示图片窗口
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.colors import LinearSegmentedColormap
@@ -49,6 +51,46 @@ from llava.model.builder import load_pretrained_model
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 
 
+
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description="LLaVA 模型架构分析和 Attention 可视化")
+
+    # 模型参数
+    parser.add_argument("--model-path", type=str,
+                       default="/home/liying/Documents/llava-v1.5-7b",
+                       help="模型路径")
+    parser.add_argument("--device", type=str, default="cuda",
+                       help="设备 (cuda/cpu)")
+    parser.add_argument("--conv-mode", type=str, default="llava_v1",
+                       help="对话模式")
+
+    # 输入参数
+    default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
+    # default_image_file = "./image.png"
+    # default_prompt = "Please describe this image in detail."
+    parser.add_argument("--image-file", type=str,
+                       default=default_image_file,
+                       help=f"图像文件路径(默认: {default_image_file})")
+    parser.add_argument("--prompt", type=str, default=default_prompt,
+                       help=f"提示词(默认: {default_prompt})")
+
+    # 分析参数
+    parser.add_argument("--target-layers", type=str, default="odd",
+                       help="目标层索引，用逗号分隔，如 '0,2,4' 或 'even' 表示偶数层，'odd' 表示奇数层")
+    parser.add_argument("--output-dir", type=str, default=None,
+                       help="输出目录(默认为 tests/output)")
+    parser.add_argument("--max-new-tokens", type=int, default=10,
+                       help="生成的最大token数量")
+    parser.add_argument("--extract-generation-attention", type=bool, default=True,
+                       help="是否提取生成过程中的attention map(True/False)")
+    parser.add_argument("--save-attention-maps", type=bool, default=True,
+                       help="是否保存attention map图片（默认False）")
+
+    return parser.parse_args()
+
+
 def load_image(image_file):
     """加载图像文件，支持本地文件和 URL"""
     if image_file.startswith("http") or image_file.startswith("https"):
@@ -57,129 +99,6 @@ def load_image(image_file):
     else:
         image = Image.open(image_file).convert("RGB")
     return image
-
-
-def count_parameters(model):
-    """计算模型参数量"""
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return total_params, trainable_params
-
-
-def analyze_model_architecture(model, tokenizer, output_dir):
-    """分析模型架构，输出各层信息"""
-    print("\n" + "=" * 80)
-    print("模型架构分析")
-    print("=" * 80)
-
-    arch_info = {
-        "model_type": type(model).__name__,
-        "total_parameters": 0,
-        "trainable_parameters": 0,
-        "components": {}
-    }
-
-    # 计算总参数量
-    total_params, trainable_params = count_parameters(model)
-    arch_info["total_parameters"] = total_params
-    arch_info["trainable_parameters"] = trainable_params
-
-    print(f"模型类型: {arch_info['model_type']}")
-    print(f"总参数量: {total_params:,} ({total_params / 1e9:.2f}B)")
-    print(f"可训练参数量: {trainable_params:,} ({trainable_params / 1e9:.2f}B)")
-
-    # 分析 Vision Tower
-    if hasattr(model, 'get_vision_tower'):
-        vision_tower = model.get_vision_tower()
-        if vision_tower is not None:
-            vision_params, _ = count_parameters(vision_tower)
-            arch_info["components"]["vision_tower"] = {
-                "type": type(vision_tower).__name__,
-                "parameters": vision_params,
-                "hidden_size": getattr(vision_tower, 'hidden_size', 'N/A') if hasattr(vision_tower, 'hidden_size') else 'N/A'
-            }
-            print(f"\nVision Tower:")
-            print(f"  类型: {type(vision_tower).__name__}")
-            print(f"  参数量: {vision_params:,}")
-
-    # 分析 MM Projector
-    if hasattr(model, 'mm_projector'):
-        projector = model.mm_projector
-        if projector is not None:
-            projector_params, _ = count_parameters(projector)
-            arch_info["components"]["mm_projector"] = {
-                "type": type(projector).__name__,
-                "parameters": projector_params
-            }
-            print(f"\nMM Projector:")
-            print(f"  类型: {type(projector).__name__}")
-            print(f"  参数量: {projector_params:,}")
-
-    # 分析 Language Model
-    if hasattr(model, 'get_model'):
-        lang_model = model.get_model()
-        if lang_model is not None:
-            lang_params, _ = count_parameters(lang_model)
-            arch_info["components"]["language_model"] = {
-                "type": type(lang_model).__name__,
-                "parameters": lang_params
-            }
-            print(f"\nLanguage Model:")
-            print(f"  类型: {type(lang_model).__name__}")
-            print(f"  参数量: {lang_params:,}")
-
-            # 分析 Transformer Layers
-            if hasattr(lang_model, 'layers'):
-                layers = lang_model.layers
-                arch_info["components"]["transformer_layers"] = {
-                    "num_layers": len(layers),
-                    "layers": []
-                }
-                print(f"\nTransformer Layers: {len(layers)} 层")
-
-                for i, layer in enumerate(layers):
-                    layer_params, _ = count_parameters(layer)
-                    layer_info = {
-                        "layer_index": i,
-                        "type": type(layer).__name__,
-                        "parameters": layer_params
-                    }
-
-                    # 获取层配置信息
-                    if hasattr(layer, 'self_attn'):
-                        attn = layer.self_attn
-                        if hasattr(attn, 'num_heads'):
-                            layer_info["num_heads"] = attn.num_heads
-                        if hasattr(attn, 'hidden_size'):
-                            layer_info["hidden_size"] = attn.hidden_size
-                        if hasattr(attn, 'head_dim'):
-                            layer_info["head_dim"] = attn.head_dim
-
-                    arch_info["components"]["transformer_layers"]["layers"].append(layer_info)
-                    print(f"  Layer {i}: {type(layer).__name__}, 参数量: {layer_params:,}")
-
-    # 分析 LM Head
-    if hasattr(model, 'lm_head'):
-        lm_head = model.lm_head
-        if lm_head is not None:
-            head_params, _ = count_parameters(lm_head)
-            arch_info["components"]["lm_head"] = {
-                "type": type(lm_head).__name__,
-                "parameters": head_params,
-                "in_features": lm_head.in_features if hasattr(lm_head, 'in_features') else 'N/A',
-                "out_features": lm_head.out_features if hasattr(lm_head, 'out_features') else 'N/A'
-            }
-            print(f"\nLM Head:")
-            print(f"  类型: {type(lm_head).__name__}")
-            print(f"  参数量: {head_params:,}")
-
-    # 保存架构信息
-    arch_file = os.path.join(output_dir, "model_architecture.json")
-    with open(arch_file, 'w', encoding='utf-8') as f:
-        json.dump(arch_info, f, ensure_ascii=False, indent=2)
-    print(f"\n✓ 架构信息已保存到: {arch_file}")
-
-    return arch_info
 
 
 def extract_hidden_states_and_attention(model, tokenizer, image_processor, image_file, prompt,
@@ -329,17 +248,6 @@ def extract_hidden_states_and_attention(model, tokenizer, image_processor, image
 
     hidden_states = outputs.hidden_states
     attentions = outputs.attentions
-
-    print(f"\nHidden States:")
-    print(f"  层数: {len(hidden_states)}")
-    for i, h in enumerate(hidden_states):
-        print(f"  Layer {i}: {h.shape}")
-
-    print(f"\nAttention Weights:")
-    print(f"  层数: {len(attentions)}")
-    for i, attn in enumerate(attentions):
-        if attn is not None:
-            print(f"  Layer {i}: {attn.shape if isinstance(attn, torch.Tensor) else 'N/A'}")
 
     # 验证图像 token 位置
     if len(attentions) > 0 and attentions[0] is not None:
@@ -1226,20 +1134,21 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
     print(f"  序列长度: {input_ids.shape[1]}")
     print(f"  IMAGE_TOKEN_INDEX值: {IMAGE_TOKEN_INDEX}")
     print(f"  图像token占位符数量: {len(image_token_placeholder_positions)}")
+    image_first_pos = 1
     if len(image_token_placeholder_positions) > 0:
         print(f"  图像token占位符位置: {image_token_placeholder_positions}")
         print(f"  第一个IMAGE_TOKEN_INDEX位置: {image_token_placeholder_positions[0]}")
         # 打印第一个IMAGE_TOKEN_INDEX前后的token信息
-        first_pos = int(image_token_placeholder_positions[0])
-        print(f"  第一个IMAGE_TOKEN_INDEX之前的token数量: {first_pos}")
-        if first_pos > 0:
-            tokens_before = input_ids[0, :first_pos].cpu().tolist()
+        image_first_pos = int(image_token_placeholder_positions[0])
+        print(f"  第一个IMAGE_TOKEN_INDEX之前的token数量: {image_first_pos}")
+        if image_first_pos > 0:
+            tokens_before = input_ids[0, :image_first_pos].cpu().tolist()
             tokens_before_text = [tokenizer.decode([tid]) for tid in tokens_before]
-            print(f"  之前的tokens (前10个): {tokens_before_text[:10]}")
-        if first_pos < input_ids.shape[1] - 1:
-            tokens_after = input_ids[0, first_pos+1:first_pos+6].cpu().tolist()
+            print(f"  之前的tokens({len(tokens_before_text)}): {tokens_before_text}")
+        if image_first_pos < input_ids.shape[1] - 1:
+            tokens_after = input_ids[0, image_first_pos+1:].cpu().tolist()
             tokens_after_text = [tokenizer.decode([tid]) for tid in tokens_after]
-            print(f"  之后的tokens (5个): {tokens_after_text}")
+            print(f"  之后的tokens({len(tokens_after_text)}): {tokens_after_text}")
     else:
         print(f"  ⚠️  未找到IMAGE_TOKEN_INDEX占位符")
 
@@ -1248,25 +1157,70 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
     vision_hidden = None
     with torch.no_grad():
         vision_tower = model.get_vision_tower()
+        print(f"\n[调试] Vision Tower 检查:")
+        print(f"  vision_tower is None: {vision_tower is None}")
+
         if vision_tower is not None:
+            print(f"  vision_tower 类型: {type(vision_tower)}")
             try:
+                print(f"  [调试] 开始提取图像特征...")
+                print(f"  image_tensor shape: {image_tensor.shape}")
+                print(f"  image_tensor.unsqueeze(0).half().to(device) shape: {image_tensor.unsqueeze(0).half().to(device).shape}")
+
                 image_features = vision_tower(image_tensor.unsqueeze(0).half().to(device))
+                print(f"  [调试] image_features 类型: {type(image_features)}")
+
                 if hasattr(image_features, 'last_hidden_state'):
                     vision_hidden = image_features.last_hidden_state
+                    print(f"  [调试] 使用 last_hidden_state, shape: {vision_hidden.shape}")
                 elif isinstance(image_features, tuple):
                     vision_hidden = image_features[0]
+                    print(f"  [调试] 使用 tuple[0], shape: {vision_hidden.shape}")
                 elif isinstance(image_features, torch.Tensor):
                     vision_hidden = image_features
+                    print(f"  [调试] 使用 Tensor, shape: {vision_hidden.shape}")
+                else:
+                    vision_hidden = None
+                    print(f"  ⚠️  无法从 image_features 中提取 hidden state")
+                    print(f"     image_features 类型: {type(image_features)}")
+                    if hasattr(image_features, '__dict__'):
+                        print(f"     image_features 属性: {list(image_features.__dict__.keys())}")
 
-                if vision_hidden is not None and hasattr(model, 'mm_projector'):
-                    vision_hidden = model.mm_projector(vision_hidden)
-                    num_image_tokens = vision_hidden.shape[1]
-                    print(f"\n✓ 图像特征信息:")
-                    print(f"  Vision hidden shape: {vision_hidden.shape}")
-                    print(f"  图像token数量: {num_image_tokens}")
+                if vision_hidden is not None:
+                    print(f"  [调试] vision_hidden 提取成功, shape: {vision_hidden.shape}")
+                    print(f"  [调试] 检查 mm_projector...")
+
+                    # mm_projector 在 model.get_model() 中，不在 model 上
+                    lang_model = model.get_model() if hasattr(model, 'get_model') else None
+                    has_mm_projector = lang_model is not None and hasattr(lang_model, 'mm_projector')
+                    print(f"    hasattr(model, 'get_model'): {hasattr(model, 'get_model')}")
+                    print(f"    lang_model is not None: {lang_model is not None}")
+                    print(f"    hasattr(lang_model, 'mm_projector'): {has_mm_projector}")
+
+                    if has_mm_projector:
+                        print(f"    mm_projector 类型: {type(lang_model.mm_projector)}")
+                        vision_hidden = lang_model.mm_projector(vision_hidden)
+                        num_image_tokens = vision_hidden.shape[1]
+                        print(f"\n✓ 图像特征信息:")
+                        print(f"  Vision hidden shape (经过 mm_projector): {vision_hidden.shape}")
+                        print(f"  图像token数量: {num_image_tokens}")
+                    else:
+                        print(f"  ⚠️  模型没有 mm_projector（在 model.get_model() 中）")
+                        # 如果没有 mm_projector，直接使用 vision_hidden
+                        # 注意：vision_hidden 的维度是 [1, 576, 1024]，需要投影到 [1, 576, 4096]
+                        # 但如果没有 projector，我们仍然可以使用 576 作为图像 token 数量
+                        num_image_tokens = vision_hidden.shape[1] if len(vision_hidden.shape) >= 2 else 0
+                        print(f"  使用 vision_hidden 的 shape[1] 作为 num_image_tokens: {num_image_tokens}")
+                        print(f"  注意: vision_hidden 维度是 {vision_hidden.shape}，可能需要通过 mm_projector 投影")
+                else:
+                    print(f"  ⚠️  vision_hidden 为 None，无法继续处理")
             except Exception as e:
-                print(f"⚠️  提取vision hidden state时出错: {e}")
+                print(f"  ⚠️  提取 vision hidden state 时出错: {e}")
+                import traceback
+                traceback.print_exc()
                 vision_hidden = None
+        else:
+            print(f"  ⚠️  模型没有 vision_tower")
 
     # 准备multimodal inputs以确定图像token的实际位置
     with torch.no_grad():
@@ -1341,6 +1295,15 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
     # 使用generate并设置output_attentions=True
     print(f"\n开始生成，最多生成 {max_new_tokens} 个token...")
+    print(f"\n【生成停止机制说明】")
+    print(f"  1. EOS Token: 如果模型在某个步骤生成了 EOS token，生成会立即停止")
+    print(f"     - EOS token 是模型预测生成的，不是预先设定的")
+    print(f"     - 当模型认为应该结束时，会生成 EOS token")
+    print(f"  2. 停止字符串: 如果设置了 stopping_criteria，会在每个步骤后检查是否包含停止字符串")
+    print(f"     - 当前代码未设置 stopping_criteria，所以不依赖停止字符串")
+    print(f"  3. max_new_tokens: 最多生成 {max_new_tokens} 个新 token")
+    print(f"     - 如果达到这个限制，即使没有 EOS token 也会停止")
+
     with torch.no_grad():
         output_dict = model.generate(
             inputs=input_ids,
@@ -1350,52 +1313,67 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
             return_dict_in_generate=True,
             do_sample=False,  # 使用greedy decoding
             num_beams=1
+            # 注意: 当前没有设置 stopping_criteria，所以只依赖 EOS token 和 max_new_tokens
         )
 
     generated_ids = output_dict.sequences
     all_attentions = output_dict.attentions  # 这是一个tuple，每个元素对应一个生成步骤
 
+    # 详细分析 all_attentions 的结构
+    print(f"\n{'='*80}")
+    print(f"【Attention 结构分析】")
+    print(f"{'='*80}")
+    if all_attentions is not None:
+        print(f"✓ all_attentions 类型: {type(all_attentions)}")
+        print(f"✓ all_attentions 长度: {len(all_attentions)} (对应 {len(all_attentions)} 个生成步骤)")
+
+        # 分析第一个步骤的 attention 结构
+        if len(all_attentions) > 0:
+            first_step_attentions = all_attentions[0]
+            print(f"\n  [步骤 0] 的 attention 结构:")
+            print(f"    类型: {type(first_step_attentions)}")
+            if isinstance(first_step_attentions, (tuple, list)):
+                print(f"    长度: {len(first_step_attentions)} (对应 {len(first_step_attentions)} 个 Transformer 层)")
+                if len(first_step_attentions) > 0:
+                    first_layer_attn = first_step_attentions[0]
+                    if isinstance(first_layer_attn, torch.Tensor):
+                        print(f"    第 0 层 attention 形状: {first_layer_attn.shape}")
+                        if len(first_layer_attn.shape) == 4:
+                            batch, num_heads, query_len, key_len = first_layer_attn.shape
+                            print(f"      - batch_size: {batch}")
+                            print(f"      - num_heads: {num_heads}")
+                            print(f"      - query_len: {query_len} (只有最后一个新生成的 token)")
+                            print(f"      - key_len: {key_len} (所有历史 token 的长度)")
+
+        # 分析所有步骤
+        print(f"\n  [所有步骤概览]:")
+        for step_idx in range(len(all_attentions)):
+            step_attn = all_attentions[step_idx]
+            if isinstance(step_attn, (tuple, list)):
+                print(f"    步骤 {step_idx}: {len(step_attn)} 层")
+            else:
+                print(f"    步骤 {step_idx}: {type(step_attn)}")
+    else:
+        print(f"⚠️  all_attentions 为 None")
+
     # 检查生成的序列
     input_len = input_ids.shape[1]
     output_len = generated_ids.shape[1]
 
-    # 检查 generated_ids 是否包含 input_ids
-    # 如果 output_len < input_len，说明 generated_ids 只包含新生成的token
-    # 如果 output_len >= input_len，需要检查前缀是否匹配
-    if output_len < input_len:
-        # generated_ids 只包含新生成的token
-        generated_token_ids = generated_ids[0].cpu().tolist()
-        full_output_ids = input_ids[0].cpu().tolist() + generated_token_ids
-        print(f"⚠️  检测到 generated_ids 长度({output_len}) < input_len({input_len})，说明只包含新生成的token")
+    # generated_ids 只包含新生成的token
+    generated_token_ids_raw = generated_ids[0].cpu().tolist()
+
+    # 过滤掉 BOS token（如果存在），因为它不应该算作新生成的 token
+    # BOS token 通常是输入的一部分，或者是在生成开始前自动添加的
+    bos_token_id = tokenizer.bos_token_id if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None else None
+    if bos_token_id is not None and len(generated_token_ids_raw) > 0 and generated_token_ids_raw[0] == bos_token_id:
+        # 移除开头的 BOS token
+        generated_token_ids = generated_token_ids_raw[1:]
+        print(f"  [过滤] 移除了开头的 BOS token (token_id: {bos_token_id})")
     else:
-        # 检查前缀是否匹配
-        prefix_match = (input_ids[0] == generated_ids[0, :input_len]).all().item()
-        if prefix_match:
-            # generated_ids 包含完整的序列（input + output）
-            full_output_ids = generated_ids[0].cpu().tolist()
-            generated_token_ids = generated_ids[0, input_len:].cpu().tolist()
-        else:
-            # 前缀不匹配，可能 generated_ids 只包含新生成的token
-            # 或者 input_ids 在 prepare_inputs_labels_for_multimodal 后被修改了
-            print(f"⚠️  检测到 generated_ids 前缀与 input_ids 不匹配")
-            print(f"    input_ids 前5个: {input_ids[0, :5].cpu().tolist()}")
-            print(f"    generated_ids 前5个: {generated_ids[0, :5].cpu().tolist()}")
-            # 尝试从attention数量推断生成的token数量
-            if all_attentions is not None and len(all_attentions) > 0:
-                num_generated = len(all_attentions)
-                if output_len >= num_generated:
-                    # 假设最后 num_generated 个token是新生成的
-                    generated_token_ids = generated_ids[0, -num_generated:].cpu().tolist()
-                    full_output_ids = input_ids[0].cpu().tolist() + generated_token_ids
-                    print(f"    从attention数量推断，使用最后 {num_generated} 个token作为新生成的token")
-                else:
-                    # generated_ids 只包含新生成的token
-                    generated_token_ids = generated_ids[0].cpu().tolist()
-                    full_output_ids = input_ids[0].cpu().tolist() + generated_token_ids
-            else:
-                # 无法推断，使用整个 generated_ids 作为新生成的token
-                generated_token_ids = generated_ids[0].cpu().tolist()
-                full_output_ids = input_ids[0].cpu().tolist() + generated_token_ids
+        generated_token_ids = generated_token_ids_raw
+
+    full_output_ids = input_ids[0].cpu().tolist() + generated_token_ids
 
     print(f"\n{'='*80}")
     print(f"【推理结果 - Output IDs】")
@@ -1406,6 +1384,114 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
     print(f"✓ 新生成的Token IDs: {generated_token_ids}")
     print(f"✓ 新生成的Token数量: {len(generated_token_ids)}")
     print(f"✓ Attention步骤数量: {len(all_attentions) if all_attentions is not None else 0}")
+
+    # 详细分析 token 和 attention 的对应关系
+    print(f"\n【Token 与 Attention 对应关系分析】")
+    print(f"  generated_token_ids: {generated_token_ids}")
+
+    # 检查每个 token 是否是特殊 token
+    bos_token_id = tokenizer.bos_token_id if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None else None
+    eos_token_id = tokenizer.eos_token_id if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None else None
+    pad_token_id = tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None else None
+
+    print(f"  BOS token_id: {bos_token_id}")
+    print(f"  EOS token_id: {eos_token_id}")
+    print(f"  PAD token_id: {pad_token_id}")
+
+    # 分析每个 token
+    print(f"\n  每个 token 的详细信息:")
+    for i, token_id in enumerate(generated_token_ids):
+        token_type = "普通token"
+        if bos_token_id is not None and token_id == bos_token_id:
+            token_type = "BOS token (开始标记，通常不在生成步骤中)"
+        elif eos_token_id is not None and token_id == eos_token_id:
+            token_type = "EOS token (结束标记，生成后立即停止，可能没有对应的attention)"
+        elif pad_token_id is not None and token_id == pad_token_id:
+            token_type = "PAD token (填充标记)"
+
+        try:
+            token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+        except:
+            token_text = f"[无法解码: {token_id}]"
+
+        has_attention = i < len(all_attentions) if all_attentions is not None else False
+        print(f"    Token {i}: ID={token_id}, 文本='{token_text}', 类型={token_type}, 有attention={has_attention}")
+
+    # 过滤策略：根据 all_attentions 的长度来过滤 generated_token_ids
+    # 1. 如果 BOS token 在开头，过滤掉它（即使它有 attention，也不应该算作新生成的 token）
+    # 2. 过滤掉没有对应 attention 的 token（通常是 EOS token）
+    # 3. 确保过滤后的 token 数量与 all_attentions 的长度一致
+    num_attention_steps = len(all_attentions) if all_attentions is not None else 0
+
+    if num_attention_steps == 0:
+        print(f"\n  ⚠️  警告: all_attentions 为空，无法进行过滤")
+    else:
+        # 第一步：过滤掉开头的 BOS token（如果存在）
+        filtered_generated_token_ids = generated_token_ids.copy()
+        if bos_token_id is not None and len(filtered_generated_token_ids) > 0 and filtered_generated_token_ids[0] == bos_token_id:
+            # 移除开头的 BOS token
+            filtered_generated_token_ids = filtered_generated_token_ids[1:]
+            print(f"\n  [过滤步骤1] 移除了开头的 BOS token (token_id: {bos_token_id})")
+            print(f"    - 过滤前数量: {len(generated_token_ids)}")
+            print(f"    - 过滤后数量: {len(filtered_generated_token_ids)}")
+
+        # 第二步：根据 all_attentions 的长度，只保留对应数量的 token
+        # 如果过滤后仍有超出，说明有 token 没有对应的 attention（通常是 EOS token）
+        if len(filtered_generated_token_ids) > num_attention_steps:
+            filtered_out_tokens = filtered_generated_token_ids[num_attention_steps:]
+            filtered_generated_token_ids = filtered_generated_token_ids[:num_attention_steps]
+
+            print(f"\n  [过滤步骤2] 根据 all_attentions 长度过滤多余的 token:")
+            print(f"    - 过滤前数量: {len(filtered_generated_token_ids) + len(filtered_out_tokens)}")
+            print(f"    - all_attentions 数量: {num_attention_steps}")
+            print(f"    - 过滤后数量: {len(filtered_generated_token_ids)}")
+            if filtered_out_tokens:
+                print(f"    - 被过滤掉的 token IDs: {filtered_out_tokens}")
+                for token_id in filtered_out_tokens:
+                    try:
+                        token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+                        token_type = "普通token"
+                        if eos_token_id is not None and token_id == eos_token_id:
+                            token_type = "EOS token (生成后立即停止，没有对应的attention)"
+                        print(f"      - Token ID {token_id}: '{token_text}' ({token_type})")
+                    except:
+                        print(f"      - Token ID {token_id}: [无法解码]")
+
+        # 更新 generated_token_ids 为过滤后的版本
+        if len(filtered_generated_token_ids) != len(generated_token_ids):
+            generated_token_ids = filtered_generated_token_ids
+            # 同时更新 full_output_ids（移除被过滤的 token）
+            full_output_ids = input_ids[0].cpu().tolist() + generated_token_ids
+            print(f"\n  ✓ 已更新 generated_token_ids 和 full_output_ids")
+            print(f"    - 最终 generated_token_ids 数量: {len(generated_token_ids)}")
+            print(f"    - all_attentions 数量: {num_attention_steps}")
+            if len(generated_token_ids) == num_attention_steps:
+                print(f"    ✓ 现在数量一致！")
+            else:
+                print(f"    ⚠️  数量仍不一致，可能需要进一步检查")
+
+    # 检查停止原因
+    print(f"\n【生成停止原因分析】")
+    if len(generated_token_ids) > 0:
+        last_token_id = generated_token_ids[-1]
+        eos_token_id = tokenizer.eos_token_id if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None else None
+
+        if eos_token_id is not None and last_token_id == eos_token_id:
+            print(f"  ✓ 停止原因: 模型生成了 EOS token (token_id: {eos_token_id})")
+            print(f"    - EOS token 是在步骤 {len(generated_token_ids)-1} 生成的")
+            print(f"    - 说明: EOS token 是模型在推理过程中预测生成的，不是预先设定的")
+        elif len(generated_token_ids) >= max_new_tokens:
+            print(f"  ✓ 停止原因: 达到了 max_new_tokens 限制 ({max_new_tokens})")
+            print(f"    - 说明: 即使没有 EOS token，达到最大 token 数也会停止")
+        else:
+            print(f"  ✓ 停止原因: 可能是其他停止条件")
+            print(f"    - 最后生成的 token_id: {last_token_id}")
+            if eos_token_id is not None:
+                print(f"    - EOS token_id: {eos_token_id} (不匹配)")
+            # 检查是否可能是停止字符串（虽然当前代码没有设置 stopping_criteria）
+            print(f"    - 注意: 当前代码未设置 stopping_criteria，所以不依赖停止字符串")
+    else:
+        print(f"  ⚠️  没有生成任何 token")
 
     # 检查并过滤无效的token ID
     vocab_size = len(tokenizer) if hasattr(tokenizer, '__len__') else getattr(tokenizer, 'vocab_size', 32000)
@@ -1556,7 +1642,7 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
         print(f"  层数: {num_layers}")
 
         # 为这个步骤创建目录
-        step_dir = os.path.join(generation_output_dir, f"step_{step_idx+1}_{token_name}")
+        step_dir = os.path.join(generation_output_dir, f"step_{step_idx}_{token_name}")
         os.makedirs(step_dir, exist_ok=True)
 
         # 处理每一层的attention
@@ -1636,7 +1722,7 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
             # 确定图像token数量（优先使用实际值，如果没有则使用默认576）
             actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
-            image_token_start = 1  # 跳过BOS token（位置0）
+            image_token_start = image_first_pos  # 跳过BOS token（位置0）
             image_token_end = image_token_start + actual_num_image_tokens
 
             # 确保不超过序列长度
@@ -1856,45 +1942,6 @@ def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, toke
         traceback.print_exc()
 
 
-def parse_args():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser(description="LLaVA 模型架构分析和 Attention 可视化")
-
-    # 模型参数
-    parser.add_argument("--model-path", type=str,
-                       default="/home/liying/Documents/llava-v1.5-7b",
-                       help="模型路径")
-    parser.add_argument("--device", type=str, default="cuda",
-                       help="设备 (cuda/cpu)")
-    parser.add_argument("--conv-mode", type=str, default="llava_v1",
-                       help="对话模式")
-
-    # 输入参数
-    default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
-    default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
-    # default_image_file = "./image.png"
-    # default_prompt = "Please describe this image in detail."
-    parser.add_argument("--image-file", type=str,
-                       default=default_image_file,
-                       help=f"图像文件路径(默认: {default_image_file})")
-    parser.add_argument("--prompt", type=str, default=default_prompt,
-                       help=f"提示词(默认: {default_prompt})")
-
-    # 分析参数
-    parser.add_argument("--target-layers", type=str, default="even",
-                       help="目标层索引，用逗号分隔，如 '0,2,4' 或 'even' 表示偶数层，'odd' 表示奇数层")
-    parser.add_argument("--output-dir", type=str, default=None,
-                       help="输出目录(默认为 tests/output)")
-    parser.add_argument("--max-new-tokens", type=int, default=10,
-                       help="生成的最大token数量")
-    parser.add_argument("--extract-generation-attention", type=bool, default=True,
-                       help="是否提取生成过程中的attention map(True/False)")
-    parser.add_argument("--save-attention-maps", type=bool, default=True,
-                       help="是否保存attention map图片（默认False）")
-
-    return parser.parse_args()
-
-
 def main():
     args = parse_args()
 
@@ -1926,10 +1973,6 @@ def main():
         device_map=args.device
     )
     print(f"✓ 模型加载完成: {model_name}")
-
-    # 分析模型架构
-    print("\n[2/4] 分析模型架构...")
-    arch_info = analyze_model_architecture(model, tokenizer, output_dir)
 
     # 提取 hidden states 和 attention
     print("\n[3/4] 提取 Hidden States 和 Attention...")
