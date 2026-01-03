@@ -38,6 +38,8 @@ import seaborn as sns
 from PIL import Image, ImageDraw, ImageFont
 import requests
 from io import BytesIO
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 
 # 添加项目根目录到 Python 路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -67,7 +69,7 @@ def parse_args():
 
     # 输入参数
     default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
-    default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
+    default_prompt = "there is a boy, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     # default_image_file = "./image.png"
     # default_prompt = "Please describe this image in detail."
     parser.add_argument("--image-file", type=str,
@@ -1097,13 +1099,14 @@ def safe_decode_token_ids(tokenizer, token_ids, skip_special_tokens=False):
 
 
 def extract_attention_during_generation(model, tokenizer, image_processor, image_file, prompt,
-                                       conv_mode, device, output_dir, max_new_tokens=10, save_attention_maps=True):
+                                       conv_mode, device, output_dir, target_layers, max_new_tokens=10, save_attention_maps=True):
     """在生成过程中提取每个预测词的attention map
 
     对于每个生成的token，提取所有32层的attention map，并可视化最后一行对图像token的attention
 
     Args:
         save_attention_maps: 是否保存attention map图片（True/False）
+        target_layers: 目标层列表，None表示所有层，'even'表示偶数层，'odd'表示奇数层，或具体层索引列表
     """
     print("\n" + "=" * 80)
     print("在生成过程中提取 Attention Map")
@@ -1581,6 +1584,8 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
         print(f"⚠️  没有可处理的步骤")
 
     for step_idx in range(num_steps_to_process):
+        if generated_token_ids[step_idx] == 0 or generated_token_ids[step_idx] == 1 or generated_token_ids[step_idx] == 2:
+            continue
         step_attentions = all_attentions[step_idx] if all_attentions is not None and step_idx < len(all_attentions) else None
 
         # step_attentions是一个tuple，包含所有层的attention
@@ -1650,6 +1655,10 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
             if layer_attn is None:
                 continue
 
+            # 检查是否是目标层
+            if target_layers is not None and layer_idx not in target_layers:
+                continue
+
             # 处理attention tensor的形状
             if isinstance(layer_attn, tuple):
                 layer_attn = layer_attn[0]
@@ -1714,12 +1723,6 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
             print(f"  [Layer {layer_idx}] 序列长度: {seq_len}, 最后一行attention形状: {last_row_attention.shape}, 范围: [{last_row_attention.min():.4f}, {last_row_attention.max():.4f}], 和: {last_row_attention.sum():.4f}")
 
-            # 在LLaVA中，图像token的位置是固定的：
-            # - 位置0: BOS token
-            # - 位置1-576: 图像token（576个）
-            # - 位置577+: 文本token
-            # 所以直接从位置1开始提取576个值即可
-
             # 确定图像token数量（优先使用实际值，如果没有则使用默认576）
             actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
             image_token_start = image_first_pos  # 跳过BOS token（位置0）
@@ -1777,6 +1780,57 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
     print(f"\n✓ 所有生成步骤的attention map已保存到: {generation_output_dir}")
     return generation_output_dir
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_attention_pixel_grid(attn_matrix, layer_idx, ax=None, vmax=0.7):
+    """
+    清晰地绘制注意力矩阵的像素网格
+
+    参数:
+    - attn_matrix: 注意力矩阵 (24, 24)
+    - layer_idx: 层索引
+    - ax: matplotlib轴对象，如果为None则创建新图
+    - vmax: 颜色最大值，控制颜色范围
+
+    返回:
+    - 绘图轴对象
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 8))
+
+    # 确保输入是24x24
+    assert attn_matrix.shape == (24, 24), f"矩阵形状应为(24,24)，实际是{attn_matrix.shape}"
+
+    # 使用imshow，但调整参数确保像素清晰
+    im = ax.imshow(attn_matrix,
+                  cmap='jet',
+                  alpha=0.7,
+                  interpolation='nearest',  # 关键：最近邻插值
+                  aspect='equal',          # 保持纵横比
+                  vmin=0, vmax=vmax,
+                  extent=[0, 24, 24, 0])  # 定义显示范围，y轴从上到下
+
+    # # 添加网格线，使像素边界清晰
+    # ax.set_xticks(np.arange(0, 25, 1))
+    # ax.set_yticks(np.arange(0, 25, 1))
+    # ax.grid(True, color='black', linewidth=0.5, alpha=0.3)
+
+    # 设置标题
+    ax.set_title(f'Layer {layer_idx}: Attention Pixel Grid',
+                fontsize=14, fontweight='bold', pad=20)
+
+    # 添加坐标轴标签（可选）
+    ax.set_xlabel('X Position', fontsize=10)
+    ax.set_ylabel('Y Position', fontsize=10)
+
+    # 添加colorbar
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Attention Strength', rotation=270, labelpad=15)
+
+    return ax
 
 
 def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, token_text, token_name,
@@ -1847,86 +1901,114 @@ def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, toke
             attention_map_upsampled = attention_tensor.squeeze().numpy()
 
         # 创建多种可视化
-        fig = plt.figure(figsize=(24, 16))
+        fig = plt.figure(figsize=(24, 6))
 
         # 1. 原图
-        ax1 = plt.subplot(3, 3, 1)
+        ax1 = plt.subplot(1, 4, 1)
         ax1.imshow(image)
-        ax1.set_title(f'Original Image\nStep {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"',
+        ax1.set_title(f'Original Image, Step {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"',
                      fontsize=12, fontweight='bold')
         ax1.axis('off')
 
         # 2. Attention heatmap (独立)
-        ax2 = plt.subplot(3, 3, 2)
+        ax2 = plt.subplot(1, 4, 2)
         im2 = ax2.imshow(attention_map_upsampled, cmap='hot', interpolation='bilinear', vmin=0, vmax=1)
-        ax2.set_title(f'Attention Heatmap\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        ax2.set_title(f'Attention Heatmap, Layer {layer_idx}', fontsize=12, fontweight='bold')
         ax2.axis('off')
         plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
 
         # 3. Jet overlay
-        ax3 = plt.subplot(3, 3, 3)
+        ax3 = plt.subplot(1, 4, 3)
         ax3.imshow(image)
         im3 = ax3.imshow(attention_map_upsampled, cmap='jet', alpha=0.7, interpolation='bilinear', vmin=0, vmax=1)
-        ax3.set_title(f'Jet Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        ax3.set_title(f'Jet Overlay, Layer {layer_idx}', fontsize=12, fontweight='bold')
         ax3.axis('off')
         plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
 
-        # 4. Hot overlay
-        ax4 = plt.subplot(3, 3, 4)
-        ax4.imshow(image)
-        im4 = ax4.imshow(attention_map_upsampled, cmap='hot', alpha=0.6, interpolation='bilinear', vmin=0, vmax=1)
-        ax4.set_title(f'Hot Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # # 4. Jet
+        # ax4 = plt.subplot(1, 4, 4)
+        # im4 = ax4.imshow(attn_normalized, cmap='jet', alpha=0.7, interpolation='bilinear', vmin=0, vmax=1)
+        # ax4.set_title(f'Normalized Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax4.axis('off')
+        # plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+
+        # 4. Jet overlay
+        ax4 = plt.subplot(1, 4, 4)
+
+        # 方法1: 截取jet颜色映射的前70%（深蓝到淡黄）
+        jet_cmap = cm.get_cmap('jet')
+        # 截取0-0.7的颜色范围
+        colors = jet_cmap(np.linspace(0, 0.7, 256))
+        new_cmap = mcolors.LinearSegmentedColormap.from_list('truncated_jet', colors)
+
+        im4 = ax4.imshow(attn_normalized, cmap=new_cmap, alpha=0.7,
+                        interpolation='bilinear', vmin=0, vmax=1)
+        ax4.set_title(f'Normalized Attention, Layer {layer_idx}',
+                    fontsize=12, fontweight='bold')
         ax4.axis('off')
         plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
 
-        # 5. Top 20% attention
-        ax5 = plt.subplot(3, 3, 5)
-        ax5.imshow(image)
-        threshold_80 = np.percentile(attention_map_upsampled, 80)
-        attn_thresh_80 = np.where(attention_map_upsampled >= threshold_80, attention_map_upsampled, 0)
-        attn_thresh_80_norm = (attn_thresh_80 - attn_thresh_80.min()) / (attn_thresh_80.max() - attn_thresh_80.min() + 1e-10)
-        im5 = ax5.imshow(attn_thresh_80_norm, cmap='Reds', alpha=0.8, interpolation='bilinear', vmin=0, vmax=1)
-        ax5.set_title(f'Top 20% Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax5.axis('off')
-        plt.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
+        # # 4. Jet overlay
+        # ax4 = plt.subplot(1, 4, 4)
+        # plot_attention_pixel_grid(attn_normalized, layer_idx, ax=ax4, vmax=0.8)
 
-        # 6. Top 10% attention
-        ax6 = plt.subplot(3, 3, 6)
-        ax6.imshow(image)
-        threshold_90 = np.percentile(attention_map_upsampled, 90)
-        attn_thresh_90 = np.where(attention_map_upsampled >= threshold_90, attention_map_upsampled, 0)
-        attn_thresh_90_norm = (attn_thresh_90 - attn_thresh_90.min()) / (attn_thresh_90.max() - attn_thresh_90.min() + 1e-10)
-        im6 = ax6.imshow(attn_thresh_90_norm, cmap='YlOrRd', alpha=0.9, interpolation='bilinear', vmin=0, vmax=1)
-        ax6.set_title(f'Top 10% Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax6.axis('off')
-        plt.colorbar(im6, ax=ax6, fraction=0.046, pad=0.04)
 
-        # 7. Contour
-        ax7 = plt.subplot(3, 3, 7)
-        ax7.imshow(image)
-        y_coords = np.linspace(0, image.size[1]-1, attention_map_upsampled.shape[0])
-        x_coords = np.linspace(0, image.size[0]-1, attention_map_upsampled.shape[1])
-        X, Y = np.meshgrid(x_coords, y_coords)
-        contour = ax7.contour(X, Y, attention_map_upsampled, levels=5, colors='yellow', linewidths=3, alpha=0.9)
-        ax7.clabel(contour, inline=True, fontsize=10, fmt='%.3f', colors='white')
-        ax7.set_title(f'Contour Map\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax7.axis('off')
+        # # 4. Hot overlay
+        # ax4 = plt.subplot(3, 3, 4)
+        # ax4.imshow(image)
+        # im4 = ax4.imshow(attention_map_upsampled, cmap='hot', alpha=0.6, interpolation='bilinear', vmin=0, vmax=1)
+        # ax4.set_title(f'Hot Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax4.axis('off')
+        # plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
 
-        # 8. YlOrRd overlay
-        ax8 = plt.subplot(3, 3, 8)
-        ax8.imshow(image)
-        im8 = ax8.imshow(attention_map_upsampled, cmap='YlOrRd', alpha=0.65, interpolation='bilinear', vmin=0, vmax=1)
-        ax8.set_title(f'YlOrRd Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax8.axis('off')
-        plt.colorbar(im8, ax=ax8, fraction=0.046, pad=0.04)
+        # # 5. Top 20% attention
+        # ax5 = plt.subplot(3, 3, 5)
+        # ax5.imshow(image)
+        # threshold_80 = np.percentile(attention_map_upsampled, 80)
+        # attn_thresh_80 = np.where(attention_map_upsampled >= threshold_80, attention_map_upsampled, 0)
+        # attn_thresh_80_norm = (attn_thresh_80 - attn_thresh_80.min()) / (attn_thresh_80.max() - attn_thresh_80.min() + 1e-10)
+        # im5 = ax5.imshow(attn_thresh_80_norm, cmap='Reds', alpha=0.8, interpolation='bilinear', vmin=0, vmax=1)
+        # ax5.set_title(f'Top 20% Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax5.axis('off')
+        # plt.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
 
-        # 9. Plasma overlay
-        ax9 = plt.subplot(3, 3, 9)
-        ax9.imshow(image)
-        im9 = ax9.imshow(attention_map_upsampled, cmap='plasma', alpha=0.7, interpolation='bilinear', vmin=0, vmax=1)
-        ax9.set_title(f'Plasma Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax9.axis('off')
-        plt.colorbar(im9, ax=ax9, fraction=0.046, pad=0.04)
+        # # 6. Top 10% attention
+        # ax6 = plt.subplot(3, 3, 6)
+        # ax6.imshow(image)
+        # threshold_90 = np.percentile(attention_map_upsampled, 90)
+        # attn_thresh_90 = np.where(attention_map_upsampled >= threshold_90, attention_map_upsampled, 0)
+        # attn_thresh_90_norm = (attn_thresh_90 - attn_thresh_90.min()) / (attn_thresh_90.max() - attn_thresh_90.min() + 1e-10)
+        # im6 = ax6.imshow(attn_thresh_90_norm, cmap='YlOrRd', alpha=0.9, interpolation='bilinear', vmin=0, vmax=1)
+        # ax6.set_title(f'Top 10% Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax6.axis('off')
+        # plt.colorbar(im6, ax=ax6, fraction=0.046, pad=0.04)
+
+        # # 7. Contour
+        # ax7 = plt.subplot(3, 3, 7)
+        # ax7.imshow(image)
+        # y_coords = np.linspace(0, image.size[1]-1, attention_map_upsampled.shape[0])
+        # x_coords = np.linspace(0, image.size[0]-1, attention_map_upsampled.shape[1])
+        # X, Y = np.meshgrid(x_coords, y_coords)
+        # contour = ax7.contour(X, Y, attention_map_upsampled, levels=5, colors='yellow', linewidths=3, alpha=0.9)
+        # ax7.clabel(contour, inline=True, fontsize=10, fmt='%.3f', colors='white')
+        # ax7.set_title(f'Contour Map\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax7.axis('off')
+
+        # # 8. YlOrRd overlay
+        # ax8 = plt.subplot(3, 3, 8)
+        # ax8.imshow(image)
+        # im8 = ax8.imshow(attention_map_upsampled, cmap='YlOrRd', alpha=0.65, interpolation='bilinear', vmin=0, vmax=1)
+        # ax8.set_title(f'YlOrRd Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax8.axis('off')
+        # plt.colorbar(im8, ax=ax8, fraction=0.046, pad=0.04)
+
+        # # 9. Plasma overlay
+        # ax9 = plt.subplot(3, 3, 9)
+        # ax9.imshow(image)
+        # im9 = ax9.imshow(attention_map_upsampled, cmap='plasma', alpha=0.7, interpolation='bilinear', vmin=0, vmax=1)
+        # ax9.set_title(f'Plasma Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+        # ax9.axis('off')
+        # plt.colorbar(im9, ax=ax9, fraction=0.046, pad=0.04)
 
         plt.tight_layout()
         # 在文件名中包含token信息
@@ -2014,8 +2096,8 @@ def main():
             print("  ⚠️  注意: 已禁用保存attention map图片，只会提取数据")
         extract_attention_during_generation(
             model, tokenizer, image_processor, args.image_file, args.prompt,
-            args.conv_mode, args.device, output_dir, args.max_new_tokens,
-            save_attention_maps=args.save_attention_maps
+            args.conv_mode, args.device, output_dir, target_layers,
+            args.max_new_tokens, save_attention_maps=args.save_attention_maps
         )
 
     print("\n" + "=" * 80)
