@@ -1157,6 +1157,66 @@ def extract_qk_information(model, tokenizer, image_processor, image_file, prompt
     print(f"\n✓ Q、K 信息提取完成")
 
 
+def is_special_token(tokenizer, token_id):
+    """检查token ID是否是特殊token（BOS、EOS、PAD、UNK等）"""
+    if token_id is None:
+        return True
+
+    # 获取特殊token的ID
+    special_token_ids = set()
+
+    # BOS token
+    if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None:
+        special_token_ids.add(tokenizer.bos_token_id)
+
+    # EOS token
+    if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
+        special_token_ids.add(tokenizer.eos_token_id)
+
+    # PAD token
+    if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
+        special_token_ids.add(tokenizer.pad_token_id)
+
+    # UNK token
+    if hasattr(tokenizer, 'unk_token_id') and tokenizer.unk_token_id is not None:
+        special_token_ids.add(tokenizer.unk_token_id)
+
+    # SEP token
+    if hasattr(tokenizer, 'sep_token_id') and tokenizer.sep_token_id is not None:
+        special_token_ids.add(tokenizer.sep_token_id)
+
+    # CLS token
+    if hasattr(tokenizer, 'cls_token_id') and tokenizer.cls_token_id is not None:
+        special_token_ids.add(tokenizer.cls_token_id)
+
+    # MASK token
+    if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
+        special_token_ids.add(tokenizer.mask_token_id)
+
+    # Additional special tokens
+    if hasattr(tokenizer, 'additional_special_tokens_ids') and tokenizer.additional_special_tokens_ids:
+        special_token_ids.update(tokenizer.additional_special_tokens_ids)
+
+    # 检查token_id是否在特殊token集合中
+    if token_id in special_token_ids:
+        return True
+
+    # 也检查解码后的文本是否是特殊token的文本形式
+    try:
+        token_text = tokenizer.decode([token_id])
+        # 检查是否是常见的特殊token文本
+        special_texts = ['<s>', '</s>', '<pad>', '<unk>', '[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]']
+        if token_text.strip() in special_texts:
+            return True
+        # 检查是否只包含特殊字符（如只有空格、换行等）
+        if not token_text.strip() or token_text.strip() in ['\n', '\r', '\t', ' ']:
+            return True
+    except:
+        pass
+
+    return False
+
+
 def safe_decode_token_ids(tokenizer, token_ids, skip_special_tokens=False):
     """安全地解码token IDs，过滤掉无效的ID"""
     if not token_ids:
@@ -1188,14 +1248,257 @@ def safe_decode_token_ids(tokenizer, token_ids, skip_special_tokens=False):
             return f"[解码失败: {str(e)}]"
 
 
+def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
+    """从logits中提取top-p tokens，输出所有threshold内的logits、token和词汇
+
+    Args:
+        logits: [vocab_size] 的logits tensor
+        tokenizer: tokenizer对象
+        threshold_top_p: top-p阈值（默认0.9）
+
+    Returns:
+        dict: 包含top tokens信息的字典，包括所有threshold内的logits
+    """
+    # 确保logits是tensor
+    if not isinstance(logits, torch.Tensor):
+        logits = torch.tensor(logits)
+
+    # 计算softmax概率
+    probs = torch.softmax(logits, dim=-1)
+
+    # 按概率排序
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+
+    # 计算累积概率
+    cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    # 找到不超过threshold_top_p的tokens
+    top_p_mask = cumsum_probs <= threshold_top_p
+    top_p_indices = sorted_indices[top_p_mask]
+    top_p_probs = sorted_probs[top_p_mask]
+
+    # 如果第一个token的概率已经超过threshold，至少包含第一个
+    if len(top_p_indices) == 0:
+        top_p_indices = sorted_indices[:1]
+        top_p_probs = sorted_probs[:1]
+
+    # 获取最大logit的token
+    max_logit_idx = torch.argmax(logits).item()
+    max_logit_value = logits[max_logit_idx].item()
+    max_logit_prob = probs[max_logit_idx].item()
+
+    # 解码tokens - 输出所有threshold内的logits、token和词汇
+    top_p_tokens = []
+    for idx, prob in zip(top_p_indices, top_p_probs):
+        token_id = idx.item() if isinstance(idx, torch.Tensor) else idx
+        token_text = tokenizer.decode([token_id])
+        logit_value = logits[token_id].item() if isinstance(logits[token_id], torch.Tensor) else logits[token_id]
+        top_p_tokens.append({
+            'token_id': int(token_id),
+            'token_text': token_text,
+            'probability': float(prob.item() if isinstance(prob, torch.Tensor) else prob),
+            'logit': float(logit_value)
+        })
+
+    # 获取前5个最高logits的tokens
+    top_5_indices = torch.topk(logits, k=min(5, len(logits))).indices
+    top_5_tokens = []
+    for idx in top_5_indices:
+        token_id = idx.item()
+        token_text = tokenizer.decode([token_id])
+        logit_value = logits[token_id].item()
+        prob_value = probs[token_id].item()
+        top_5_tokens.append({
+            'token_id': int(token_id),
+            'token_text': token_text,
+            'logit': float(logit_value),
+            'probability': float(prob_value)
+        })
+
+    result = {
+        'max_logit_token': {
+            'token_id': int(max_logit_idx),
+            'token_text': tokenizer.decode([max_logit_idx]),
+            'logit': float(max_logit_value),
+            'probability': float(max_logit_prob)
+        },
+        'top_p_tokens': top_p_tokens,  # 所有threshold内的tokens
+        'top_5_tokens': top_5_tokens,  # 前5个最高logits的tokens
+        'top_p_threshold': threshold_top_p,
+        'total_top_p_tokens': len(top_p_tokens)
+    }
+
+    return result
+
+
+def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, num_layers=32, logit_threshold=0.01):
+    """生成5×32的heatmap，显示每层前5个最高logits的token
+
+    使用绿色渐变colormap，并对logits取对数以增强对比度
+    只显示logits大于阈值的token，像素点之间有间隔，并在每个像素点上标注词汇
+
+    Args:
+        layer_lm_head_outputs: 字典，包含每层的lm_head输出信息
+        output_dir: 输出目录
+        step_idx: 生成步骤索引
+        num_layers: 总层数（默认32）
+        logit_threshold: logits阈值，只显示大于此值的token（默认0.01）
+    """
+    # 收集所有层的前5个tokens，只保留logits > threshold的
+    # 创建一个5×32的矩阵，存储logits值
+    logits_matrix = np.full((5, num_layers), np.nan)  # 使用NaN表示无效值
+    token_texts_matrix = [[''] * num_layers for _ in range(5)]  # 存储token文本
+
+    # 遍历所有层
+    for layer_key, top_p_info in layer_lm_head_outputs.items():
+        # 跳过final_layer，只处理数字层
+        if layer_key == 'final_layer':
+            continue
+
+        layer_idx = int(layer_key) if isinstance(layer_key, str) and layer_key.isdigit() else None
+        if layer_idx is None or layer_idx >= num_layers:
+            continue
+
+        # 获取前5个tokens，只保留logits > threshold的
+        top_5_tokens = top_p_info.get('top_5_tokens', [])
+        rank = 0
+        for token_info in top_5_tokens:
+            if token_info['logit'] > logit_threshold:
+                if rank < 5:  # 最多5个
+                    logits_matrix[rank, layer_idx] = token_info['logit']
+                    token_texts_matrix[rank][layer_idx] = token_info['token_text']
+                    rank += 1
+                else:
+                    break
+
+    # 对logits取对数以增强对比度
+    # 只处理非NaN的值
+    valid_logits = logits_matrix[~np.isnan(logits_matrix)]
+    if len(valid_logits) == 0:
+        print(f"  ⚠️  步骤 {step_idx+1}: 没有满足阈值({logit_threshold})的logits，跳过heatmap生成")
+        return
+
+    logits_min = valid_logits.min()
+    if logits_min < 0:
+        # 如果有负数，先shift到正数
+        logits_shifted = logits_matrix - logits_min + 1
+    else:
+        logits_shifted = logits_matrix + 1
+
+    # 取对数，NaN值保持为NaN
+    logits_log = np.full_like(logits_shifted, np.nan)
+    valid_mask = ~np.isnan(logits_shifted)
+    logits_log[valid_mask] = np.log(logits_shifted[valid_mask])
+
+    # 保存原始logits用于显示
+    original_logits_matrix = logits_matrix.copy()
+
+    # 创建heatmap，使用更大的figsize以容纳间隔和标注
+    fig, ax = plt.subplots(figsize=(20, 8))
+
+    # 使用pcolormesh而不是imshow，这样可以控制像素块之间的间隔
+    # 需要扩展矩阵以匹配pcolormesh的要求（需要多一行一列）
+    logits_log_extended = np.full((6, num_layers + 1), np.nan)
+    logits_log_extended[:5, :num_layers] = logits_log
+
+    # 创建坐标网格（pcolormesh需要比数据多一个点的网格）
+    X = np.arange(num_layers + 1)
+    Y = np.arange(6)
+    X_grid, Y_grid = np.meshgrid(X, Y)
+
+    # 绘制heatmap，使用绿色渐变colormap，设置edgecolors来创建间隔效果
+    im = ax.pcolormesh(X_grid, Y_grid, logits_log_extended, cmap='Greens',
+                       edgecolors='white', linewidths=2.0,
+                       vmin=np.nanmin(logits_log), vmax=np.nanmax(logits_log),
+                       shading='flat')
+
+    # 设置坐标轴
+    ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Top 5 Rank', fontsize=12, fontweight='bold')
+    ax.set_title(f'Top 5 Logits Heatmap (Log Scale) - Step {step_idx+1}\n(Color represents log(logit value), threshold={logit_threshold})',
+                 fontsize=14, fontweight='bold')
+
+    # 设置x轴刻度（层索引）- 放在单元格中心
+    ax.set_xticks(np.arange(num_layers) + 0.5)
+    ax.set_xticklabels([f'L{i}' for i in range(num_layers)], rotation=45, ha='right', fontsize=8)
+
+    # 设置y轴刻度（排名）- 放在单元格中心
+    ax.set_yticks(np.arange(5) + 0.5)
+    ax.set_yticklabels([f'Rank {i+1}' for i in range(5)], fontsize=10)
+
+    # 在每个像素块中心标注token文本（词汇）
+    for rank in range(5):
+        for layer_idx in range(num_layers):
+            token_text = token_texts_matrix[rank][layer_idx]
+            logit_value = logits_matrix[rank, layer_idx]
+
+            # 只标注有效的token（logits > threshold）
+            if token_text and not np.isnan(logit_value):
+                # 清理token文本，移除换行符和特殊字符，限制长度
+                clean_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
+                # 限制长度，避免文本过长
+                if len(clean_text) > 12:
+                    clean_text = clean_text[:12] + '...'
+
+                # 根据logits值选择文本颜色（深色或浅色）
+                logit_log_value = logits_log[rank, layer_idx]
+                if not np.isnan(logit_log_value):
+                    max_logit = np.nanmax(logits_log)
+                    min_logit = np.nanmin(logits_log)
+                    if max_logit > min_logit:
+                        normalized = (logit_log_value - min_logit) / (max_logit - min_logit)
+                        text_color = 'white' if normalized > 0.5 else 'black'
+                    else:
+                        text_color = 'black'
+                else:
+                    text_color = 'black'
+
+                # 在单元格中心标注文本（词汇）
+                # 使用半透明背景以提高可读性
+                ax.text(layer_idx + 0.5, rank + 0.5, clean_text,
+                       ha='center', va='center',
+                       fontsize=9, color=text_color, fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3',
+                                facecolor='white' if text_color == 'black' else 'black',
+                                alpha=0.6, edgecolor='none'))
+
+    # 添加colorbar
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Log(Logit Value)', fontsize=10, fontweight='bold')
+
+    # 设置坐标轴范围，确保显示所有单元格
+    ax.set_xlim(0, num_layers)
+    ax.set_ylim(0, 5)
+
+    plt.tight_layout()
+
+    # 保存图片
+    heatmap_file = os.path.join(output_dir, f"top5_logits_heatmap_step_{step_idx+1}.png")
+    plt.savefig(heatmap_file, dpi=200, bbox_inches='tight')
+    plt.close()
+
+    # 统计信息
+    valid_count = np.sum(~np.isnan(logits_matrix))
+    total_count = 5 * num_layers
+    print(f"  ✓ 步骤 {step_idx+1} 的Top 5 Logits Heatmap已保存: {os.path.basename(heatmap_file)}")
+    print(f"    有效token数量: {valid_count}/{total_count} (阈值: {logit_threshold})")
+    if len(valid_logits) > 0:
+        print(f"    原始logits范围: [{valid_logits.min():.4f}, {valid_logits.max():.4f}]")
+        print(f"    对数logits范围: [{np.nanmin(logits_log):.4f}, {np.nanmax(logits_log):.4f}]")
+
+
 def extract_attention_during_generation(model, tokenizer, image_processor, image_file, prompt,
-                                       conv_mode, device, output_dir, max_new_tokens=10, save_attention_maps=True):
+                                       conv_mode, device, output_dir, max_new_tokens=10,
+                                       save_attention_maps=True, target_layers=None, threshold_top_p=0.9):
     """在生成过程中提取每个预测词的attention map
 
-    对于每个生成的token，提取所有32层的attention map，并可视化最后一行对图像token的attention
+    对于每个生成的token，提取指定层的attention map，并可视化最后一行对图像token的attention
+    同时提取每层的lm_head输出，计算top-p tokens
 
     Args:
         save_attention_maps: 是否保存attention map图片（True/False）
+        target_layers: 目标层列表，None表示所有层，'even'表示偶数层，'odd'表示奇数层，或具体层索引列表
+        threshold_top_p: top-p阈值（默认0.9）
     """
     print("\n" + "=" * 80)
     print("在生成过程中提取 Attention Map")
@@ -1339,7 +1642,32 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
             else:
                 image_token_start = None
 
-    # 使用generate并设置output_attentions=True
+    # 确定目标层
+    lang_model = model.get_model()
+    num_total_layers = len(lang_model.layers) if hasattr(lang_model, 'layers') else 32
+
+    if target_layers is None:
+        # 默认所有层
+        selected_layers = list(range(num_total_layers))
+    elif isinstance(target_layers, str):
+        if target_layers.lower() == 'even':
+            selected_layers = list(range(0, num_total_layers, 2))
+        elif target_layers.lower() == 'odd':
+            selected_layers = list(range(1, num_total_layers, 2))
+        else:
+            # 尝试解析为数字列表
+            try:
+                selected_layers = [int(x.strip()) for x in target_layers.split(',')]
+            except:
+                selected_layers = list(range(num_total_layers))
+    elif isinstance(target_layers, list):
+        selected_layers = target_layers
+    else:
+        selected_layers = list(range(num_total_layers))
+
+    print(f"\n目标层: {selected_layers} (共{len(selected_layers)}层，总层数: {num_total_layers})")
+
+    # 使用generate并设置output_attentions=True和output_hidden_states=True
     print(f"\n开始生成，最多生成 {max_new_tokens} 个token...")
     with torch.no_grad():
         output_dict = model.generate(
@@ -1347,6 +1675,7 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
             images=image_tensor.unsqueeze(0).half().to(device),
             max_new_tokens=max_new_tokens,
             output_attentions=True,
+            output_hidden_states=True,  # 需要hidden_states来提取每层的输出
             return_dict_in_generate=True,
             do_sample=False,  # 使用greedy decoding
             num_beams=1
@@ -1354,6 +1683,7 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
     generated_ids = output_dict.sequences
     all_attentions = output_dict.attentions  # 这是一个tuple，每个元素对应一个生成步骤
+    all_hidden_states = output_dict.hidden_states  # 这是一个tuple，每个元素对应一个生成步骤，每个元素包含所有层的hidden states
 
     # 检查生成的序列
     input_len = input_ids.shape[1]
@@ -1504,36 +1834,52 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
             continue
 
         # 获取当前步骤的token信息 - 使用过滤后的有效token IDs
+        token_id = None
+        current_token = None
+
         if step_idx < len(valid_generated_token_ids) and len(valid_generated_token_ids) > 0:
             token_id = valid_generated_token_ids[step_idx]
-            try:
-                current_token = tokenizer.decode([token_id])
-            except Exception as e:
-                current_token = f"[无效token: {token_id}]"
+            # 检查是否是特殊token，如果是则跳过
+            if is_special_token(tokenizer, token_id):
+                print(f"  ⚠️  步骤 {step_idx} 的token是特殊token (ID: {token_id})，跳过")
+                continue
+            current_token = tokenizer.decode([token_id])
         else:
             # 如果无法获取token，尝试从完整序列中推断
             # 在生成过程中，第step_idx个token应该在位置 input_len + step_idx
             if step_idx < len(valid_full_output_ids) - input_len:
                 token_id = valid_full_output_ids[input_len + step_idx]
-                try:
-                    current_token = tokenizer.decode([token_id])
-                    print(f"  ✓ 从完整序列中提取步骤 {step_idx} 的token: '{current_token}' (ID: {token_id})")
-                except Exception as e:
-                    current_token = f"[无效token: {token_id}]"
-                    print(f"  ⚠️  步骤 {step_idx} 的token ID {token_id} 无效")
+                # 检查是否是特殊token，如果是则跳过
+                if is_special_token(tokenizer, token_id):
+                    print(f"  ⚠️  步骤 {step_idx} 的token是特殊token (ID: {token_id})，跳过")
+                    continue
+                current_token = tokenizer.decode([token_id])
+                print(f"  ✓ 从完整序列中提取步骤 {step_idx} 的token: '{current_token}' (ID: {token_id})")
             else:
                 # 如果仍然无法获取，使用占位符
                 token_id = None
                 current_token = f"[Token_{step_idx}_Unknown]"
                 print(f"  ⚠️  步骤 {step_idx} 无法获取对应的token，使用占位符")
 
-        # 累积文本（用于显示每次循环后的完整生成文本）
+        # 如果current_token仍然是None，说明跳过了，继续下一个步骤
+        if current_token is None:
+            continue
+
+        # 再次检查是否是特殊token（通过解码后的文本检查）
+        if is_special_token(tokenizer, token_id):
+            print(f"  ⚠️  步骤 {step_idx} 的token是特殊token: '{current_token}' (ID: {token_id})，跳过处理")
+            continue
+
+        # 累积文本（用于显示每次循环后的完整生成文本）- 只累积非特殊token
         accumulated_text += current_token
 
         # 解码当前步骤之前的所有token（包括input和已生成的output）
         # 在生成过程中，每一步的序列长度是 input_len + step_idx + 1
+        # 过滤掉特殊token
         current_sequence_ids = valid_full_output_ids[:input_len + step_idx + 1]
-        current_sequence_text = safe_decode_token_ids(tokenizer, current_sequence_ids, skip_special_tokens=True)
+        # 过滤掉特殊token
+        filtered_sequence_ids = [tid for tid in current_sequence_ids if not is_special_token(tokenizer, tid)]
+        current_sequence_text = safe_decode_token_ids(tokenizer, filtered_sequence_ids, skip_special_tokens=True)
 
         # 清理token文本用于文件名（移除特殊字符，限制长度）
         token_name = current_token.replace(' ', '_').replace('/', '_').replace('\\', '_').replace('<', '').replace('>', '').replace('"', '').replace("'", '').replace('\n', '_').replace('\r', '_')
@@ -1559,8 +1905,28 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
         step_dir = os.path.join(generation_output_dir, f"step_{step_idx+1}_{token_name}")
         os.makedirs(step_dir, exist_ok=True)
 
-        # 处理每一层的attention
+        # 提取当前步骤的hidden states（用于lm_head）
+        step_hidden_states = None
+        if all_hidden_states is not None and step_idx < len(all_hidden_states):
+            step_hidden_states = all_hidden_states[step_idx]
+            # step_hidden_states是一个tuple，包含所有层的hidden states
+            # 每个元素是 [batch, seq_len, hidden_size]
+            if isinstance(step_hidden_states, tuple):
+                # 确保是tuple格式
+                pass
+            elif isinstance(step_hidden_states, torch.Tensor):
+                # 如果是单个tensor，可能是最后一层的输出
+                step_hidden_states = (step_hidden_states,)
+
+        # 存储每层的lm_head输出信息
+        layer_lm_head_outputs = {}
+
+        # 处理每一层的attention（只处理选定的层）
         for layer_idx, layer_attn in enumerate(step_attentions):
+            # 跳过不在目标层列表中的层
+            if layer_idx not in selected_layers:
+                continue
+
             if layer_attn is None:
                 continue
 
@@ -1674,9 +2040,9 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
                 else:
                     image_attention = image_attention[:576]
 
-            # Reshape到24×24
+            # Reshape到24×24，保持原始logits值，不归一化
             attention_map = image_attention.reshape(patch_size, patch_size)
-            # print(f"  [Layer {layer_idx}] Reshape后的attention map形状: {attention_map.shape}")
+            print(f"  [Layer {layer_idx}] Reshape后的attention map形状: {attention_map.shape}, 原始logits范围: [{attention_map.min():.4e}, {attention_map.max():.4e}]")
 
             # 可视化并映射到原图（如果启用）
             if save_attention_maps:
@@ -1687,6 +2053,72 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
             else:
                 print(f"  [Layer {layer_idx}] Attention map已提取（未保存图片）")
 
+            # 提取当前层的hidden state并应用lm_head
+            if step_hidden_states is not None and isinstance(step_hidden_states, tuple) and layer_idx < len(step_hidden_states):
+                layer_hidden = step_hidden_states[layer_idx]  # [batch, seq_len, hidden_size] 或 [seq_len, hidden_size]
+                # 处理不同的tensor形状
+                if len(layer_hidden.shape) == 3:
+                    last_hidden = layer_hidden[0, -1, :]  # [hidden_size]
+                elif len(layer_hidden.shape) == 2:
+                    last_hidden = layer_hidden[-1, :]  # [hidden_size]
+                else:
+                    print(f"  ⚠️  Layer {layer_idx}: 意外的hidden state形状: {layer_hidden.shape}")
+                    continue
+
+                # 确保在正确的设备上
+                if last_hidden.device != device:
+                    last_hidden = last_hidden.to(device)
+
+                # 应用lm_head
+                if hasattr(model, 'lm_head'):
+                    with torch.no_grad():
+                        layer_logits = model.lm_head(last_hidden)  # [vocab_size]
+                        # 提取top-p tokens
+                        layer_top_p_info = extract_top_p_tokens(layer_logits, tokenizer, threshold_top_p)
+                        layer_lm_head_outputs[layer_idx] = layer_top_p_info
+                        print(f"  [Layer {layer_idx}] Top-p tokens提取完成: {len(layer_top_p_info['top_p_tokens'])}个tokens")
+
+        # 提取最后一层的lm_head输出（第32层，索引为31）
+        if step_hidden_states is not None and isinstance(step_hidden_states, tuple) and len(step_hidden_states) > 0:
+            last_layer_idx = len(step_hidden_states) - 1
+            last_layer_hidden = step_hidden_states[last_layer_idx]  # [batch, seq_len, hidden_size] 或 [seq_len, hidden_size]
+
+            # 处理不同的tensor形状
+            if len(last_layer_hidden.shape) == 3:
+                last_hidden = last_layer_hidden[0, -1, :]  # [hidden_size]
+            elif len(last_layer_hidden.shape) == 2:
+                last_hidden = last_layer_hidden[-1, :]  # [hidden_size]
+            else:
+                print(f"  ⚠️  Final Layer: 意外的hidden state形状: {last_layer_hidden.shape}")
+                last_hidden = None
+
+            if last_hidden is not None:
+                # 确保在正确的设备上
+                if last_hidden.device != device:
+                    last_hidden = last_hidden.to(device)
+
+                if hasattr(model, 'lm_head'):
+                    with torch.no_grad():
+                        final_logits = model.lm_head(last_hidden)  # [vocab_size]
+                        final_top_p_info = extract_top_p_tokens(final_logits, tokenizer, threshold_top_p)
+                        layer_lm_head_outputs['final_layer'] = final_top_p_info
+                        print(f"  [Final Layer {last_layer_idx}] Top-p tokens提取完成: {len(final_top_p_info['top_p_tokens'])}个tokens")
+
+        # 保存每层的lm_head输出信息
+        if layer_lm_head_outputs:
+            lm_head_file = os.path.join(step_dir, "lm_head_outputs.json")
+            # 转换为可序列化格式
+            lm_head_data = {}
+            for layer_key, top_p_info in layer_lm_head_outputs.items():
+                lm_head_data[str(layer_key)] = top_p_info
+            # 使用newline='\n'确保使用标准的换行符，避免unusual line terminators
+            with open(lm_head_file, 'w', encoding='utf-8', newline='\n') as f:
+                json.dump(lm_head_data, f, ensure_ascii=False, indent=2)
+            print(f"  ✓ 步骤 {step_idx+1} 的lm_head输出已保存到: {lm_head_file}")
+
+            # 生成5×32的heatmap，显示每层前5个最高logits的token
+            visualize_top5_logits_heatmap(layer_lm_head_outputs, step_dir, step_idx, num_total_layers)
+
         print(f"  ✓ 步骤 {step_idx+1} 的所有层attention已保存到: {step_dir}")
 
     print(f"\n✓ 所有生成步骤的attention map已保存到: {generation_output_dir}")
@@ -1695,10 +2127,15 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
 def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, token_text, token_name,
                                 patch_size, output_dir):
-    """可视化单个步骤、单层的attention map并映射到原图
+    """可视化单个步骤、单层的attention map
+
+    只生成1×3的图例：
+    1. 原图
+    2. Jet colormap（不叠加原图，colorbar只显示一半颜色域：从深蓝到淡黄，不显示深红部分）
+    3. Jet colormap和原图叠加（原图显示更明显）
 
     Args:
-        attention_map: 24x24的attention map
+        attention_map: 24x24的attention map（原始logits值，不归一化）
         image: 原始图像
         layer_idx: 层索引
         step_idx: 生成步骤索引
@@ -1707,153 +2144,67 @@ def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, toke
         patch_size: patch大小（24）
         output_dir: 输出目录
     """
+    # 不归一化，保持原始logits值
+    attn_values = attention_map.copy()
+
+    # 获取值的范围用于colorbar
+    attn_min = attn_values.min()
+    attn_max = attn_values.max()
+
+    # 创建自定义colormap，只使用jet的前一半（从深蓝到淡黄，不包含深红）
+    # jet colormap: 深蓝(0) -> 蓝(0.25) -> 青(0.5) -> 黄(0.75) -> 红(1.0)
+    # 我们只需要0到0.75的部分（深蓝到淡黄）
+    from matplotlib.colors import LinearSegmentedColormap
     try:
-        # 归一化attention map
-        attn_min = attention_map.min()
-        attn_max = attention_map.max()
-        attn_range = attn_max - attn_min
+        # matplotlib >= 3.5
+        jet_full = plt.colormaps['jet']
+    except (AttributeError, KeyError):
+        # matplotlib < 3.5
+        jet_full = plt.cm.get_cmap('jet')
+    # 创建只包含前75%颜色的colormap
+    colors_half = jet_full(np.linspace(0, 0.75, 256))
+    jet_half = LinearSegmentedColormap.from_list('jet_half', colors_half)
 
-        if attn_range < 1e-6:
-            # 如果值范围太小，使用softmax归一化
-            attn_exp = np.exp((attention_map - attention_map.max()) * 10)
-            attn_normalized = attn_exp / attn_exp.sum()
-        else:
-            # 使用percentile归一化
-            attn_min = np.percentile(attention_map, 5)
-            attn_max = np.percentile(attention_map, 95)
-            attn_range = attn_max - attn_min
-            if attn_range < 1e-6:
-                attn_normalized = np.ones_like(attention_map) / attention_map.size
-            else:
-                attn_normalized = np.clip((attention_map - attn_min) / attn_range, 0, 1)
-                # Gamma校正增强对比度
-                attn_normalized = np.power(attn_normalized, 0.3)
+    # 创建1×3的可视化布局
+    fig = plt.figure(figsize=(18, 6))
 
-        # 上采样到图像大小
-        try:
-            from scipy.ndimage import zoom
-            zoom_factors = (image.size[1] / patch_size, image.size[0] / patch_size)
-            if zoom_factors[0] > 0 and zoom_factors[1] > 0:
-                attention_map_upsampled = zoom(attn_normalized, zoom_factors, order=1)
-            else:
-                raise ValueError(f"Invalid zoom factors: {zoom_factors}")
-        except (ImportError, ValueError, Exception):
-            import torch.nn.functional as F
-            attention_tensor = torch.from_numpy(attn_normalized).unsqueeze(0).unsqueeze(0).float()
-            attention_tensor = F.interpolate(
-                attention_tensor,
-                size=(image.size[1], image.size[0]),
-                mode='bilinear',
-                align_corners=False
-            )
-            attention_map_upsampled = attention_tensor.squeeze().numpy()
+    # 1. 原图
+    ax1 = plt.subplot(1, 3, 1)
+    ax1.imshow(image)
+    ax1.set_title(f'Original Image\nStep {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"',
+                 fontsize=12, fontweight='bold')
+    ax1.axis('off')
 
-        # 确保形状正确
-        if attention_map_upsampled.shape[0] != image.size[1] or attention_map_upsampled.shape[1] != image.size[0]:
-            import torch.nn.functional as F
-            attention_tensor = torch.from_numpy(attention_map_upsampled).unsqueeze(0).unsqueeze(0).float()
-            attention_tensor = F.interpolate(
-                attention_tensor,
-                size=(image.size[1], image.size[0]),
-                mode='bilinear',
-                align_corners=False
-            )
-            attention_map_upsampled = attention_tensor.squeeze().numpy()
+    # 2. Jet colormap（不叠加原图，使用一半颜色域）
+    ax2 = plt.subplot(1, 3, 2)
+    im2 = ax2.imshow(attn_values, cmap=jet_half, interpolation='bilinear', vmin=attn_min, vmax=attn_max)
+    ax2.set_title(f'Jet Colormap (24×24)\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    ax2.axis('off')
+    # colorbar使用科学计数法，保留4位有效数字
+    cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+    cbar2.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4e}'))
+    cbar2.set_label('Logit Value', fontsize=10, fontweight='bold')
 
-        # 创建多种可视化
-        fig = plt.figure(figsize=(24, 16))
+    # 3. Jet colormap和原图叠加（原图显示更明显）
+    ax3 = plt.subplot(1, 3, 3)
+    # 先显示原图，降低attention map的透明度，使原图更明显
+    ax3.imshow(image)
+    im3 = ax3.imshow(attn_values, cmap='jet', alpha=0.4, interpolation='bilinear', vmin=attn_min, vmax=attn_max)
+    ax3.set_title(f'Jet Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    ax3.axis('off')
+    # colorbar使用科学计数法，保留4位有效数字
+    cbar3 = plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+    cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4e}'))
+    cbar3.set_label('Logit Value', fontsize=10, fontweight='bold')
 
-        # 1. 原图
-        ax1 = plt.subplot(3, 3, 1)
-        ax1.imshow(image)
-        ax1.set_title(f'Original Image\nStep {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"',
-                     fontsize=12, fontweight='bold')
-        ax1.axis('off')
+    plt.tight_layout()
+    # 在文件名中包含token信息
+    output_file = os.path.join(output_dir, f"layer_{layer_idx}_token_{token_name}_attention.png")
+    plt.savefig(output_file, dpi=200, bbox_inches='tight')
+    plt.close()
 
-        # 2. Attention heatmap (独立)
-        ax2 = plt.subplot(3, 3, 2)
-        im2 = ax2.imshow(attention_map_upsampled, cmap='hot', interpolation='bilinear', vmin=0, vmax=1)
-        ax2.set_title(f'Attention Heatmap\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax2.axis('off')
-        plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-
-        # 3. Jet overlay
-        ax3 = plt.subplot(3, 3, 3)
-        ax3.imshow(image)
-        im3 = ax3.imshow(attention_map_upsampled, cmap='jet', alpha=0.7, interpolation='bilinear', vmin=0, vmax=1)
-        ax3.set_title(f'Jet Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax3.axis('off')
-        plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-
-        # 4. Hot overlay
-        ax4 = plt.subplot(3, 3, 4)
-        ax4.imshow(image)
-        im4 = ax4.imshow(attention_map_upsampled, cmap='hot', alpha=0.6, interpolation='bilinear', vmin=0, vmax=1)
-        ax4.set_title(f'Hot Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax4.axis('off')
-        plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
-
-        # 5. Top 20% attention
-        ax5 = plt.subplot(3, 3, 5)
-        ax5.imshow(image)
-        threshold_80 = np.percentile(attention_map_upsampled, 80)
-        attn_thresh_80 = np.where(attention_map_upsampled >= threshold_80, attention_map_upsampled, 0)
-        attn_thresh_80_norm = (attn_thresh_80 - attn_thresh_80.min()) / (attn_thresh_80.max() - attn_thresh_80.min() + 1e-10)
-        im5 = ax5.imshow(attn_thresh_80_norm, cmap='Reds', alpha=0.8, interpolation='bilinear', vmin=0, vmax=1)
-        ax5.set_title(f'Top 20% Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax5.axis('off')
-        plt.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
-
-        # 6. Top 10% attention
-        ax6 = plt.subplot(3, 3, 6)
-        ax6.imshow(image)
-        threshold_90 = np.percentile(attention_map_upsampled, 90)
-        attn_thresh_90 = np.where(attention_map_upsampled >= threshold_90, attention_map_upsampled, 0)
-        attn_thresh_90_norm = (attn_thresh_90 - attn_thresh_90.min()) / (attn_thresh_90.max() - attn_thresh_90.min() + 1e-10)
-        im6 = ax6.imshow(attn_thresh_90_norm, cmap='YlOrRd', alpha=0.9, interpolation='bilinear', vmin=0, vmax=1)
-        ax6.set_title(f'Top 10% Attention\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax6.axis('off')
-        plt.colorbar(im6, ax=ax6, fraction=0.046, pad=0.04)
-
-        # 7. Contour
-        ax7 = plt.subplot(3, 3, 7)
-        ax7.imshow(image)
-        y_coords = np.linspace(0, image.size[1]-1, attention_map_upsampled.shape[0])
-        x_coords = np.linspace(0, image.size[0]-1, attention_map_upsampled.shape[1])
-        X, Y = np.meshgrid(x_coords, y_coords)
-        contour = ax7.contour(X, Y, attention_map_upsampled, levels=5, colors='yellow', linewidths=3, alpha=0.9)
-        ax7.clabel(contour, inline=True, fontsize=10, fmt='%.3f', colors='white')
-        ax7.set_title(f'Contour Map\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax7.axis('off')
-
-        # 8. YlOrRd overlay
-        ax8 = plt.subplot(3, 3, 8)
-        ax8.imshow(image)
-        im8 = ax8.imshow(attention_map_upsampled, cmap='YlOrRd', alpha=0.65, interpolation='bilinear', vmin=0, vmax=1)
-        ax8.set_title(f'YlOrRd Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax8.axis('off')
-        plt.colorbar(im8, ax=ax8, fraction=0.046, pad=0.04)
-
-        # 9. Plasma overlay
-        ax9 = plt.subplot(3, 3, 9)
-        ax9.imshow(image)
-        im9 = ax9.imshow(attention_map_upsampled, cmap='plasma', alpha=0.7, interpolation='bilinear', vmin=0, vmax=1)
-        ax9.set_title(f'Plasma Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
-        ax9.axis('off')
-        plt.colorbar(im9, ax=ax9, fraction=0.046, pad=0.04)
-
-        plt.tight_layout()
-        # 在文件名中包含token信息
-        output_file = os.path.join(output_dir, f"layer_{layer_idx}_token_{token_name}_attention.png")
-        plt.savefig(output_file, dpi=200, bbox_inches='tight')
-        plt.close()
-
-        print(f"    ✓ Layer {layer_idx} attention map已保存: {os.path.basename(output_file)}")
-
-    except Exception as e:
-        print(f"  ⚠️  Layer {layer_idx}: 可视化attention map时出错: {e}")
-        import traceback
-        traceback.print_exc()
+    print(f"    ✓ Layer {layer_idx} attention map已保存: {os.path.basename(output_file)}")
+    print(f"      Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
 
 
 def parse_args():
@@ -1871,9 +2222,10 @@ def parse_args():
 
     # 输入参数
     default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
-    default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
+    # default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     # default_image_file = "./image.png"
-    # default_prompt = "Please describe this image in detail."
+    default_prompt = "Please help me describe the image in detail."
+
     parser.add_argument("--image-file", type=str,
                        default=default_image_file,
                        help=f"图像文件路径(默认: {default_image_file})")
@@ -1881,16 +2233,18 @@ def parse_args():
                        help=f"提示词(默认: {default_prompt})")
 
     # 分析参数
-    parser.add_argument("--target-layers", type=str, default="even",
+    parser.add_argument("--target-layers", type=str, default="odd",
                        help="目标层索引，用逗号分隔，如 '0,2,4' 或 'even' 表示偶数层，'odd' 表示奇数层")
     parser.add_argument("--output-dir", type=str, default=None,
                        help="输出目录(默认为 tests/output)")
-    parser.add_argument("--max-new-tokens", type=int, default=10,
+    parser.add_argument("--max-new-tokens", type=int, default=100,
                        help="生成的最大token数量")
     parser.add_argument("--extract-generation-attention", type=bool, default=True,
                        help="是否提取生成过程中的attention map(True/False)")
     parser.add_argument("--save-attention-maps", type=bool, default=True,
                        help="是否保存attention map图片（默认False）")
+    parser.add_argument("--threshold-top-p", type=float, default=0.9,
+                       help="Top-p阈值，用于提取lm_head输出的tokens（默认0.9）")
 
     return parser.parse_args()
 
@@ -1972,7 +2326,9 @@ def main():
         extract_attention_during_generation(
             model, tokenizer, image_processor, args.image_file, args.prompt,
             args.conv_mode, args.device, output_dir, args.max_new_tokens,
-            save_attention_maps=args.save_attention_maps
+            save_attention_maps=args.save_attention_maps,
+            target_layers=args.target_layers,
+            threshold_top_p=args.threshold_top_p
         )
 
     print("\n" + "=" * 80)
