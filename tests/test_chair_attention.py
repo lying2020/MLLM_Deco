@@ -1180,7 +1180,19 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
 
                         if last_hidden is not None:
                             with torch.no_grad():
-                                layer_logits = model.lm_head(last_hidden.to(device))  # [vocab_size]
+                                # 对hidden state应用RMSNorm（与最后一层相同的操作）
+                                if norm_layer is not None:
+                                    # norm_layer期望输入形状为 [batch, seq_len, hidden_size] 或 [seq_len, hidden_size]
+                                    # 我们需要添加batch维度：[hidden_size] -> [1, hidden_size]
+                                    last_hidden_normalized = norm_layer(last_hidden.unsqueeze(0).to(device))
+                                    # 移除batch维度：[1, hidden_size] -> [hidden_size]
+                                    last_hidden_normalized = last_hidden_normalized.squeeze(0)
+                                else:
+                                    # 如果没有norm层，直接使用原始hidden state
+                                    last_hidden_normalized = last_hidden.to(device)
+
+                                # 通过lm_head得到logits（与最后一层相同的操作）
+                                layer_logits = model.lm_head(last_hidden_normalized)
                                 predicted_token_id = layer_logits.argmax().item()
                                 predicted_token_word = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
 
@@ -2070,7 +2082,7 @@ def main():
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
-        "num_samples": 1,  # 默认只处理1个图像（用于测试 attention map）
+        "num_samples": 100,  # 默认只处理1个图像（用于测试 attention map）
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
         "target_layers": [15, 23, 31]  # 默认只处理偶数层（减少输出）
@@ -2086,7 +2098,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default=6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default=None,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
