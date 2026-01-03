@@ -56,18 +56,7 @@ import matplotlib
 matplotlib.use('Agg')  # 使用非交互式后端，不显示图片窗口
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-
-
-def load_image(image_file):
-    """加载图像文件, 支持本地文件和 URL"""
-    if image_file.startswith("http") or image_file.startswith("https"):
-        response = requests.get(image_file)
-        image = Image.open(BytesIO(response.content)).convert("RGB")
-    else:
-        if not os.path.exists(image_file):
-            raise FileNotFoundError(f"图像文件不存在: {image_file}")
-        image = Image.open(image_file).convert("RGB")
-    return image
+from test_llava_v15_7b_attention import visualize_step_attention_map, plot_attention_pixel_grid, load_image
 
 
 def get_coco_val2014_images(coco_root: str, image_id_list: Optional[List[int]] = None, max_images: int = 0):
@@ -971,24 +960,36 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
             image_tensor.unsqueeze(0).half().to(device)
         )
 
-    # 计算图像token位置
-    vision_tower = model.get_vision_tower()
+    # 编码图像特征
+    vision_hidden = None
     num_image_tokens = 0
-    if vision_tower is not None:
-        with torch.no_grad():
-            image_features = vision_tower(image_tensor.unsqueeze(0).half().to(device))
-            if hasattr(image_features, 'last_hidden_state'):
-                vision_hidden = image_features.last_hidden_state
-            elif isinstance(image_features, tuple):
-                vision_hidden = image_features[0]
-            elif isinstance(image_features, torch.Tensor):
-                vision_hidden = image_features
-            else:
-                vision_hidden = None
+    with torch.no_grad():
+        vision_tower = model.get_vision_tower()
+        if vision_tower is not None:
+            try:
+                image_features = vision_tower(image_tensor.unsqueeze(0).half().to(device))
+                if hasattr(image_features, 'last_hidden_state'):
+                    vision_hidden = image_features.last_hidden_state
+                elif isinstance(image_features, tuple):
+                    vision_hidden = image_features[0]
+                elif isinstance(image_features, torch.Tensor):
+                    vision_hidden = image_features
+                else:
+                    vision_hidden = None
 
-            if vision_hidden is not None and hasattr(model, 'mm_projector'):
-                vision_hidden = model.mm_projector(vision_hidden)
-                num_image_tokens = vision_hidden.shape[1]
+                # 通过 projector
+                if vision_hidden is not None and hasattr(model, 'mm_projector'):
+                    vision_hidden = model.mm_projector(vision_hidden)
+
+                if vision_hidden is not None:
+                    # vision_hidden shape: [batch, num_patches, hidden_size]
+                    # 展平后: [batch, num_patches, hidden_size] -> [batch, num_patches, hidden_size]
+                    num_image_tokens = vision_hidden.shape[1]  # 获取图像 token 数量
+                    print(f"Vision Hidden State Shape: {vision_hidden.shape}")
+                    print(f"图像 token 数量: {num_image_tokens}")
+            except Exception as e:
+                print(f"⚠️  提取 vision hidden state 时出错: {e}")
+                vision_hidden = None
 
     image_token_start = 35  # 跳过BOS token
     image_token_end = image_token_start + (num_image_tokens if num_image_tokens > 0 else 576)

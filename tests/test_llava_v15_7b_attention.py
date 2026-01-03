@@ -53,7 +53,6 @@ from llava.model.builder import load_pretrained_model
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 
 
-
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="LLaVA 模型架构分析和 Attention 可视化")
@@ -99,6 +98,8 @@ def load_image(image_file):
         response = requests.get(image_file)
         image = Image.open(BytesIO(response.content)).convert("RGB")
     else:
+        if not os.path.exists(image_file):
+            raise FileNotFoundError(f"图像文件不存在: {image_file}")
         image = Image.open(image_file).convert("RGB")
     return image
 
