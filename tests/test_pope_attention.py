@@ -1943,11 +1943,29 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
 
             # 处理attention tensor的形状
             # 在生成过程中，attention的形状可能是:
-            # - [batch, num_heads, 1, seq_len] (只有最后一个token的attention)
+            # - [batch, num_heads, 1, seq_len] (只有最后一个token的attention) <- 这是标准生成过程
             # - [num_heads, 1, seq_len]
             # - [1, seq_len] (已经平均过head)
             # - [batch, num_heads, seq_len, seq_len] (完整的attention矩阵)
+            #
+            # 注意：在自回归生成过程中，每次只生成一个token，所以query_len通常是1
+            # 这意味着我们只能看到"最后一个token对所有历史token的attention"
+            # 如果看到形状是 (1, 32, 1, 641)，这是正常的：
+            #   - 1: batch_size
+            #   - 32: num_heads
+            #   - 1: query_len（只有最后一个新生成的token）
+            #   - 641: key_len（包括所有历史token：输入 + 之前生成的所有token）
+            #
+            # 如果期望看到完整的attention矩阵 (1, 32, 128, 641)，需要：
+            # 1. 在生成完成后，对完整序列重新forward一次
+            # 2. 或者修改生成过程（但这会非常复杂且不标准）
             print(f"  [Layer {layer_idx}] 原始attention形状: {layer_attn_np.shape}")
+            if len(layer_attn_np.shape) == 4:
+                batch_size, num_heads, query_len, key_len = layer_attn_np.shape
+                print(f"    - batch_size: {batch_size}, num_heads: {num_heads}, query_len: {query_len}, key_len: {key_len}")
+                if query_len == 1:
+                    print(f"    - 说明: 这是标准生成过程，query_len=1表示只有最后一个新生成的token")
+                    print(f"    - key_len={key_len} 包括所有历史token（输入 + 之前生成的所有token）")
 
             if len(layer_attn_np.shape) == 4:
                 # [batch, num_heads, query_len, key_len]
@@ -2125,14 +2143,60 @@ def extract_attention_during_generation(model, tokenizer, image_processor, image
     return generation_output_dir
 
 
+def enhance_attention_map(attention_map, method='min_max_normalize'):
+    """
+    增强或归一化attention map，使像素点差异更明显
+
+    Args:
+        attention_map: 原始attention map (24x24)
+        method: 增强方法 ('min_max_normalize', 'z_score_normalize', 'power_law', 'sigmoid')
+
+    Returns:
+        增强后的attention map
+    """
+    attn = attention_map.copy()
+
+    if method == 'min_max_normalize':
+        # Min-Max归一化到[0, 1]
+        attn_min = attn.min()
+        attn_max = attn.max()
+        if attn_max > attn_min:
+            attn = (attn - attn_min) / (attn_max - attn_min)
+    elif method == 'z_score_normalize':
+        # Z-score归一化
+        attn_mean = attn.mean()
+        attn_std = attn.std()
+        if attn_std > 0:
+            attn = (attn - attn_mean) / attn_std
+            # 然后映射到[0, 1]
+            attn = (attn - attn.min()) / (attn.max() - attn.min()) if attn.max() > attn.min() else attn
+    elif method == 'power_law':
+        # 幂律增强 (gamma correction)
+        attn_min = attn.min()
+        attn_max = attn.max()
+        if attn_max > attn_min:
+            attn = (attn - attn_min) / (attn_max - attn_min)
+            gamma = 0.5  # 增强对比度
+            attn = np.power(attn, gamma)
+    elif method == 'sigmoid':
+        # Sigmoid增强
+        attn_mean = attn.mean()
+        attn_std = attn.std()
+        if attn_std > 0:
+            attn = 1 / (1 + np.exp(-(attn - attn_mean) / (attn_std * 2)))
+
+    return attn
+
+
 def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, token_text, token_name,
                                 patch_size, output_dir):
     """可视化单个步骤、单层的attention map
 
-    只生成1×3的图例：
+    生成1×4的图例：
     1. 原图
-    2. Jet colormap（不叠加原图，colorbar只显示一半颜色域：从深蓝到淡黄，不显示深红部分）
-    3. Jet colormap和原图叠加（原图显示更明显）
+    2. 原始attention map（Jet colormap，显示原始logits值）
+    3. 增强后的attention map（归一化后，使差异更明显）
+    4. 增强后的attention map和原图叠加
 
     Args:
         attention_map: 24x24的attention map（原始logits值，不归一化）
@@ -2144,17 +2208,19 @@ def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, toke
         patch_size: patch大小（24）
         output_dir: 输出目录
     """
-    # 不归一化，保持原始logits值
+    # 增强attention map，使像素点差异更明显
+    attn_values_enhanced = enhance_attention_map(attention_map.copy(), method='min_max_normalize')
+
+    # 保持原始值用于显示
     attn_values = attention_map.copy()
 
     # 获取值的范围用于colorbar
     attn_min = attn_values.min()
     attn_max = attn_values.max()
+    attn_enhanced_min = attn_values_enhanced.min()
+    attn_enhanced_max = attn_values_enhanced.max()
 
     # 创建自定义colormap，只使用jet的前一半（从深蓝到淡黄，不包含深红）
-    # jet colormap: 深蓝(0) -> 蓝(0.25) -> 青(0.5) -> 黄(0.75) -> 红(1.0)
-    # 我们只需要0到0.75的部分（深蓝到淡黄）
-    from matplotlib.colors import LinearSegmentedColormap
     try:
         # matplotlib >= 3.5
         jet_full = plt.colormaps['jet']
@@ -2165,37 +2231,41 @@ def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, toke
     colors_half = jet_full(np.linspace(0, 0.75, 256))
     jet_half = LinearSegmentedColormap.from_list('jet_half', colors_half)
 
-    # 创建1×3的可视化布局
-    fig = plt.figure(figsize=(18, 6))
+    # 创建1×4的可视化布局（添加增强版本）
+    fig = plt.figure(figsize=(24, 6))
 
     # 1. 原图
-    ax1 = plt.subplot(1, 3, 1)
+    ax1 = plt.subplot(1, 4, 1)
     ax1.imshow(image)
     ax1.set_title(f'Original Image\nStep {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"',
                  fontsize=12, fontweight='bold')
     ax1.axis('off')
 
-    # 2. Jet colormap（不叠加原图，使用一半颜色域）
-    ax2 = plt.subplot(1, 3, 2)
+    # 2. 原始attention map（Jet colormap）
+    ax2 = plt.subplot(1, 4, 2)
     im2 = ax2.imshow(attn_values, cmap=jet_half, interpolation='bilinear', vmin=attn_min, vmax=attn_max)
-    ax2.set_title(f'Jet Colormap (24×24)\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    ax2.set_title(f'Original Attention (24×24)\nLayer {layer_idx}', fontsize=12, fontweight='bold')
     ax2.axis('off')
-    # colorbar使用科学计数法，保留4位有效数字
     cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
     cbar2.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4e}'))
     cbar2.set_label('Logit Value', fontsize=10, fontweight='bold')
 
-    # 3. Jet colormap和原图叠加（原图显示更明显）
-    ax3 = plt.subplot(1, 3, 3)
-    # 先显示原图，降低attention map的透明度，使原图更明显
-    ax3.imshow(image)
-    im3 = ax3.imshow(attn_values, cmap='jet', alpha=0.4, interpolation='bilinear', vmin=attn_min, vmax=attn_max)
-    ax3.set_title(f'Jet Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    # 3. 增强后的attention map
+    ax3 = plt.subplot(1, 4, 3)
+    im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='bilinear', vmin=attn_enhanced_min, vmax=attn_enhanced_max)
+    ax3.set_title(f'Enhanced Attention (24×24)\nLayer {layer_idx} (Normalized)', fontsize=12, fontweight='bold')
     ax3.axis('off')
-    # colorbar使用科学计数法，保留4位有效数字
     cbar3 = plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-    cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4e}'))
-    cbar3.set_label('Logit Value', fontsize=10, fontweight='bold')
+    cbar3.set_label('Normalized Value', fontsize=10, fontweight='bold')
+
+    # 4. 增强后的attention map和原图叠加
+    ax4 = plt.subplot(1, 4, 4)
+    ax4.imshow(image)
+    im4 = ax4.imshow(attn_values_enhanced, cmap='jet', alpha=0.5, interpolation='bilinear', vmin=attn_enhanced_min, vmax=attn_enhanced_max)
+    ax4.set_title(f'Enhanced Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    ax4.axis('off')
+    cbar4 = plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+    cbar4.set_label('Normalized Value', fontsize=10, fontweight='bold')
 
     plt.tight_layout()
     # 在文件名中包含token信息
@@ -2204,7 +2274,8 @@ def visualize_step_attention_map(attention_map, image, layer_idx, step_idx, toke
     plt.close()
 
     print(f"    ✓ Layer {layer_idx} attention map已保存: {os.path.basename(output_file)}")
-    print(f"      Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
+    print(f"      原始Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
+    print(f"      增强后范围: [{attn_enhanced_min:.4f}, {attn_enhanced_max:.4f}]")
 
 
 def parse_args():
@@ -2222,9 +2293,10 @@ def parse_args():
 
     # 输入参数
     default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    default_prompt = "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     # default_prompt = "there is a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     # default_image_file = "./image.png"
-    default_prompt = "Please help me describe the image in detail."
+    # default_prompt = "Please help me describe the image in detail."
 
     parser.add_argument("--image-file", type=str,
                        default=default_image_file,

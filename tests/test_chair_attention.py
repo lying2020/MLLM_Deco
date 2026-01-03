@@ -180,6 +180,9 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
         output_token_len: 生成的 token 长度
         input_token_len: 输入的 token 长度
     """
+    # 为了确保原始输出的token_id是logits最高的，强制使用greedy decoding
+    # 如果temperature <= 0，使用greedy decoding（argmax）
+    # 如果temperature > 0，仍然使用采样，但会在debug信息中说明
     do_sample = True if temperature > 0 else False
 
     # 准备生成参数
@@ -197,6 +200,10 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
         "output_hidden_states": True,
         "stopping_criteria": [stopping_criteria]
     }
+
+    if verbose and temperature > 0:
+        print(f"\n  [警告] 当前使用采样模式 (temperature={temperature})，原始输出的token可能不是logits最高的")
+        print(f"  建议: 设置 temperature=0 或 temperature=-1 使用greedy decoding以确保一致性")
 
     if use_deco:
         generate_kwargs.update({
@@ -583,20 +590,19 @@ def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
     return result
 
 
-def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, num_layers=32, logit_threshold=0.01):
+def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, num_layers=32):
     """生成5×32的heatmap，显示每层前5个最高logits的token
 
     使用绿色渐变colormap，并对logits取对数以增强对比度
-    只显示logits大于阈值的token，像素点之间有间隔，并在每个像素点上标注词汇
+    像素点之间有间隔，并在每个像素点上标注词汇
 
     Args:
         layer_lm_head_outputs: 字典，包含每层的lm_head输出信息
         output_dir: 输出目录
         step_idx: 生成步骤索引
         num_layers: 总层数（默认32）
-        logit_threshold: logits阈值，只显示大于此值的token（默认0.01）
     """
-    # 收集所有层的前5个tokens，只保留logits > threshold的
+    # 收集所有层的前5个tokens
     # 创建一个5×32的矩阵，存储logits值
     logits_matrix = np.full((5, num_layers), np.nan)  # 使用NaN表示无效值
     token_texts_matrix = [[''] * num_layers for _ in range(5)]  # 存储token文本
@@ -611,23 +617,22 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
         if layer_idx is None or layer_idx >= num_layers:
             continue
 
-        # 获取前5个tokens，只保留logits > threshold的
+        # 获取前5个tokens
         top_5_tokens = top_p_info.get('top_5_tokens', [])
         rank = 0
         for token_info in top_5_tokens:
-            if token_info['logit'] > logit_threshold:
-                if rank < 5:  # 最多5个
-                    logits_matrix[rank, layer_idx] = token_info['logit']
-                    token_texts_matrix[rank][layer_idx] = token_info['token_text']
-                    rank += 1
-                else:
-                    break
+            if rank < 5:  # 最多5个
+                logits_matrix[rank, layer_idx] = token_info['logit']
+                token_texts_matrix[rank][layer_idx] = token_info['token_text']
+                rank += 1
+            else:
+                break
 
     # 对logits取对数以增强对比度
     # 只处理非NaN的值
     valid_logits = logits_matrix[~np.isnan(logits_matrix)]
     if len(valid_logits) == 0:
-        print(f"  ⚠️  步骤 {step_idx+1}: 没有满足阈值({logit_threshold})的logits，跳过heatmap生成")
+        print(f"  ⚠️  步骤 {step_idx+1}: 没有有效的logits，跳过heatmap生成")
         return
 
     logits_min = valid_logits.min()
@@ -664,7 +669,7 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     # 设置坐标轴
     ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
     ax.set_ylabel('Top 5 Rank', fontsize=12, fontweight='bold')
-    ax.set_title(f'Top 5 Logits Heatmap (Log Scale) - Step {step_idx+1}\n(Color represents log(logit value), threshold={logit_threshold})',
+    ax.set_title(f'Top 5 Logits Heatmap (Log Scale) - Step {step_idx+1}\n(Color represents log(logit value))',
                  fontsize=14, fontweight='bold')
 
     # 设置x轴刻度（层索引）- 放在单元格中心
@@ -681,7 +686,7 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
             token_text = token_texts_matrix[rank][layer_idx]
             logit_value = logits_matrix[rank, layer_idx]
 
-            # 只标注有效的token（logits > threshold）
+            # 只标注有效的token
             if token_text and not np.isnan(logit_value):
                 # 清理token文本，移除换行符和特殊字符，限制长度
                 clean_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
@@ -730,7 +735,7 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     valid_count = np.sum(~np.isnan(logits_matrix))
     total_count = 5 * num_layers
     print(f"  ✓ 步骤 {step_idx+1} 的Top 5 Logits Heatmap已保存: {os.path.basename(heatmap_file)}")
-    print(f"    有效token数量: {valid_count}/{total_count} (阈值: {logit_threshold})")
+    print(f"    有效token数量: {valid_count}/{total_count}")
     if len(valid_logits) > 0:
         print(f"    原始logits范围: [{valid_logits.min():.4f}, {valid_logits.max():.4f}]")
         print(f"    对数logits范围: [{np.nanmin(logits_log):.4f}, {np.nanmax(logits_log):.4f}]")
@@ -992,19 +997,52 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     # step_lm_head_outputs: {step_idx: {layer_idx: top_p_info}}
     step_lm_head_outputs = {}
 
-    # 首先，为所有生成步骤提取所有层的logits信息（即使没有物体token）
-    # 这样可以确保每个步骤都有heatmap
-    if all_hidden_states is not None and hasattr(model, 'lm_head'):
-        print(f"\n  [提取Logits] 为所有生成步骤提取各层的logits信息...")
-        for step_idx in range(len(all_attentions) if all_attentions is not None else 0):
+    # 收集所有目标 token 位置（来自 object_tokens_info）
+    # 只取每个物体的第一次出现的位置（第一个 token 位置）
+    target_token_positions = set()
+    for node_word, obj_info in object_tokens_info.items():
+        token_positions = obj_info.get('token_positions', [])
+        if not token_positions:
+            continue
+
+        # 只取第一次出现的位置（第一个 token 位置）
+        target_token_positions.add(token_positions[0])
+
+    # 只为 object_tokens_info 中的关键词对应的 token 位置提取 logits 信息
+    if all_hidden_states is not None and hasattr(model, 'lm_head') and target_token_positions:
+        print(f"\n  [提取Logits] 为目标 token 位置提取各层的logits信息...")
+        print(f"    目标 token 位置: {sorted(target_token_positions)} (共 {len(target_token_positions)} 个)")
+
+        for step_idx in sorted(target_token_positions):
             if step_idx >= len(all_hidden_states):
                 continue
 
-            step_hidden_states = all_hidden_states[step_idx]
+            #  有点奇怪，为什么非得  - 1
+            step_hidden_states = all_hidden_states[step_idx-1]
             if step_hidden_states is None:
                 continue
 
             step_lm_head_outputs[step_idx] = {}
+
+            # 获取模型的norm层（RMSNorm），用于对每一层的hidden state进行归一化
+            # 参考最后一层的处理：最后一层transformer输出 -> norm -> lm_head -> logits
+            lang_model = model.get_model()
+            norm_layer = lang_model.norm if hasattr(lang_model, 'norm') else None
+
+            # 获取原始输出的token（用于对比）
+            # 注意：all_hidden_states[step_idx] 是生成第 step_idx+1 个token时的hidden state
+            # 所以应该对应 output_ids[step_idx]（第 step_idx+1 个token）
+            original_token_id = None
+            original_token_text = None
+            if output_ids is not None and step_idx < output_ids.shape[1]:
+                original_token_id = output_ids[0, step_idx].item()
+                original_token_text = tokenizer.decode([original_token_id], skip_special_tokens=True)
+
+                # Debug: 检查output_ids的结构
+                print(f"\n  [Debug] Step {step_idx+1} - output_ids检查:")
+                print(f"    - output_ids.shape: {output_ids.shape}")
+                print(f"    - output_ids[0, :step_idx+3]: {output_ids[0, :step_idx+3].tolist() if step_idx+3 <= output_ids.shape[1] else 'N/A'}")
+                print(f"    - 当前step_idx: {step_idx}, 对应token位置: {step_idx}")
 
             # 提取所有层的logits
             if isinstance(step_hidden_states, (tuple, list)):
@@ -1012,22 +1050,67 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                     layer_hidden = step_hidden_states[layer_idx_all]
                     if isinstance(layer_hidden, torch.Tensor):
                         if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
-                            last_hidden = layer_hidden[0, -1, :]
+                            last_hidden = layer_hidden[0, -1, :]  # [hidden_size]
                         elif len(layer_hidden.shape) == 2:  # [seq_len, hidden_size]
-                            last_hidden = layer_hidden[-1, :]
+                            last_hidden = layer_hidden[-1, :]  # [hidden_size]
                         else:
                             last_hidden = None
 
                         if last_hidden is not None:
                             with torch.no_grad():
-                                layer_logits = model.lm_head(last_hidden.to(device))
+                                # 对hidden state应用RMSNorm（与最后一层相同的操作）
+                                if norm_layer is not None:
+                                    # norm_layer期望输入形状为 [batch, seq_len, hidden_size] 或 [seq_len, hidden_size]
+                                    # 我们需要添加batch维度：[hidden_size] -> [1, hidden_size]
+                                    last_hidden_normalized = norm_layer(last_hidden.unsqueeze(0).to(device))
+                                    # 移除batch维度：[1, hidden_size] -> [hidden_size]
+                                    last_hidden_normalized = last_hidden_normalized.squeeze(0)
+                                else:
+                                    # 如果没有norm层，直接使用原始hidden state
+                                    last_hidden_normalized = last_hidden.to(device)
+
+                                # 通过lm_head得到logits（与最后一层相同的操作）
+                                layer_logits = model.lm_head(last_hidden_normalized)
+
+                                # Debug: 特别检查第32层（索引31）
+                                if layer_idx_all == len(step_hidden_states) - 1:  # 最后一层（第32层）
+                                    predicted_token_id = layer_logits.argmax().item()
+                                    predicted_token_text = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
+
+                                    # 获取top-5的logits用于分析
+                                    top5_logits, top5_indices = torch.topk(layer_logits, 5)
+                                    top5_tokens = [tokenizer.decode([idx.item()], skip_special_tokens=True) for idx in top5_indices]
+
+                                    # 计算原始token的排名
+                                    original_logit = layer_logits[original_token_id].item() if original_token_id is not None else None
+                                    original_rank = None
+                                    if original_logit is not None:
+                                        original_rank = torch.sum(layer_logits > original_logit).item() + 1
+
+                                    print(f"\n  [Debug Layer 32] Step {step_idx+1}:")
+                                    print(f"    - 原始输出 token_id: {original_token_id}")
+                                    print(f"    - 原始输出 token_text: '{original_token_text}'")
+                                    print(f"    - 第32层预测 token_id (argmax): {predicted_token_id}")
+                                    print(f"    - 第32层预测 token_text (argmax): '{predicted_token_text}'")
+                                    print(f"    - 是否一致: {original_token_id == predicted_token_id}")
+                                    if original_token_id != predicted_token_id:
+                                        predicted_logit = layer_logits[predicted_token_id].item()
+                                        print(f"    - ⚠️  不一致！")
+                                        if original_logit is not None:
+                                            print(f"    - 原始token logit: {original_logit:.4f} (排名: {original_rank})")
+                                        print(f"    - 预测token logit: {predicted_logit:.4f} (排名: 1)")
+                                        print(f"    - Top-5 tokens: {list(zip(top5_tokens, [f'{logit:.4f}' for logit in top5_logits.tolist()]))}")
+                                        print(f"    - 可能原因: 使用了采样（temperature > 0），实际生成的token不是argmax")
+                                        print(f"    - 或者: hidden state的索引对应关系可能有问题")
+
                                 top_p_info = extract_top_p_tokens(layer_logits, tokenizer, threshold_top_p=0.9)
                                 step_lm_head_outputs[step_idx][layer_idx_all] = top_p_info
 
-        print(f"  ✓ 已为 {len(step_lm_head_outputs)} 个生成步骤提取logits信息")
+        print(f"  ✓ 已为 {len(step_lm_head_outputs)} 个目标 token 位置提取logits信息")
 
     # 按步骤组织目标词汇：找出每个步骤对应的目标词汇（CHAIR识别的物体）
     # step_target_words: {step_idx: [node_word1, node_word2, ...]}
+    # 只处理每个物体的第一次出现位置
     step_target_words = {}
     # object_tokens_info 现在是字典，以 node_word 为 key
     for node_word, obj_info in object_tokens_info.items():
@@ -1036,15 +1119,15 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
         if not token_positions:
             continue
 
-        # 对于该物体的每个token位置，找到对应的步骤
-        # LLaVA 的 output_ids 可能不包含 input 部分，所以 token_pos 就是 step_idx
-        for token_pos in token_positions:
-            step_idx = token_pos  # LLaVA 的 output_ids 不包含 input，所以 token_pos 就是 step_idx
-            if step_idx not in step_target_words:
-                step_target_words[step_idx] = []
-            # 避免重复添加相同的词汇
-            if node_word not in step_target_words[step_idx]:
-                step_target_words[step_idx].append(node_word)
+        # 只取第一次出现的位置（第一个 token 位置）
+        first_token_pos = token_positions[0]
+        step_idx = first_token_pos  # LLaVA 的 output_ids 不包含 input，所以 token_pos 就是 step_idx
+
+        if step_idx not in step_target_words:
+            step_target_words[step_idx] = []
+        # 避免重复添加相同的词汇
+        if node_word not in step_target_words[step_idx]:
+            step_target_words[step_idx].append(node_word)
 
     # 为每个有目标词汇的步骤提取attention map
     for step_idx in sorted(step_target_words.keys()):
@@ -1058,18 +1141,18 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
         safe_word = target_word.replace(' ', '_').replace('/', '_').replace('\\', '_')
 
         # 创建步骤文件夹：step_{step_idx+1}_{word}
-        step_dir = os.path.join(output_dir, f"step_{step_idx+1}_{safe_word}")
+        step_dir = os.path.join(output_dir, f"step_{step_idx}_{safe_word}")
         os.makedirs(step_dir, exist_ok=True)
 
-        print(f"\n  [步骤 {step_idx+1}] 目标词汇: {', '.join(target_words)}")
+        print(f"\n  [步骤 {step_idx}] 目标词汇: {', '.join(target_words)}")
         print(f"    输出目录: {os.path.basename(step_dir)}")
 
-        step_attentions = all_attentions[step_idx]
+        step_attentions = all_attentions[step_idx-1]
 
         # 获取该步骤的hidden states（如果可用）
         step_hidden_states = None
         if all_hidden_states is not None and step_idx < len(all_hidden_states):
-            step_hidden_states = all_hidden_states[step_idx]
+            step_hidden_states = all_hidden_states[step_idx-1]
 
         # 处理每一层的attention（只处理选定的层）
         for layer_idx, layer_attn in enumerate(step_attentions):
@@ -1269,7 +1352,7 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
 
             # 生成5×32 heatmap
             visualize_top5_logits_heatmap(
-                layer_outputs, step_output_dir, step_idx, num_total_layers, logit_threshold=0.01
+                layer_outputs, step_output_dir, step_idx, num_total_layers
             )
 
             # 保存词汇语义信息到JSON文件
@@ -1982,14 +2065,14 @@ def main():
         "threshold_top_k": 20,
         "start_layer": 20,
         "end_layer": 29,
-        "temperature": -1,
+        "temperature": 0,  # 使用greedy decoding，确保原始输出的token_id是logits最高的
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
-        "num_beams": 2,
+        "num_beams": 1,
         "num_samples": 1,  # 默认只处理1个图像（用于测试 attention map）
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
-        "target_layers": [0, 1, 3, 7, 15, 25, 29, 30, 31]  # 默认只处理偶数层（减少输出）
+        "target_layers": [15, 23, 31]  # 默认只处理偶数层（减少输出）
     }
 
     # 解析参数(所有参数都有默认值)

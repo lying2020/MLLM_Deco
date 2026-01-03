@@ -90,8 +90,8 @@ def parse_args():
     # default_prompt =  "There is a bowl"
     # default_image_file = "./image_deco_2.png"
     # default_prompt = "describe this image, and tell me the name and color of the object in the image."
-    default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000547003.jpg"
-    default_prompt = "There is a tie."
+    default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
+    default_prompt = "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     # default_image_file = "/home/liying/Documents/dataset/coco/val2014/COCO_val2014_000000065883.jpg"
     # default_prompt = "there is not a bowl, Yes or No?" # "there is a boy with blond hair and blue eyes, is this discription correct? Yes or No."
     parser.add_argument("--image-file", type=str, default=default_image_file,
