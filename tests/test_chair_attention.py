@@ -50,8 +50,10 @@ from PIL import Image
 import requests
 from io import BytesIO
 from transformers import set_seed
-from eval_tool.chair import evaluate_chair, CHAIR
+from eval_tool.chair import evaluate_chair, CHAIR, get_chair_evaluator
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端，不显示图片窗口
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
@@ -213,30 +215,26 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     output_ids = output_dict.sequences
     input_token_len = input_ids.shape[1]
 
-    # 如果 output_ids 不包含 input_ids, 手动拼接
-    if output_ids.shape[1] < input_token_len:
-        output_ids = torch.cat([input_ids, output_ids], dim=1)
-    elif output_ids.shape[1] >= input_token_len:
-        # 检查前 input_token_len 个 token 是否与 input_ids 匹配
-        prefix_match = (input_ids[0] == output_ids[0, :input_token_len]).all().item()
-        if not prefix_match:
-            output_ids = torch.cat([input_ids, output_ids[:, input_token_len:]], dim=1)
+    # LLaVA 可能已经修改了 transformer 模块，output_ids 中不包含输入信息
+    # 直接使用完整的 output_ids 作为生成的 token
+    generated_ids = output_ids
+    output_token_len = generated_ids.shape[1]
 
-    output_token_len = output_ids.shape[1] - input_token_len
-
-    # 获取新生成的 token
+    # 处理 BOS token 和最终解码
     if output_token_len > 0:
-        generated_ids = output_ids[:, input_token_len:]
         # 如果新生成的 token 以 BOS token 开头, 跳过它
         bos_token_id = tokenizer.bos_token_id if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None else None
-        if bos_token_id is not None and generated_ids.shape[1] > 0 and generated_ids[0, 0].item() == bos_token_id:
-            generated_ids = generated_ids[:, 1:]
-            if generated_ids.shape[1] > 0:
-                outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-            else:
-                outputs = ""
-        else:
+        if bos_token_id is not None and generated_ids.shape[1] > 0:
+            first_token = generated_ids[0, 0].item()
+            if first_token == bos_token_id:
+                generated_ids = generated_ids[:, 1:]
+                output_token_len = generated_ids.shape[1]
+
+        if generated_ids.shape[1] > 0:
+            # 使用 batch_decode 和 skip_special_tokens=True 来安全解码
             outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        else:
+            outputs = ""
     else:
         outputs = ""
 
@@ -244,6 +242,7 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     all_attentions = output_dict.attentions if hasattr(output_dict, 'attentions') else None
     all_hidden_states = output_dict.hidden_states if hasattr(output_dict, 'hidden_states') else None
 
+    # 返回原始的 output_ids（从模型生成的完整序列，包含input+output），用于 attention 分析
     return outputs, output_token_len, input_token_len, output_ids, all_attentions, all_hidden_states
 
 
@@ -265,121 +264,525 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
             - token_positions: 在生成序列中的token位置列表
             - token_texts: 对应的token文本列表
     """
-    object_tokens_info = []
+    # 使用字典结构，以 node_word 作为 key，避免重复
+    # object_tokens_info: {node_word: {object_word, token_positions, token_texts, matched_tokens_detail}}
+    object_tokens_info = {}
 
     if not caption or not caption.strip():
-        return object_tokens_info
+        return object_tokens_info, {
+            'full_generated_text': '',
+            'all_tokens_detail': [],
+            'total_tokens': 0
+        }
 
     # 如果没有提供chair_evaluator，使用简单的NLTK方法识别名词
     if chair_evaluator is None:
+        import nltk
+        from nltk.stem import WordNetLemmatizer
+        from nltk.corpus import wordnet
+
+        # 确保NLTK数据已下载
         try:
-            import nltk
-            from nltk.stem import WordNetLemmatizer
-            from nltk.corpus import wordnet
-
-            # 确保NLTK数据已下载
+            nltk.data.find('tokenizers/punkt_tab')
+        except LookupError:
             try:
-                nltk.data.find('tokenizers/punkt_tab')
+                nltk.data.find('tokenizers/punkt')
             except LookupError:
-                try:
-                    nltk.data.find('tokenizers/punkt')
-                except LookupError:
-                    nltk.download('punkt', quiet=True)
+                nltk.download('punkt', quiet=True)
 
-            try:
-                nltk.data.find('taggers/averaged_perceptron_tagger')
-            except LookupError:
-                nltk.download('averaged_perceptron_tagger', quiet=True)
+        try:
+            nltk.data.find('taggers/averaged_perceptron_tagger')
+        except LookupError:
+            nltk.download('averaged_perceptron_tagger', quiet=True)
 
-            try:
-                nltk.data.find('corpora/wordnet')
-            except LookupError:
-                nltk.download('wordnet', quiet=True)
+        try:
+            nltk.data.find('corpora/wordnet')
+        except LookupError:
+            nltk.download('wordnet', quiet=True)
 
-            # 使用NLTK识别名词
-            words = nltk.word_tokenize(caption.lower())
-            tagged_sent = nltk.pos_tag(words)
-            wnl = WordNetLemmatizer()
+        # 使用NLTK识别名词
+        words = nltk.word_tokenize(caption.lower())
+        tagged_sent = nltk.pos_tag(words)
+        wnl = WordNetLemmatizer()
 
-            nouns = []
-            for word, pos in tagged_sent:
-                if pos.startswith('NN'):  # 名词
-                    lemma = wnl.lemmatize(word, pos=wordnet.NOUN)
-                    nouns.append((word, lemma))
-        except Exception as e:
-            print(f"  ⚠️  使用NLTK识别名词时出错: {e}")
-            nouns = []
+        nouns = []
+        for word, pos in tagged_sent:
+            if pos.startswith('NN'):  # 名词
+                lemma = wnl.lemmatize(word, pos=wordnet.NOUN)
+                nouns.append((word, lemma))
     else:
         # 使用CHAIR的方法识别物体
-        try:
-            words, node_words, idxs, double_words = chair_evaluator.caption_to_words(caption)
-            nouns = [(w, nw) for w, nw in zip(words, node_words)]
-        except Exception as e:
-            print(f"  ⚠️  使用CHAIR识别物体时出错: {e}")
-            nouns = []
+        words, node_words, idxs, double_words = chair_evaluator.caption_to_words(caption)
+        nouns = [(w, nw) for w, nw in zip(words, node_words)]
 
     if not nouns:
-        return object_tokens_info
-
-    # 解码完整的输出序列，找到每个名词对应的token位置
-    try:
-        # 获取生成的token部分（跳过input部分）
-        generated_ids = output_ids[0, input_token_len:].cpu().tolist()
-
-        # 解码整个生成序列，找到每个token的文本
+        # 即使没有找到物体，也返回token详细信息
+        # LLaVA 的 output_ids 可能不包含输入信息，直接使用完整的 output_ids
+        generated_ids = output_ids[0].cpu().tolist()
         full_generated_text = tokenizer.decode(generated_ids, skip_special_tokens=False)
 
-        # 对于每个名词，找到它在序列中的位置
-        for word, node_word in nouns:
-            # 尝试找到这个词汇在生成序列中的位置
-            # 由于tokenization可能将单词分割成多个token，需要找到所有相关的token
-            word_lower = word.lower()
-            node_word_lower = node_word.lower()
+        all_tokens_detail = []
+        char_pos = 0
+        for token_idx, token_id in enumerate(generated_ids):
+            token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+            token_start = char_pos
+            token_end = char_pos + len(token_text)
 
-            # 方法1: 直接搜索词汇（可能跨多个token）
-            # 方法2: 逐个token解码，找到包含该词汇的token
-            token_positions = []
-            token_texts = []
+            all_tokens_detail.append({
+                'token_idx': token_idx,
+                'absolute_position': token_idx,  # LLaVA 的 output_ids 不包含 input，所以绝对位置就是 token_idx
+                'token_id': int(token_id),
+                'token_text': token_text,
+                'token_text_stripped': token_text.strip(),
+                'char_start': token_start,
+                'char_end': token_end,
+                'char_length': len(token_text)
+            })
 
-            # 从input_token_len开始搜索（只搜索生成的token）
-            current_text = ""
+            char_pos = token_end
+
+        return object_tokens_info, {
+            'full_generated_text': full_generated_text,
+            'all_tokens_detail': all_tokens_detail,
+            'total_tokens': len(generated_ids)
+        }
+
+    # 解码完整的输出序列，找到每个名词对应的token位置
+    # LLaVA 的 output_ids 可能不包含输入信息，直接使用完整的 output_ids
+    generated_ids = output_ids[0].cpu().tolist()
+
+    # 解码整个生成序列
+    full_generated_text = tokenizer.decode(generated_ids, skip_special_tokens=False)
+    full_generated_text_lower = full_generated_text.lower()
+
+    # 收集所有token的详细信息（用于JSON输出）
+    all_tokens_detail = []
+    char_pos = 0
+    for token_idx, token_id in enumerate(generated_ids):
+        token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+        token_start = char_pos
+        token_end = char_pos + len(token_text)
+
+        all_tokens_detail.append({
+            'token_idx': token_idx,
+            'absolute_position': token_idx,  # LLaVA 的 output_ids 不包含 input，所以绝对位置就是 token_idx
+            'token_id': int(token_id),
+            'token_text': token_text,
+            'token_text_stripped': token_text.strip(),
+            'char_start': token_start,
+            'char_end': token_end,
+            'char_length': len(token_text)
+        })
+
+        char_pos = token_end
+
+    # 对于每个名词，找到它在序列中的位置
+    for word, node_word in nouns:
+        word_lower = word.lower()
+        node_word_lower = node_word.lower()
+
+        token_positions = []
+        token_texts = []
+
+        # 方法：精确匹配，只匹配真正组成目标词汇的token
+        # 1. 首先检查单个token是否精确等于目标词汇（去除前后空格）
+        search_words = [word_lower, node_word_lower] if word_lower != node_word_lower else [word_lower]
+
+        for search_word in search_words:
+            if not search_word:
+                continue
+
+            # 检查单个token精确匹配
             for token_idx, token_id in enumerate(generated_ids):
-                token_text = tokenizer.decode([token_id], skip_special_tokens=False)
-                current_text += token_text
-
-                # 检查当前累积的文本是否包含目标词汇
-                if word_lower in current_text.lower() or node_word_lower in current_text.lower():
-                    # 找到包含该词汇的token
+                token_text = tokenizer.decode([token_id], skip_special_tokens=False).strip().lower()
+                if token_text == search_word:
                     if token_idx not in token_positions:
-                        token_positions.append(input_token_len + token_idx)
-                        token_texts.append(token_text)
+                        token_positions.append(token_idx)
+                        token_texts.append(tokenizer.decode([token_id], skip_special_tokens=False))
 
-            # 如果没找到，尝试更宽松的匹配
-            if not token_positions:
-                # 检查每个token的文本是否包含词汇的一部分
-                for token_idx, token_id in enumerate(generated_ids):
-                    token_text = tokenizer.decode([token_id], skip_special_tokens=False).lower()
-                    if word_lower in token_text or token_text in word_lower or \
-                       node_word_lower in token_text or token_text in node_word_lower:
-                        if input_token_len + token_idx not in token_positions:
-                            token_positions.append(input_token_len + token_idx)
-                            token_texts.append(tokenizer.decode([token_id], skip_special_tokens=False))
+            # 2. 如果目标词汇是多词（如 "traffic light"），使用滑动窗口匹配
+            if ' ' in search_word:
+                words_in_phrase = search_word.split()
+                max_window_size = min(len(words_in_phrase) + 2, len(generated_ids))  # 允许一些容差
 
-            if token_positions:
-                object_tokens_info.append({
+                for window_size in range(len(words_in_phrase), max_window_size + 1):
+                    for start_idx in range(len(generated_ids) - window_size + 1):
+                        # 获取窗口内的token序列
+                        window_tokens = generated_ids[start_idx:start_idx + window_size]
+                        window_text = tokenizer.decode(window_tokens, skip_special_tokens=False).strip().lower()
+
+                        # 检查窗口文本是否包含完整的目标短语（作为完整词）
+                        import re
+                        pattern = r'\b' + re.escape(search_word) + r'\b'
+                        if re.search(pattern, window_text):
+                            # 找到目标短语在窗口文本中的位置
+                            match = re.search(pattern, window_text)
+                            phrase_start = match.start()
+                            phrase_end = match.end()
+
+                            # 通过累积字符位置找到包含目标短语的token
+                            char_pos = 0
+                            matched_tokens = []
+                            for i in range(window_size):
+                                token_text = tokenizer.decode([generated_ids[start_idx + i]], skip_special_tokens=False)
+                                token_start = char_pos
+                                token_end = char_pos + len(token_text)
+
+                                # 检查token是否与目标短语的字符范围有重叠
+                                if token_start < phrase_end and token_end > phrase_start:
+                                    matched_tokens.append(start_idx + i)
+
+                                char_pos = token_end
+
+                                # 如果已经超过目标短语的结束位置，可以停止
+                                if char_pos > phrase_end:
+                                    break
+
+                            # 添加匹配的token（只添加之前未匹配的）
+                            for token_idx in matched_tokens:
+                                if token_idx not in token_positions:
+                                    token_positions.append(token_idx)
+                                    token_texts.append(tokenizer.decode([generated_ids[token_idx]], skip_special_tokens=False))
+
+                            # 找到一次匹配后，继续查找下一次出现
+                            break
+
+        if token_positions:
+            # 获取匹配的token的详细信息
+            matched_tokens_detail = []
+            for abs_pos in token_positions:
+                token_idx = abs_pos  # LLaVA 的 output_ids 不包含 input，所以 abs_pos 就是 token_idx
+                if 0 <= token_idx < len(all_tokens_detail):
+                    matched_tokens_detail.append(all_tokens_detail[token_idx])
+
+            # 如果该 node_word 已存在，合并 token_positions
+            if node_word in object_tokens_info:
+                # 合并 token_positions（去重并排序）
+                existing_positions = set(object_tokens_info[node_word]['token_positions'])
+                new_positions = set(token_positions)
+                merged_positions = sorted(list(existing_positions | new_positions))
+
+                # 合并 token_texts 和 matched_tokens_detail
+                existing_texts = object_tokens_info[node_word]['token_texts']
+                existing_details = object_tokens_info[node_word]['matched_tokens_detail']
+
+                # 添加新的 token_texts（去重）
+                for token_text in token_texts:
+                    if token_text not in existing_texts:
+                        existing_texts.append(token_text)
+
+                # 添加新的 matched_tokens_detail（基于 position 去重）
+                existing_detail_positions = {detail['absolute_position'] for detail in existing_details}
+                for detail in matched_tokens_detail:
+                    if detail['absolute_position'] not in existing_detail_positions:
+                        existing_details.append(detail)
+                        existing_detail_positions.add(detail['absolute_position'])
+
+                # 更新信息
+                object_tokens_info[node_word]['token_positions'] = merged_positions
+                object_tokens_info[node_word]['token_texts'] = existing_texts
+                object_tokens_info[node_word]['matched_tokens_detail'] = existing_details
+            else:
+                # 首次出现，创建新条目
+                object_tokens_info[node_word] = {
                     'object_word': word,
                     'node_word': node_word,
                     'token_positions': token_positions,
-                    'token_texts': token_texts
-                })
-    except Exception as e:
-        print(f"  ⚠️  识别物体token位置时出错: {e}")
+                    'token_texts': token_texts,
+                    'matched_tokens_detail': matched_tokens_detail
+                }
 
-    return object_tokens_info
+    # 返回结果，包含所有token的详细信息
+    return object_tokens_info, {
+        'full_generated_text': full_generated_text,
+        'all_tokens_detail': all_tokens_detail,
+        'total_tokens': len(generated_ids)
+    }
+
+
+def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
+    """从logits中提取top-p tokens，输出所有threshold内的logits、token和词汇
+
+    Args:
+        logits: [vocab_size] 的logits tensor
+        tokenizer: tokenizer对象
+        threshold_top_p: top-p阈值（默认0.9）
+
+    Returns:
+        dict: 包含top tokens信息的字典，包括所有threshold内的logits
+    """
+    # 确保logits是tensor
+    if not isinstance(logits, torch.Tensor):
+        logits = torch.tensor(logits)
+
+    # 计算softmax概率
+    probs = torch.softmax(logits, dim=-1)
+
+    # 按概率排序
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+
+    # 计算累积概率
+    cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    # 找到不超过threshold_top_p的tokens
+    top_p_mask = cumsum_probs <= threshold_top_p
+    top_p_indices = sorted_indices[top_p_mask]
+    top_p_probs = sorted_probs[top_p_mask]
+
+    # 如果第一个token的概率已经超过threshold，至少包含第一个
+    if len(top_p_indices) == 0:
+        top_p_indices = sorted_indices[:1]
+        top_p_probs = sorted_probs[:1]
+
+    # 获取最大logit的token
+    max_logit_idx = torch.argmax(logits).item()
+    max_logit_value = logits[max_logit_idx].item()
+    max_logit_prob = probs[max_logit_idx].item()
+
+    # 解码tokens - 输出所有threshold内的logits、token和词汇
+    top_p_tokens = []
+    for idx, prob in zip(top_p_indices, top_p_probs):
+        token_id = idx.item() if isinstance(idx, torch.Tensor) else idx
+        token_text = tokenizer.decode([token_id])
+        logit_value = logits[token_id].item() if isinstance(logits[token_id], torch.Tensor) else logits[token_id]
+        top_p_tokens.append({
+            'token_id': int(token_id),
+            'token_text': token_text,
+            'probability': float(prob.item() if isinstance(prob, torch.Tensor) else prob),
+            'logit': float(logit_value)
+        })
+
+    # 获取前5个最高logits的tokens
+    top_5_indices = torch.topk(logits, k=min(5, len(logits))).indices
+    top_5_tokens = []
+    for idx in top_5_indices:
+        token_id = idx.item()
+        token_text = tokenizer.decode([token_id])
+        logit_value = logits[token_id].item()
+        prob_value = probs[token_id].item()
+        top_5_tokens.append({
+            'token_id': int(token_id),
+            'token_text': token_text,
+            'logit': float(logit_value),
+            'probability': float(prob_value)
+        })
+
+    result = {
+        'max_logit_token': {
+            'token_id': int(max_logit_idx),
+            'token_text': tokenizer.decode([max_logit_idx]),
+            'logit': float(max_logit_value),
+            'probability': float(max_logit_prob)
+        },
+        'top_p_tokens': top_p_tokens,  # 所有threshold内的tokens
+        'top_5_tokens': top_5_tokens,  # 前5个最高logits的tokens
+        'top_p_threshold': threshold_top_p,
+        'total_top_p_tokens': len(top_p_tokens)
+    }
+
+    return result
+
+
+def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, num_layers=32, logit_threshold=0.01):
+    """生成5×32的heatmap，显示每层前5个最高logits的token
+
+    使用绿色渐变colormap，并对logits取对数以增强对比度
+    只显示logits大于阈值的token，像素点之间有间隔，并在每个像素点上标注词汇
+
+    Args:
+        layer_lm_head_outputs: 字典，包含每层的lm_head输出信息
+        output_dir: 输出目录
+        step_idx: 生成步骤索引
+        num_layers: 总层数（默认32）
+        logit_threshold: logits阈值，只显示大于此值的token（默认0.01）
+    """
+    # 收集所有层的前5个tokens，只保留logits > threshold的
+    # 创建一个5×32的矩阵，存储logits值
+    logits_matrix = np.full((5, num_layers), np.nan)  # 使用NaN表示无效值
+    token_texts_matrix = [[''] * num_layers for _ in range(5)]  # 存储token文本
+
+    # 遍历所有层
+    for layer_key, top_p_info in layer_lm_head_outputs.items():
+        # 跳过final_layer，只处理数字层
+        if layer_key == 'final_layer':
+            continue
+
+        layer_idx = int(layer_key) if isinstance(layer_key, str) and layer_key.isdigit() else None
+        if layer_idx is None or layer_idx >= num_layers:
+            continue
+
+        # 获取前5个tokens，只保留logits > threshold的
+        top_5_tokens = top_p_info.get('top_5_tokens', [])
+        rank = 0
+        for token_info in top_5_tokens:
+            if token_info['logit'] > logit_threshold:
+                if rank < 5:  # 最多5个
+                    logits_matrix[rank, layer_idx] = token_info['logit']
+                    token_texts_matrix[rank][layer_idx] = token_info['token_text']
+                    rank += 1
+                else:
+                    break
+
+    # 对logits取对数以增强对比度
+    # 只处理非NaN的值
+    valid_logits = logits_matrix[~np.isnan(logits_matrix)]
+    if len(valid_logits) == 0:
+        print(f"  ⚠️  步骤 {step_idx+1}: 没有满足阈值({logit_threshold})的logits，跳过heatmap生成")
+        return
+
+    logits_min = valid_logits.min()
+    if logits_min < 0:
+        # 如果有负数，先shift到正数
+        logits_shifted = logits_matrix - logits_min + 1
+    else:
+        logits_shifted = logits_matrix + 1
+
+    # 取对数，NaN值保持为NaN
+    logits_log = np.full_like(logits_shifted, np.nan)
+    valid_mask = ~np.isnan(logits_shifted)
+    logits_log[valid_mask] = np.log(logits_shifted[valid_mask])
+
+    # 创建heatmap，使用更大的figsize以容纳间隔和标注
+    fig, ax = plt.subplots(figsize=(20, 8))
+
+    # 使用pcolormesh而不是imshow，这样可以控制像素块之间的间隔
+    # 需要扩展矩阵以匹配pcolormesh的要求（需要多一行一列）
+    logits_log_extended = np.full((6, num_layers + 1), np.nan)
+    logits_log_extended[:5, :num_layers] = logits_log
+
+    # 创建坐标网格（pcolormesh需要比数据多一个点的网格）
+    X = np.arange(num_layers + 1)
+    Y = np.arange(6)
+    X_grid, Y_grid = np.meshgrid(X, Y)
+
+    # 绘制heatmap，使用绿色渐变colormap，设置edgecolors来创建间隔效果
+    im = ax.pcolormesh(X_grid, Y_grid, logits_log_extended, cmap='Greens',
+                       edgecolors='white', linewidths=2.0,
+                       vmin=np.nanmin(logits_log), vmax=np.nanmax(logits_log),
+                       shading='flat')
+
+    # 设置坐标轴
+    ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Top 5 Rank', fontsize=12, fontweight='bold')
+    ax.set_title(f'Top 5 Logits Heatmap (Log Scale) - Step {step_idx+1}\n(Color represents log(logit value), threshold={logit_threshold})',
+                 fontsize=14, fontweight='bold')
+
+    # 设置x轴刻度（层索引）- 放在单元格中心
+    ax.set_xticks(np.arange(num_layers) + 0.5)
+    ax.set_xticklabels([f'L{i}' for i in range(num_layers)], rotation=45, ha='right', fontsize=8)
+
+    # 设置y轴刻度（排名）- 放在单元格中心
+    ax.set_yticks(np.arange(5) + 0.5)
+    ax.set_yticklabels([f'Rank {i+1}' for i in range(5)], fontsize=10)
+
+    # 在每个像素块中心标注token文本（词汇）
+    for rank in range(5):
+        for layer_idx in range(num_layers):
+            token_text = token_texts_matrix[rank][layer_idx]
+            logit_value = logits_matrix[rank, layer_idx]
+
+            # 只标注有效的token（logits > threshold）
+            if token_text and not np.isnan(logit_value):
+                # 清理token文本，移除换行符和特殊字符，限制长度
+                clean_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
+                # 限制长度，避免文本过长
+                if len(clean_text) > 12:
+                    clean_text = clean_text[:12] + '...'
+
+                # 根据logits值选择文本颜色（深色或浅色）
+                logit_log_value = logits_log[rank, layer_idx]
+                if not np.isnan(logit_log_value):
+                    max_logit = np.nanmax(logits_log)
+                    min_logit = np.nanmin(logits_log)
+                    if max_logit > min_logit:
+                        normalized = (logit_log_value - min_logit) / (max_logit - min_logit)
+                        text_color = 'white' if normalized > 0.5 else 'black'
+                    else:
+                        text_color = 'black'
+                else:
+                    text_color = 'black'
+
+                # 在单元格中心标注文本（词汇）
+                # 使用半透明背景以提高可读性
+                ax.text(layer_idx + 0.5, rank + 0.5, clean_text,
+                       ha='center', va='center',
+                       fontsize=9, color=text_color, fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3',
+                                facecolor='white' if text_color == 'black' else 'black',
+                                alpha=0.6, edgecolor='none'))
+
+    # 添加colorbar
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Log(Logit Value)', fontsize=10, fontweight='bold')
+
+    # 设置坐标轴范围，确保显示所有单元格
+    ax.set_xlim(0, num_layers)
+    ax.set_ylim(0, 5)
+
+    plt.tight_layout()
+
+    # 保存图片
+    heatmap_file = os.path.join(output_dir, f"top5_logits_heatmap_step_{step_idx+1}.png")
+    plt.savefig(heatmap_file, dpi=200, bbox_inches='tight')
+    plt.close()
+
+    # 统计信息
+    valid_count = np.sum(~np.isnan(logits_matrix))
+    total_count = 5 * num_layers
+    print(f"  ✓ 步骤 {step_idx+1} 的Top 5 Logits Heatmap已保存: {os.path.basename(heatmap_file)}")
+    print(f"    有效token数量: {valid_count}/{total_count} (阈值: {logit_threshold})")
+    if len(valid_logits) > 0:
+        print(f"    原始logits范围: [{valid_logits.min():.4f}, {valid_logits.max():.4f}]")
+        print(f"    对数logits范围: [{np.nanmin(logits_log):.4f}, {np.nanmax(logits_log):.4f}]")
+
+
+def enhance_attention_map(attention_map, method='min_max_normalize'):
+    """
+    增强或归一化attention map，使像素点差异更明显
+
+    Args:
+        attention_map: 原始attention map (24x24)
+        method: 增强方法 ('min_max_normalize', 'z_score_normalize', 'power_law', 'sigmoid')
+
+    Returns:
+        增强后的attention map
+    """
+    attn = attention_map.copy()
+
+    if method == 'min_max_normalize':
+        # Min-Max归一化到[0, 1]
+        attn_min = attn.min()
+        attn_max = attn.max()
+        if attn_max > attn_min:
+            attn = (attn - attn_min) / (attn_max - attn_min)
+    elif method == 'z_score_normalize':
+        # Z-score归一化
+        attn_mean = attn.mean()
+        attn_std = attn.std()
+        if attn_std > 0:
+            attn = (attn - attn_mean) / attn_std
+            # 然后映射到[0, 1]
+            attn = (attn - attn.min()) / (attn.max() - attn.min()) if attn.max() > attn.min() else attn
+    elif method == 'power_law':
+        # 幂律增强 (gamma correction)
+        attn_min = attn.min()
+        attn_max = attn.max()
+        if attn_max > attn_min:
+            attn = (attn - attn_min) / (attn_max - attn_min)
+            gamma = 0.5  # 增强对比度
+            attn = np.power(attn, gamma)
+    elif method == 'sigmoid':
+        # Sigmoid增强
+        attn_mean = attn.mean()
+        attn_std = attn.std()
+        if attn_std > 0:
+            attn = 1 / (1 + np.exp(-(attn - attn_mean) / (attn_std * 2)))
+
+    return attn
 
 
 def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, token_text, token_name,
-                                patch_size, output_dir):
+                                patch_size, output_dir, predicted_token_word=None, debug_info=None):
     """可视化物体token的attention map
 
     Args:
@@ -391,63 +794,92 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
         token_name: token的清理后的名称（用于文件名）
         patch_size: patch大小（24）
         output_dir: 输出目录
+        predicted_token_word: 该层预测的token词汇（用于文件名）
+        debug_info: debug信息字典（用于保存到JSON）
     """
-    # 不归一化，保持原始logits值
+    # 增强attention map，使像素点差异更明显
+    attn_values_enhanced = enhance_attention_map(attention_map.copy(), method='min_max_normalize')
+
+    # 保持原始值用于显示
     attn_values = attention_map.copy()
 
     # 获取值的范围用于colorbar
     attn_min = attn_values.min()
     attn_max = attn_values.max()
+    attn_enhanced_min = attn_values_enhanced.min()
+    attn_enhanced_max = attn_values_enhanced.max()
 
     # 创建自定义colormap，只使用jet的前一半（从深蓝到淡黄，不包含深红）
-    try:
-        jet_full = plt.colormaps['jet']
-    except (AttributeError, KeyError):
-        jet_full = plt.cm.get_cmap('jet')
+    jet_full = plt.colormaps['jet']
     colors_half = jet_full(np.linspace(0, 0.75, 256))
     jet_half = LinearSegmentedColormap.from_list('jet_half', colors_half)
 
-    # 创建1×3的可视化布局
-    fig = plt.figure(figsize=(18, 6))
+    # 创建1×4的可视化布局（添加增强版本）
+    fig = plt.figure(figsize=(24, 6))
 
     # 1. 原图
-    ax1 = plt.subplot(1, 3, 1)
+    ax1 = plt.subplot(1, 4, 1)
     ax1.imshow(image)
-    ax1.set_title(f'Original Image\nStep {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"',
-                 fontsize=12, fontweight='bold')
+    title1 = f'Original Image\nStep {step_idx+1}, Layer {layer_idx}, Token: "{token_text}"'
+    if predicted_token_word:
+        title1 += f'\nPredicted: "{predicted_token_word}"'
+    ax1.set_title(title1, fontsize=12, fontweight='bold')
     ax1.axis('off')
 
-    # 2. Jet colormap（不叠加原图，使用一半颜色域）
-    ax2 = plt.subplot(1, 3, 2)
+    # 2. 原始attention map（Jet colormap）
+    ax2 = plt.subplot(1, 4, 2)
     im2 = ax2.imshow(attn_values, cmap=jet_half, interpolation='bilinear', vmin=attn_min, vmax=attn_max)
-    ax2.set_title(f'Jet Colormap (24×24)\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    ax2.set_title(f'Original Attention (24×24)\nLayer {layer_idx}', fontsize=12, fontweight='bold')
     ax2.axis('off')
     cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
     cbar2.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4e}'))
     cbar2.set_label('Logit Value', fontsize=10, fontweight='bold')
 
-    # 3. Jet colormap和原图叠加（原图显示更明显）
-    ax3 = plt.subplot(1, 3, 3)
-    ax3.imshow(image)
-    im3 = ax3.imshow(attn_values, cmap='jet', alpha=0.4, interpolation='bilinear', vmin=attn_min, vmax=attn_max)
-    ax3.set_title(f'Jet Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    # 3. 增强后的attention map
+    ax3 = plt.subplot(1, 4, 3)
+    im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='bilinear', vmin=attn_enhanced_min, vmax=attn_enhanced_max)
+    ax3.set_title(f'Enhanced Attention (24×24)\nLayer {layer_idx} (Normalized)', fontsize=12, fontweight='bold')
     ax3.axis('off')
     cbar3 = plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-    cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4e}'))
-    cbar3.set_label('Logit Value', fontsize=10, fontweight='bold')
+    cbar3.set_label('Normalized Value', fontsize=10, fontweight='bold')
+
+    # 4. 增强后的attention map和原图叠加
+    ax4 = plt.subplot(1, 4, 4)
+    ax4.imshow(image)
+    im4 = ax4.imshow(attn_values_enhanced, cmap='jet', alpha=0.5, interpolation='bilinear', vmin=attn_enhanced_min, vmax=attn_enhanced_max)
+    ax4.set_title(f'Enhanced Overlay\nLayer {layer_idx}', fontsize=12, fontweight='bold')
+    ax4.axis('off')
+    cbar4 = plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+    cbar4.set_label('Normalized Value', fontsize=10, fontweight='bold')
 
     plt.tight_layout()
-    output_file = os.path.join(output_dir, f"layer_{layer_idx}_token_{token_name}_attention.png")
+
+    # 构建文件名：包含预测的token词汇
+    filename_parts = [f"layer_{layer_idx}", f"step_{step_idx+1}", f"token_{token_name}"]
+    if predicted_token_word:
+        safe_predicted_word = predicted_token_word.replace(' ', '_').replace('/', '_').replace('\\', '_')[:20]  # 限制长度
+        filename_parts.append(f"pred_{safe_predicted_word}")
+    filename_parts.append("attention.png")
+    output_file = os.path.join(output_dir, "_".join(filename_parts))
+
     plt.savefig(output_file, dpi=200, bbox_inches='tight')
     plt.close()
 
     print(f"    ✓ Layer {layer_idx} attention map已保存: {os.path.basename(output_file)}")
-    print(f"      Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
+    print(f"      原始Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
+    print(f"      增强后范围: [{attn_enhanced_min:.4f}, {attn_enhanced_max:.4f}]")
+
+    # 保存debug信息到JSON文件
+    if debug_info is not None:
+        debug_file = output_file.replace('.png', '_debug.json')
+        with open(debug_file, 'w', encoding='utf-8') as f:
+            json.dump(debug_info, f, indent=2, ensure_ascii=False)
+        print(f"      Debug信息已保存: {os.path.basename(debug_file)}")
 
 
 def extract_object_attention_maps(model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                                   output_ids, input_token_len, all_attentions, object_tokens_info,
-                                  image_tensor, output_dir, target_layers=None):
+                                  image_tensor, output_dir, target_layers=None, all_hidden_states=None, outputs_text=None):
     """
     提取名词/物体token的attention map
 
@@ -466,9 +898,24 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
         image_tensor: 图像tensor
         output_dir: 输出目录
         target_layers: 目标层列表（None表示所有层，'even'表示偶数层，'odd'表示奇数层）
+        all_hidden_states: 所有生成步骤的hidden states（tuple，每个元素对应一个步骤）
+        outputs_text: 生成的完整文本（用于提取每个步骤生成的词汇）
     """
     if not object_tokens_info or all_attentions is None:
         return
+
+    # 解析生成的文本，获取每个步骤生成的token对应的词汇
+    step_generated_words = {}
+    if outputs_text and output_ids is not None:
+        # 从output_ids中提取每个生成步骤的token
+        # LLaVA 的 output_ids 可能不包含输入信息，直接使用完整的 output_ids
+        generated_ids = output_ids[0].cpu().tolist()
+        for step_idx, token_id in enumerate(generated_ids):
+            token_text = tokenizer.decode([token_id], skip_special_tokens=True)
+            # 清理token文本（移除特殊字符）
+            token_text = token_text.strip().replace('\n', ' ').replace('\t', ' ')
+            if token_text:
+                step_generated_words[step_idx] = token_text
 
     # 加载图像
     if image_file.startswith("http") or image_file.startswith("https"):
@@ -489,16 +936,13 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
         elif target_layers.lower() == 'odd':
             selected_layers = list(range(1, num_total_layers, 2))
         else:
-            try:
-                selected_layers = [int(x.strip()) for x in target_layers.split(',')]
-            except:
-                selected_layers = list(range(num_total_layers))
+            selected_layers = [int(x.strip()) for x in target_layers.split(',')]
     elif isinstance(target_layers, list):
         selected_layers = target_layers
     else:
         selected_layers = list(range(num_total_layers))
 
-    # 获取图像token位置信息（参考test_llava_v15_7b_attention.py的逻辑）
+    # 获取图像token位置信息
     from llava.mm_utils import tokenizer_image_token
     from llava.constants import IMAGE_TOKEN_INDEX
 
@@ -544,112 +988,301 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     image_token_start = 1  # 跳过BOS token
     image_token_end = image_token_start + (num_image_tokens if num_image_tokens > 0 else 576)
 
-    # 为每个物体提取attention map
-    for obj_info in object_tokens_info:
-        object_word = obj_info['object_word']
-        node_word = obj_info['node_word']
+    # 为每个生成步骤收集所有层的logits信息（用于生成5×32 heatmap）
+    # step_lm_head_outputs: {step_idx: {layer_idx: top_p_info}}
+    step_lm_head_outputs = {}
+
+    # 首先，为所有生成步骤提取所有层的logits信息（即使没有物体token）
+    # 这样可以确保每个步骤都有heatmap
+    if all_hidden_states is not None and hasattr(model, 'lm_head'):
+        print(f"\n  [提取Logits] 为所有生成步骤提取各层的logits信息...")
+        for step_idx in range(len(all_attentions) if all_attentions is not None else 0):
+            if step_idx >= len(all_hidden_states):
+                continue
+
+            step_hidden_states = all_hidden_states[step_idx]
+            if step_hidden_states is None:
+                continue
+
+            step_lm_head_outputs[step_idx] = {}
+
+            # 提取所有层的logits
+            if isinstance(step_hidden_states, (tuple, list)):
+                for layer_idx_all in range(len(step_hidden_states)):
+                    layer_hidden = step_hidden_states[layer_idx_all]
+                    if isinstance(layer_hidden, torch.Tensor):
+                        if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
+                            last_hidden = layer_hidden[0, -1, :]
+                        elif len(layer_hidden.shape) == 2:  # [seq_len, hidden_size]
+                            last_hidden = layer_hidden[-1, :]
+                        else:
+                            last_hidden = None
+
+                        if last_hidden is not None:
+                            with torch.no_grad():
+                                layer_logits = model.lm_head(last_hidden.to(device))
+                                top_p_info = extract_top_p_tokens(layer_logits, tokenizer, threshold_top_p=0.9)
+                                step_lm_head_outputs[step_idx][layer_idx_all] = top_p_info
+
+        print(f"  ✓ 已为 {len(step_lm_head_outputs)} 个生成步骤提取logits信息")
+
+    # 按步骤组织目标词汇：找出每个步骤对应的目标词汇（CHAIR识别的物体）
+    # step_target_words: {step_idx: [node_word1, node_word2, ...]}
+    step_target_words = {}
+    # object_tokens_info 现在是字典，以 node_word 为 key
+    for node_word, obj_info in object_tokens_info.items():
         token_positions = obj_info['token_positions']
 
         if not token_positions:
             continue
 
-        # 为这个物体创建目录
-        obj_dir = os.path.join(output_dir, f"object_{node_word.replace(' ', '_')}")
-        os.makedirs(obj_dir, exist_ok=True)
-
-        # 对于每个token位置，提取attention map
+        # 对于该物体的每个token位置，找到对应的步骤
+        # LLaVA 的 output_ids 可能不包含 input 部分，所以 token_pos 就是 step_idx
         for token_pos in token_positions:
-            # 找到这个token是在哪个生成步骤产生的
-            # token_pos是绝对位置，需要转换为生成步骤索引
-            if token_pos < input_token_len:
-                continue  # 跳过input部分的token
+            step_idx = token_pos  # LLaVA 的 output_ids 不包含 input，所以 token_pos 就是 step_idx
+            if step_idx not in step_target_words:
+                step_target_words[step_idx] = []
+            # 避免重复添加相同的词汇
+            if node_word not in step_target_words[step_idx]:
+                step_target_words[step_idx].append(node_word)
 
-            step_idx = token_pos - input_token_len
+    # 为每个有目标词汇的步骤提取attention map
+    for step_idx in sorted(step_target_words.keys()):
+        target_words = step_target_words[step_idx]
 
-            if step_idx >= len(all_attentions) or all_attentions[step_idx] is None:
+        if not target_words or step_idx >= len(all_attentions) or all_attentions[step_idx] is None:
+            continue
+
+        # 使用第一个目标词汇作为文件夹名（如果有多个，使用第一个）
+        target_word = target_words[0]
+        safe_word = target_word.replace(' ', '_').replace('/', '_').replace('\\', '_')
+
+        # 创建步骤文件夹：step_{step_idx+1}_{word}
+        step_dir = os.path.join(output_dir, f"step_{step_idx+1}_{safe_word}")
+        os.makedirs(step_dir, exist_ok=True)
+
+        print(f"\n  [步骤 {step_idx+1}] 目标词汇: {', '.join(target_words)}")
+        print(f"    输出目录: {os.path.basename(step_dir)}")
+
+        step_attentions = all_attentions[step_idx]
+
+        # 获取该步骤的hidden states（如果可用）
+        step_hidden_states = None
+        if all_hidden_states is not None and step_idx < len(all_hidden_states):
+            step_hidden_states = all_hidden_states[step_idx]
+
+        # 处理每一层的attention（只处理选定的层）
+        for layer_idx, layer_attn in enumerate(step_attentions):
+            if layer_idx not in selected_layers:
                 continue
 
-            step_attentions = all_attentions[step_idx]
+            if layer_attn is None:
+                continue
 
-            # 处理每一层的attention（只处理选定的层）
-            for layer_idx, layer_attn in enumerate(step_attentions):
-                if layer_idx not in selected_layers:
-                    continue
+            # 获取该层预测的token（通过hidden states和lm_head）
+            predicted_token_word = None
+            if step_hidden_states is not None and hasattr(model, 'lm_head'):
+                # step_hidden_states可能是tuple或list，包含所有层的hidden states
+                if isinstance(step_hidden_states, (tuple, list)) and layer_idx < len(step_hidden_states):
+                    layer_hidden = step_hidden_states[layer_idx]
+                    # 处理不同的tensor形状
+                    if isinstance(layer_hidden, torch.Tensor):
+                        if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
+                            last_hidden = layer_hidden[0, -1, :]  # 取最后一个token的hidden state
+                        elif len(layer_hidden.shape) == 2:  # [seq_len, hidden_size]
+                            last_hidden = layer_hidden[-1, :]
+                        else:
+                            last_hidden = None
 
-                if layer_attn is None:
-                    continue
+                        if last_hidden is not None:
+                            with torch.no_grad():
+                                layer_logits = model.lm_head(last_hidden.to(device))  # [vocab_size]
+                                predicted_token_id = layer_logits.argmax().item()
+                                predicted_token_word = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
 
-                # 处理attention tensor的形状
-                if isinstance(layer_attn, tuple):
-                    layer_attn = layer_attn[0]
+            # 处理attention tensor的形状
+            if isinstance(layer_attn, tuple):
+                layer_attn = layer_attn[0]
 
-                if not isinstance(layer_attn, torch.Tensor):
-                    continue
+            if not isinstance(layer_attn, torch.Tensor):
+                continue
 
-                layer_attn_np = layer_attn.cpu().numpy()
+            layer_attn_tensor = layer_attn
+            layer_attn_np = layer_attn_tensor.cpu().numpy()
 
-                # 处理attention tensor的形状
+            # 收集debug信息
+            # 从attention tensor的形状推断Q和K的size
+            q_size = None
+            k_size = None
+            if len(layer_attn_np.shape) >= 2:
+                # attention shape通常是 [..., query_len, key_len]
                 if len(layer_attn_np.shape) == 4:
-                    batch_size, num_heads, query_len, key_len = layer_attn_np.shape
-                    if query_len == 1:
-                        last_row_attention = layer_attn_np[0].mean(axis=0).squeeze()
-                        seq_len = key_len
-                    else:
-                        layer_attn_np = layer_attn_np[0].mean(axis=0)
-                        seq_len = layer_attn_np.shape[0]
-                        last_row_attention = layer_attn_np[-1, :]
+                    # [batch, num_heads, query_len, key_len]
+                    _, _, q_size, k_size = layer_attn_np.shape
                 elif len(layer_attn_np.shape) == 3:
-                    num_heads, query_len, key_len = layer_attn_np.shape
-                    if query_len == 1:
-                        last_row_attention = layer_attn_np.mean(axis=0).squeeze()
-                        seq_len = key_len
-                    else:
-                        layer_attn_np = layer_attn_np.mean(axis=0)
-                        seq_len = layer_attn_np.shape[0]
-                        last_row_attention = layer_attn_np[-1, :]
+                    # [num_heads, query_len, key_len]
+                    _, q_size, k_size = layer_attn_np.shape
                 elif len(layer_attn_np.shape) == 2:
-                    query_len, key_len = layer_attn_np.shape
-                    if query_len == 1:
-                        last_row_attention = layer_attn_np[0, :]
-                        seq_len = key_len
-                    else:
-                        seq_len = query_len
-                        last_row_attention = layer_attn_np[-1, :]
-                elif len(layer_attn_np.shape) == 1:
-                    last_row_attention = layer_attn_np
-                    seq_len = len(layer_attn_np)
+                    # [query_len, key_len]
+                    q_size, k_size = layer_attn_np.shape
+
+            debug_info = {
+                "step_idx": step_idx,
+                "layer_idx": layer_idx,
+                "target_words": target_words,
+                "predicted_token_word": predicted_token_word,
+                "attention_tensor_shape": list(layer_attn_np.shape),
+                "attention_tensor_dtype": str(layer_attn_np.dtype),
+                "q_size": int(q_size) if q_size is not None else None,
+                "k_size": int(k_size) if k_size is not None else None,
+            }
+
+            # 处理attention tensor的形状并收集debug信息
+            if len(layer_attn_np.shape) == 4:
+                batch_size, num_heads, query_len, key_len = layer_attn_np.shape
+                debug_info["attention_shape_4d"] = {"batch_size": batch_size, "num_heads": num_heads,
+                                                   "query_len": query_len, "key_len": key_len}
+                if query_len == 1:
+                    last_row_attention = layer_attn_np[0].mean(axis=0).squeeze()
+                    seq_len = key_len
                 else:
-                    continue
+                    layer_attn_np = layer_attn_np[0].mean(axis=0)
+                    seq_len = layer_attn_np.shape[0]
+                    last_row_attention = layer_attn_np[-1, :]
+            elif len(layer_attn_np.shape) == 3:
+                num_heads, query_len, key_len = layer_attn_np.shape
+                debug_info["attention_shape_3d"] = {"num_heads": num_heads, "query_len": query_len, "key_len": key_len}
+                if query_len == 1:
+                    last_row_attention = layer_attn_np.mean(axis=0).squeeze()
+                    seq_len = key_len
+                else:
+                    layer_attn_np = layer_attn_np.mean(axis=0)
+                    seq_len = layer_attn_np.shape[0]
+                    last_row_attention = layer_attn_np[-1, :]
+            elif len(layer_attn_np.shape) == 2:
+                query_len, key_len = layer_attn_np.shape
+                debug_info["attention_shape_2d"] = {"query_len": query_len, "key_len": key_len}
+                if query_len == 1:
+                    last_row_attention = layer_attn_np[0, :]
+                    seq_len = key_len
+                else:
+                    seq_len = query_len
+                    last_row_attention = layer_attn_np[-1, :]
+            elif len(layer_attn_np.shape) == 1:
+                last_row_attention = layer_attn_np
+                seq_len = len(layer_attn_np)
+                debug_info["attention_shape_1d"] = {"seq_len": seq_len}
+            else:
+                continue
 
-                # 提取对图像token的attention
-                actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
-                image_token_end_actual = min(image_token_start + actual_num_image_tokens, seq_len)
-                valid_image_positions = np.arange(image_token_start, image_token_end_actual)
+            debug_info["last_row_attention_shape"] = list(last_row_attention.shape)
+            debug_info["last_row_attention_stats"] = {
+                "min": float(last_row_attention.min()),
+                "max": float(last_row_attention.max()),
+                "mean": float(last_row_attention.mean()),
+                "std": float(last_row_attention.std())
+            }
 
-                if len(valid_image_positions) == 0:
-                    continue
+            # 提取对图像token的attention
+            actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
+            image_token_end_actual = min(image_token_start + actual_num_image_tokens, seq_len)
+            valid_image_positions = np.arange(image_token_start, image_token_end_actual)
 
-                image_attention = last_row_attention[valid_image_positions]
+            debug_info["image_token_info"] = {
+                "image_token_start": int(image_token_start),
+                "num_image_tokens": int(num_image_tokens),
+                "actual_num_image_tokens": int(actual_num_image_tokens),
+                "image_token_end_actual": int(image_token_end_actual),
+                "seq_len": int(seq_len),
+                "valid_image_positions": valid_image_positions.tolist()
+            }
 
-                # 确保有576个值
-                if len(image_attention) < 576:
-                    padding = 576 - len(image_attention)
-                    image_attention = np.pad(image_attention, (0, padding), mode='constant', constant_values=0)
-                elif len(image_attention) > 576:
-                    image_attention = image_attention[:576]
+            if len(valid_image_positions) == 0:
+                continue
 
-                # Reshape到24×24，保持原始logits值，不归一化
-                patch_size = 24
-                attention_map = image_attention.reshape(patch_size, patch_size)
+            image_attention = last_row_attention[valid_image_positions]
 
-                # 可视化attention map
-                token_text = obj_info['token_texts'][token_positions.index(token_pos)] if token_pos in token_positions else object_word
-                token_name = node_word.replace(' ', '_').replace('/', '_').replace('\\', '_')
+            debug_info["image_attention_before_padding"] = {
+                "shape": list(image_attention.shape),
+                "min": float(image_attention.min()),
+                "max": float(image_attention.max()),
+                "mean": float(image_attention.mean()),
+                "std": float(image_attention.std()),
+                "values": image_attention.tolist()  # 保存具体数值
+            }
 
-                visualize_object_attention_map(
-                    attention_map, image, layer_idx, step_idx, token_text, token_name,
-                    patch_size, obj_dir
-                )
+            # 确保有576个值
+            if len(image_attention) < 576:
+                padding = 576 - len(image_attention)
+                image_attention = np.pad(image_attention, (0, padding), mode='constant', constant_values=0)
+                debug_info["padding_applied"] = padding
+            elif len(image_attention) > 576:
+                image_attention = image_attention[:576]
+                debug_info["truncation_applied"] = len(image_attention) - 576
+
+            # Reshape到24×24，保持原始logits值，不归一化
+            patch_size = 24
+            attention_map = image_attention.reshape(patch_size, patch_size)
+
+            debug_info["attention_map_24x24"] = {
+                "shape": list(attention_map.shape),
+                "min": float(attention_map.min()),
+                "max": float(attention_map.max()),
+                "mean": float(attention_map.mean()),
+                "std": float(attention_map.std()),
+                "values": attention_map.tolist()  # 保存24x24的具体数值
+            }
+
+            # 打印debug信息
+            print(f"\n    [Debug] Step {step_idx+1}, Layer {layer_idx}, Target: {', '.join(target_words)}")
+            print(f"      - Q size: {debug_info.get('q_size', 'N/A')}, K size: {debug_info.get('k_size', 'N/A')}")
+            print(f"      - Attention tensor原始shape: {debug_info['attention_tensor_shape']}")
+            print(f"      - Last row attention shape: {debug_info['last_row_attention_shape']}")
+            print(f"      - 图像token位置: {image_token_start} 到 {image_token_end_actual} (共{len(valid_image_positions)}个)")
+            print(f"      - 提取的图像attention shape: {list(image_attention.shape)}")
+            print(f"      - 最终24×24 attention map: min={debug_info['attention_map_24x24']['min']:.4e}, max={debug_info['attention_map_24x24']['max']:.4e}")
+            if predicted_token_word:
+                print(f"      - 该层预测的token: '{predicted_token_word}'")
+
+            # 可视化attention map
+            # 使用目标词汇作为token名称
+            token_text = ', '.join(target_words)
+            token_name = safe_word
+
+            visualize_object_attention_map(
+                attention_map, image, layer_idx, step_idx, token_text, token_name,
+                patch_size, step_dir, predicted_token_word=predicted_token_word, debug_info=debug_info
+            )
+
+    # 处理完所有物体后，为每个生成步骤生成5×32 heatmap
+    if step_lm_head_outputs:
+        print(f"\n  [生成5×32 Heatmap] 为 {len(step_lm_head_outputs)} 个生成步骤生成heatmap...")
+
+        # 为每个步骤生成heatmap和保存JSON
+        for step_idx, layer_outputs in step_lm_head_outputs.items():
+            if not layer_outputs:
+                continue
+
+            # 创建该步骤的输出目录
+            step_output_dir = os.path.join(output_dir, f"step_{step_idx+1}")
+            os.makedirs(step_output_dir, exist_ok=True)
+
+            # 生成5×32 heatmap
+            visualize_top5_logits_heatmap(
+                layer_outputs, step_output_dir, step_idx, num_total_layers, logit_threshold=0.01
+            )
+
+            # 保存词汇语义信息到JSON文件
+            # 转换为可序列化格式
+            lm_head_data = {}
+            for layer_key, top_p_info in layer_outputs.items():
+                lm_head_data[str(layer_key)] = top_p_info
+
+            # 保存JSON文件
+            json_file = os.path.join(step_output_dir, f"step_{step_idx+1}_top5_tokens.json")
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(lm_head_data, f, ensure_ascii=False, indent=2)
+            print(f"  ✓ 步骤 {step_idx+1} 的词汇语义信息已保存: {os.path.basename(json_file)}")
 
 
 def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
@@ -902,19 +1535,6 @@ def save_summary_to_file(summary_file, args, output_file, chair_results_file=Non
 
 
 def eval_model(args):
-    """评估模型, 生成图像描述"""
-    print("=" * 80)
-    print("CHAIR 评估 - 生成图像描述")
-    print("=" * 80)
-    print(f"模型路径: {args.model_path}")
-    print(f"设备: {args.device}")
-    print(f"COCO 根目录: {args.coco_root}")
-    print(f"输出文件: {args.output_file}")
-    if args.use_deco:
-        print(f"Deco 参数: use_deco={args.use_deco}, alpha={args.alpha}, layers={args.start_layer}-{args.end_layer}")
-    else:
-        print(f"使用原生 LLaVA 模型(Deco 已禁用)")
-    print("=" * 80)
 
     # 加载模型
     print("\n[1/3] 正在加载模型...")
@@ -966,11 +1586,8 @@ def eval_model(args):
                     # 提取最后的数字部分
                     parts = name.split('_')
                     if len(parts) > 0:
-                        try:
-                            image_id = int(parts[-1])
-                            image_id_list.append(image_id)
-                        except ValueError:
-                            print(f"⚠️  警告: 无法从文件名提取 image_id: {name}")
+                        image_id = int(parts[-1])
+                        image_id_list.append(image_id)
                 elif isinstance(name, int):
                     # 直接是数字 ID
                     image_id_list.append(name)
@@ -986,24 +1603,14 @@ def eval_model(args):
                     if not line:
                         continue
                     # 尝试解析为整数
-                    try:
-                        image_id = int(line)
-                        image_id_list.append(image_id)
-                    except ValueError:
-                        # 如果不是数字, 尝试从文件名格式提取
-                        if 'COCO_val2014_' in line:
-                            if line.endswith('.jpg'):
-                                line = line[:-4]
-                            parts = line.split('_')
-                            if len(parts) > 0:
-                                try:
-                                    image_id = int(parts[-1])
-                                    image_id_list.append(image_id)
-                                except ValueError:
-                                    print(f"⚠️  警告: 无法从行提取 image_id: {line}")
-                        else:
-                            print(f"⚠️  警告: 无法解析行: {line}")
+                    image_id = int(line)
+                    image_id_list.append(image_id)
             print(f"✓ 从文本文件读取了 {len(image_id_list)} 个图像 ID")
+
+    # 如果指定了单个图像ID, 使用该ID
+    if args.single_image_id is not None:
+        image_id_list = [args.single_image_id]
+        print(f"📌 使用指定的图像ID: {args.single_image_id}")
 
     images = get_coco_val2014_images(
         coco_root=args.coco_root,
@@ -1011,6 +1618,15 @@ def eval_model(args):
         max_images=args.num_samples if args.num_samples > 0 else 0
     )
     print(f"✓ 找到 {len(images)} 个图像")
+
+    # 如果只处理一个图像, 给出提示
+    if len(images) == 1:
+        print(f"📝 将处理单个图像: Image ID {images[0]['image_id']}")
+        print(f"   - 图像路径: {images[0]['image_path']}")
+        if args.extract_object_attention:
+            print(f"   - 将提取物体 attention map (目标层: {args.target_layers})")
+        else:
+            print(f"   - 物体 attention map 提取已禁用")
 
     # 准备输出文件
     output_file = os.path.expanduser(args.output_file)
@@ -1051,6 +1667,37 @@ def eval_model(args):
                     debug_indices.add(idx)
             if len(debug_indices) > 0:
                 print(f"将输出 {len(debug_indices)} 个样本的详细信息用于调试(样本索引: {sorted(debug_indices)})")
+
+    # 如果启用了提取物体attention map，在循环外部初始化CHAIR评估器（避免重复加载）
+    extract_object_attention = getattr(args, 'extract_object_attention', False)
+    chair_evaluator = None
+    if extract_object_attention:
+        coco_annotations_path = os.path.join(args.coco_root, "annotations_trainval2014", "annotations")
+        if not os.path.exists(coco_annotations_path):
+            if hasattr(project, 'coco_annotations_path'):
+                coco_annotations_path = project.coco_annotations_path
+
+        if os.path.exists(coco_annotations_path):
+            # 优先使用 eval_tool 目录下已有的缓存文件
+            eval_tool_dir = os.path.join(project_root, "eval_tool")
+            default_cache_file = os.path.join(eval_tool_dir, "chair_evaluator.pkl")
+
+            # 如果默认缓存文件存在，使用它；否则使用输出目录下的缓存文件
+            if os.path.exists(default_cache_file):
+                cache_file = default_cache_file
+                print(f"\n[初始化 CHAIR 评估器] 使用已有的缓存文件: {cache_file}")
+            else:
+                cache_file = os.path.join(os.path.dirname(output_file), "chair_evaluator_cache.pkl")
+                print(f"\n[初始化 CHAIR 评估器] 正在加载标注数据（这可能需要一些时间，但只会加载一次）...")
+
+            chair_evaluator = get_chair_evaluator(
+                coco_path=coco_annotations_path,
+                cache_file=cache_file,
+                use_cache=True
+            )
+            print(f"✓ CHAIR 评估器初始化完成")
+        else:
+            print(f"  ⚠️  无法找到COCO annotations路径，将使用简单的NLTK方法识别名词")
 
     for sample_idx, image_info in enumerate(tqdm(images, desc="处理进度")):
         image_id = image_info["image_id"]
@@ -1110,52 +1757,93 @@ def eval_model(args):
         output_f.flush()
 
         # 如果启用了提取物体attention map，则处理
-        extract_object_attention = getattr(args, 'extract_object_attention', False)
         if extract_object_attention and all_attentions is not None and outputs:
-            try:
-                # 初始化CHAIR评估器（用于识别物体）
-                coco_annotations_path = os.path.join(args.coco_root, "annotations_trainval2014", "annotations")
-                if not os.path.exists(coco_annotations_path):
-                    if hasattr(project, 'coco_annotations_path'):
-                        coco_annotations_path = project.coco_annotations_path
+            # 使用已在循环外部初始化的CHAIR评估器（避免重复加载）
+            # 识别描述中的物体
+            object_tokens_info, tokens_detail_info = identify_object_tokens_in_caption(
+                outputs, tokenizer, output_ids, input_token_len, chair_evaluator
+            )
 
-                if os.path.exists(coco_annotations_path):
-                    chair_evaluator = CHAIR(coco_annotations_path)
-                else:
-                    chair_evaluator = None
-                    print(f"  ⚠️  无法找到COCO annotations路径，将使用简单的NLTK方法识别名词")
+            # 为这个图像创建输出目录
+            image_output_dir = os.path.join(os.path.dirname(output_file), "object_attention_maps", f"image_{image_id}")
+            os.makedirs(image_output_dir, exist_ok=True)
 
-                # 识别描述中的物体
-                object_tokens_info = identify_object_tokens_in_caption(
-                    outputs, tokenizer, output_ids, input_token_len, chair_evaluator
+            # 保存详细的token信息到JSON文件
+            token_detail_file = os.path.join(image_output_dir, "token_details.json")
+            token_detail_data = {
+                'image_id': image_id,
+                'caption': outputs,
+                'full_generated_text': tokens_detail_info['full_generated_text'],
+                'total_tokens': tokens_detail_info['total_tokens'],
+                'input_token_len': input_token_len,
+                'all_tokens': tokens_detail_info['all_tokens_detail'],
+                'object_tokens_info': object_tokens_info
+            }
+            with open(token_detail_file, 'w', encoding='utf-8') as f:
+                json.dump(token_detail_data, f, indent=2, ensure_ascii=False)
+            if verbose:
+                print(f"  ✓ Token详细信息已保存到: {os.path.basename(token_detail_file)}")
+                print(f"     - 总Token数: {tokens_detail_info['total_tokens']}")
+                print(f"     - 找到的物体数: {len(object_tokens_info)}")
+
+            if object_tokens_info:
+                print(f"\n  [物体识别] 找到 {len(object_tokens_info)} 个不同的物体:")
+                # object_tokens_info 现在是字典，以 node_word 为 key
+                for node_word, obj_info in object_tokens_info.items():
+                    print(f"    - {obj_info['object_word']} (规范化: {obj_info['node_word']})")
+                    print(f"      Token位置: {obj_info['token_positions']} (共 {len(obj_info['token_positions'])} 个位置)")
+                    print(f"      匹配的Token数量: {len(obj_info.get('matched_tokens_detail', []))}")
+
+                    # 验证：显示这些token位置对应的实际文本
+                    matched_tokens = obj_info.get('matched_tokens_detail', [])
+                    if matched_tokens:
+                        print(f"      [验证] Token文本内容:")
+                        for token_detail in matched_tokens:
+                            token_text = token_detail.get('token_text', '').strip()
+                            token_pos = token_detail.get('absolute_position', 'N/A')
+                            char_start = token_detail.get('char_start', 'N/A')
+                            char_end = token_detail.get('char_end', 'N/A')
+                            # 显示token文本，如果是空白字符则显示转义形式
+                            token_display = repr(token_detail.get('token_text', '')) if not token_text else f"'{token_text}'"
+                            print(f"        - 位置 {token_pos}: {token_display} (字符位置: {char_start}-{char_end})")
+
+                        # 显示这些token周围的上下文文本（前后各30个字符）
+                        if len(matched_tokens) > 0:
+                            first_token = matched_tokens[0]
+                            last_token = matched_tokens[-1]
+                            char_start = first_token.get('char_start', 0)
+                            char_end = last_token.get('char_end', 0)
+                            context_start = max(0, char_start - 30)
+                            context_end = min(len(tokens_detail_info['full_generated_text']), char_end + 30)
+                            context_text = tokens_detail_info['full_generated_text'][context_start:context_end]
+                            # 标记匹配的token范围
+                            match_start_in_context = char_start - context_start
+                            match_end_in_context = char_end - context_start
+                            marked_context = (
+                                context_text[:match_start_in_context] +
+                                f"【{context_text[match_start_in_context:match_end_in_context]}】" +
+                                context_text[match_end_in_context:]
+                            )
+                            print(f"      上下文: ...{marked_context}...")
+                    else:
+                        print(f"      ⚠️  警告: 未找到匹配的token详细信息")
+
+                # 提取物体attention map
+                target_layers = getattr(args, 'target_layers', 'even')
+                extract_object_attention_maps(
+                    model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
+                    output_ids, input_token_len, all_attentions, object_tokens_info,
+                    image_tensor, image_output_dir, target_layers=target_layers,
+                    all_hidden_states=all_hidden_states, outputs_text=outputs
                 )
 
-                if object_tokens_info:
-                    if verbose:
-                        print(f"\n  [物体识别] 找到 {len(object_tokens_info)} 个物体:")
-                        for obj_info in object_tokens_info:
-                            print(f"    - {obj_info['object_word']} (规范化: {obj_info['node_word']})")
-                            print(f"      Token位置: {obj_info['token_positions']}")
-
-                    # 为这个图像创建输出目录
-                    image_output_dir = os.path.join(os.path.dirname(output_file), "object_attention_maps", f"image_{image_id}")
-                    os.makedirs(image_output_dir, exist_ok=True)
-
-                    # 提取物体attention map
-                    target_layers = getattr(args, 'target_layers', 'even')
-                    extract_object_attention_maps(
-                        model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
-                        output_ids, input_token_len, all_attentions, object_tokens_info,
-                        image_tensor, image_output_dir, target_layers=target_layers
-                    )
-
-                    if verbose:
-                        print(f"  ✓ 物体attention map已保存到: {image_output_dir}")
-            except Exception as e:
-                print(f"  ⚠️  提取物体attention map时出错: {e}")
-                import traceback
                 if verbose:
-                    traceback.print_exc()
+                    print(f"  📊 已为 {len(object_tokens_info)} 个物体提取 attention map")
+                    print(f"     - 输出目录: {image_output_dir}")
+                    print(f"     - 目标层: {target_layers}")
+
+                if verbose:
+                    print(f"  ✓ 物体attention map已保存到: {image_output_dir}")
 
     output_f.close()
     print(f"\n✓ 描述生成完成！结果已保存到: {output_file}")
@@ -1207,13 +1895,25 @@ def eval_model(args):
 
                 print(f"Debug模式: 将输出 {len(debug_indices)} 个样本的详细信息(样本索引: {sorted(debug_indices)})")
 
+        # 优先使用 eval_tool 目录下已有的缓存文件
+        eval_tool_dir = os.path.join(project_root, "eval_tool")
+        default_cache_file = os.path.join(eval_tool_dir, "chair_evaluator.pkl")
+
+        # 如果默认缓存文件存在，使用它；否则使用输出目录下的缓存文件
+        if os.path.exists(default_cache_file):
+            cache_file = default_cache_file
+            print(f"\n[自动计算 CHAIR] 使用已有的缓存文件: {cache_file}")
+        else:
+            cache_file = os.path.join(results_dir, "chair_evaluator.pkl")
+            print(f"\n[自动计算 CHAIR] 使用输出目录下的缓存文件: {cache_file}")
+
         # 调用 evaluate_chair 函数
         results = evaluate_chair(
             cap_file=output_file,
             coco_path=coco_annotations_path,
             image_id_key="image_id",
             caption_key="caption",
-            cache_file=os.path.join(results_dir, "chair_evaluator.pkl"),
+            cache_file=cache_file,
             use_cache=True,
             save_path=chair_results_file,
             verbose=True,
@@ -1256,10 +1956,6 @@ def eval_model(args):
             model_name=model_name
         )
         print(f"\n✓ 结果总结已保存到: {summary_file}")
-    else:
-        print(f"\n下一步: 使用 chair.py 计算 CHAIR 指标")
-        print(f"  python chair.py --cap_file {output_file} --image_id_key image_id --caption_key caption \\")
-        print(f"                  --coco_path {args.coco_root}/annotations_trainval2014/annotations/")
 
 
 def main():
@@ -1280,7 +1976,7 @@ def main():
         "device": device,
         "coco_root": project.coco_data_path,  # 需要根据实际情况修改
         "image_id_list_file": "pope_coco/coco_baseline_500.json",
-        "use_deco": True,
+        "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
@@ -1289,9 +1985,11 @@ def main():
         "temperature": -1,
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
-        "num_beams": 10,
-        "num_samples": 0,  # 0 表示处理所有图像
-        "seed": 42
+        "num_beams": 2,
+        "num_samples": 1,  # 默认只处理1个图像（用于测试 attention map）
+        "seed": 42,
+        "extract_object_attention": True,  # 默认启用物体 attention map 提取
+        "target_layers": [0, 1, 3, 7, 15, 25, 29, 30, 31]  # 默认只处理偶数层（减少输出）
     }
 
     # 解析参数(所有参数都有默认值)
@@ -1303,7 +2001,9 @@ def main():
     parser.add_argument("--image_id_list_file", type=str, default=default_config["image_id_list_file"],
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
-                       help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个)")
+                       help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
+    parser.add_argument("--single-image-id", type=int, default=6153,  # 6153
+                       help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
     parser.add_argument("--model-path", type=str, default=default_config["model_path"],
@@ -1345,6 +2045,14 @@ def main():
                        help="禁用自动计算 CHAIR 指标(默认会自动计算)")
     parser.add_argument("--debug", action="store_true", default=False,
                        help="启用debug模式, 输出每个样本的详细处理过程")
+    parser.add_argument("--extract-object-attention", action="store_true",
+                       default=default_config["extract_object_attention"],
+                       help="启用物体 attention map 提取(默认: True)")
+    parser.add_argument("--no-extract-object-attention", action="store_false",
+                       dest="extract_object_attention",
+                       help="禁用物体 attention map 提取")
+    parser.add_argument("--target-layers", type=str, default=default_config["target_layers"],
+                       help="目标层选择: 'even'(偶数层), 'odd'(奇数层), 'all'(所有层), 或逗号分隔的层索引(如 '20,22,24', 默认: 'even')")
 
     args = parser.parse_args()
     set_seed(args.seed)
@@ -1352,14 +2060,53 @@ def main():
     # 设置 auto_evaluate 参数(默认启用, 除非指定 --no-auto-evaluate)
     args.auto_evaluate = not args.no_auto_evaluate
 
+    # 如果指定了单个图像ID, 只处理该图像
+    if args.single_image_id is not None:
+        args.num_samples = 1
+        # 创建临时的图像ID列表文件内容
+        args.image_id_list_file = None  # 清空原有列表
+        print(f"📌 指定了单个图像ID: {args.single_image_id}, 将只处理该图像")
+
+    # 如果只处理少量图像(<=3个), 自动启用debug模式
+    if args.num_samples > 0 and args.num_samples <= 3:
+        if not args.debug:
+            print(f"💡 检测到只处理 {args.num_samples} 个图像, 自动启用详细输出模式")
+            args.debug = True
+
     # 自动生成输出文件路径(如果未指定)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(project_root, "results", "chair")
     os.makedirs(output_dir, exist_ok=True)
 
+    # 如果只处理一个图像, 提示用户这是测试模式
+    if args.num_samples == 1 or args.single_image_id is not None:
+        print("\n" + "=" * 80)
+        print("🧪 测试模式: 只处理单个图像")
+        print("=" * 80)
+        print("💡 提示: 此模式用于测试和调试, 会生成详细的 attention map")
+        if args.use_deco:
+            print("   ⚠️  注意: 使用 Deco 时会同时运行 Vanilla 和 Deco 两个版本进行对比")
+            print("       (每个版本都会处理同一个图像, 总共会处理 2 次)")
+        print("   如需批量处理, 请使用 --num-samples 参数指定更多图像")
+        print("=" * 80 + "\n")
+
     # 如果使用 Deco, 需要同时运行 vanilla 版本进行对比
     vanilla_output_file = None
     vanilla_results = None
+
+    """评估模型, 生成图像描述"""
+    print("=" * 80)
+    print("CHAIR 评估 - 生成图像描述")
+    print("=" * 80)
+    print(f"模型路径: {args.model_path}")
+    print(f"设备: {args.device}")
+    print(f"COCO 根目录: {args.coco_root}")
+    print(f"输出文件: {args.output_file}")
+    if args.use_deco:
+        print(f"Deco 参数: use_deco={args.use_deco}, alpha={args.alpha}, layers={args.start_layer}-{args.end_layer}")
+    else:
+        print(f"使用原生 LLaVA 模型(Deco 已禁用)")
+    print("=" * 80)
 
     if args.use_deco:
         print("\n" + "=" * 80)

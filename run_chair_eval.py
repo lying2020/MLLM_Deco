@@ -209,20 +209,23 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     output_ids = output_dict.sequences
     input_token_len = input_ids.shape[1]
 
-    # 如果 output_ids 不包含 input_ids, 手动拼接
-    if output_ids.shape[1] < input_token_len:
-        output_ids = torch.cat([input_ids, output_ids], dim=1)
-    elif output_ids.shape[1] >= input_token_len:
-        # 检查前 input_token_len 个 token 是否与 input_ids 匹配
+    # 检查 output_ids 是否包含 input_ids（前缀匹配）
+    prefix_match = False
+    if output_ids.shape[1] >= input_token_len:
         prefix_match = (input_ids[0] == output_ids[0, :input_token_len]).all().item()
-        if not prefix_match:
-            output_ids = torch.cat([input_ids, output_ids[:, input_token_len:]], dim=1)
 
-    output_token_len = output_ids.shape[1] - input_token_len
+    # 根据前缀匹配情况决定如何处理
+    if prefix_match:
+        # 如果 output_ids 包含 input_ids，需要剔除 input_ids 部分
+        generated_ids = output_ids[:, input_token_len:]
+        output_token_len = generated_ids.shape[1]
+    else:
+        # 如果 output_ids 不包含 input_ids，直接使用 output_ids 作为生成的 token
+        generated_ids = output_ids
+        output_token_len = generated_ids.shape[1]
 
     # 获取新生成的 token
     if output_token_len > 0:
-        generated_ids = output_ids[:, input_token_len:]
         # 如果新生成的 token 以 BOS token 开头, 跳过它
         bos_token_id = tokenizer.bos_token_id if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None else None
         if bos_token_id is not None and generated_ids.shape[1] > 0 and generated_ids[0, 0].item() == bos_token_id:
@@ -239,10 +242,104 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     return outputs, output_token_len, input_token_len
 
 
+def simplify_array_field(value):
+    """
+    简化数组字段, 如果是数组, 只显示最后一行
+
+    Args:
+        value: 要简化的值
+
+    Returns:
+        简化后的值
+    """
+    if isinstance(value, list):
+        if len(value) == 0:
+            return []
+        # 如果是嵌套数组, 取最后一个元素
+        if len(value) > 0 and isinstance(value[0], list):
+            return value[-1] if len(value) > 0 else []
+        # 如果是普通数组, 只取最后一个元素
+        return value[-1] if len(value) > 0 else []
+    return value
+
+
+def get_sentence_by_image_id(results, image_id):
+    """
+    从结果中根据 image_id 获取句子信息
+
+    Args:
+        results: 评估结果字典
+        image_id: 图像ID
+
+    Returns:
+        句子字典, 如果不存在返回 None
+    """
+    if results and 'sentences' in results:
+        for s in results['sentences']:
+            if s.get('image_id') == image_id:
+                return s
+    return None
+
+
+def simplify_sentence_data(sentence):
+    """
+    简化句子数据, 将数组字段只保留最后一行
+
+    Args:
+        sentence: 句子字典
+
+    Returns:
+        简化后的句子字典
+    """
+    if not sentence:
+        return None
+
+    # 将 image_id 转换为完整的图片文件名
+    image_id = sentence.get("image_id")
+    if image_id is not None:
+        # 如果 image_id 是数字，转换为文件名
+        if isinstance(image_id, (int, str)) and str(image_id).isdigit():
+            image_id = f"COCO_val2014_{str(image_id).zfill(12)}.jpg"
+        # 如果已经是文件名格式，保持不变
+        elif isinstance(image_id, str) and image_id.endswith('.jpg'):
+            image_id = image_id
+        else:
+            # 尝试转换
+            try:
+                image_id = f"COCO_val2014_{str(image_id).zfill(12)}.jpg"
+            except:
+                image_id = str(image_id)
+
+    simplified = {
+        "image_id": image_id,  # 使用完整的图片文件名
+        "caption": sentence.get("caption"),
+        "metrics": sentence.get("metrics", {})
+    }
+
+    # 简化数组字段
+    array_fields = [
+        'mscoco_hallucinated_words', 'mscoco_gt_words', 'mscoco_generated_words',
+        'hallucination_idxs', 'words', 'processed_words', 'node_words',
+        'word_indices', 'recall_gt_objects'
+    ]
+
+    for field in array_fields:
+        if field in sentence:
+            simplified[field] = simplify_array_field(sentence[field])
+
+    # 保留其他非数组字段
+    other_fields = ['hallucination_details', 'recall_count']
+    for field in other_fields:
+        if field in sentence:
+            simplified[field] = sentence[field]
+
+    return simplified
+
+
 def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
                             output_file):
     """
-    对比 Deco 和 Vanilla 的结果, 生成对比表格和不一致 case 的 JSON 文件
+    对比 Deco 和 Vanilla 的结果, 生成对比表格和 CHAIRs/CHAIRi 不一致 case 的 JSON 文件
 
     Args:
         deco_results: Deco 版本的评估结果
@@ -268,43 +365,66 @@ def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, v
             if image_id is not None:
                 vanilla_captions[image_id] = item
 
-    # 找到描述不一致的 case
+    # 找到 CHAIRs 或 CHAIRi 不一致的 case
     inconsistent_cases = []
     common_image_ids = set(deco_captions.keys()) & set(vanilla_captions.keys())
 
     for image_id in common_image_ids:
-        deco_caption = deco_captions[image_id].get("caption", "").strip()
-        vanilla_caption = vanilla_captions[image_id].get("caption", "").strip()
+        # 获取两个版本的句子数据
+        deco_sentence = get_sentence_by_image_id(deco_results, image_id)
+        vanilla_sentence = get_sentence_by_image_id(vanilla_results, image_id)
 
-        # 如果描述不同, 记录这个 case
-        if deco_caption != vanilla_caption:
-            # 获取图片文件名(不包含路径)
-            # image_id 是数字, 需要构造文件名
+        if not deco_sentence or not vanilla_sentence:
+            continue
+
+        deco_metrics = deco_sentence.get('metrics', {})
+        vanilla_metrics = vanilla_sentence.get('metrics', {})
+
+        deco_chairs = deco_metrics.get('CHAIRs', 0)
+        deco_chairi = deco_metrics.get('CHAIRi', 0)
+        vanilla_chairs = vanilla_metrics.get('CHAIRs', 0)
+        vanilla_chairi = vanilla_metrics.get('CHAIRi', 0)
+
+        # 检查 CHAIRs 或 CHAIRi 是否不一致
+        chairs_different = deco_chairs != vanilla_chairs
+        chairi_different = abs(deco_chairi - vanilla_chairi) > 1e-6  # 浮点数比较
+
+        if chairs_different or chairi_different:
+            # 获取图片文件名
             image_filename = f"COCO_val2014_{str(image_id).zfill(12)}.jpg"
 
-            # 获取两个版本的 CHAIR 指标(如果可用)
-            deco_sentence_metrics = None
-            vanilla_sentence_metrics = None
+            # 判断谁的效果更好(幻视率更低)
+            # CHAIRs 和 CHAIRi 都是越小越好
+            # 优先使用 CHAIRi 作为主要判断标准, 如果 CHAIRi 相同则使用 CHAIRs
+            if deco_chairi < vanilla_chairi:
+                better_method = "deco"
+            elif deco_chairi > vanilla_chairi:
+                better_method = "vanilla"
+            else:
+                # CHAIRi 相同, 使用 CHAIRs 判断
+                if deco_chairs < vanilla_chairs:
+                    better_method = "deco"
+                elif deco_chairs > vanilla_chairs:
+                    better_method = "vanilla"
+                else:
+                    # 两者都相同, 默认标记为 deco (实际上应该不会出现这种情况)
+                    better_method = "equal"
 
-            if deco_results and 'sentences' in deco_results:
-                for s in deco_results['sentences']:
-                    if s.get('image_id') == image_id:
-                        deco_sentence_metrics = s.get('metrics', {})
-                        break
-
-            if vanilla_results and 'sentences' in vanilla_results:
-                for s in vanilla_results['sentences']:
-                    if s.get('image_id') == image_id:
-                        vanilla_sentence_metrics = s.get('metrics', {})
-                        break
+            # 简化句子数据
+            simplified_deco = simplify_sentence_data(deco_sentence)
+            simplified_vanilla = simplify_sentence_data(vanilla_sentence)
 
             case_info = {
-                "image_id": image_id,
-                "image": image_filename,  # 只保存文件名
-                "vanilla_caption": vanilla_caption,
-                "deco_caption": deco_caption,
-                "vanilla_metrics": vanilla_sentence_metrics,
-                "deco_metrics": deco_sentence_metrics
+                "image_id": image_filename,  # 使用完整的图片文件名
+                "better_method": better_method,  # 新增字段: 说明谁的效果更好
+                "vanilla_data": simplified_vanilla,
+                "deco_data": simplified_deco,
+                "difference": {
+                    "CHAIRs": deco_chairs - vanilla_chairs,
+                    "CHAIRi": deco_chairi - vanilla_chairi,
+                    "Recall": deco_metrics.get('Recall', 0) - vanilla_metrics.get('Recall', 0),
+                    "Len": deco_metrics.get('Len', 0) - vanilla_metrics.get('Len', 0)
+                }
             }
             inconsistent_cases.append(case_info)
 
@@ -347,6 +467,114 @@ def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, v
         json.dump(comparison_result, f, ensure_ascii=False, indent=2)
 
     return comparison_result
+
+
+def save_both_hallucinated_errors(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
+                                   output_file):
+    """
+    保存两个方法都出现幻视的 error 例子
+
+    Args:
+        deco_results: Deco 版本的评估结果
+        vanilla_results: Vanilla 版本的评估结果
+        deco_captions_file: Deco 版本的描述文件路径
+        vanilla_captions_file: Vanilla 版本的描述文件路径
+        output_file: 输出 JSON 文件路径
+    """
+    # 加载描述文件
+    deco_captions = {}
+    with open(deco_captions_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            item = json.loads(line.strip())
+            image_id = item.get("image_id")
+            if image_id is not None:
+                deco_captions[image_id] = item
+
+    vanilla_captions = {}
+    with open(vanilla_captions_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            item = json.loads(line.strip())
+            image_id = item.get("image_id")
+            if image_id is not None:
+                vanilla_captions[image_id] = item
+
+    # 找到两个方法都出现幻视的 case
+    both_hallucinated_cases = []
+    common_image_ids = set(deco_captions.keys()) & set(vanilla_captions.keys())
+
+    for image_id in common_image_ids:
+        # 获取两个版本的句子数据
+        deco_sentence = get_sentence_by_image_id(deco_results, image_id)
+        vanilla_sentence = get_sentence_by_image_id(vanilla_results, image_id)
+
+        if not deco_sentence or not vanilla_sentence:
+            continue
+
+        deco_metrics = deco_sentence.get('metrics', {})
+        vanilla_metrics = vanilla_sentence.get('metrics', {})
+
+        # 检查是否都出现幻视 (CHAIRs > 0 表示有幻视)
+        deco_has_hallucination = deco_metrics.get('CHAIRs', 0) > 0
+        vanilla_has_hallucination = vanilla_metrics.get('CHAIRs', 0) > 0
+
+        if deco_has_hallucination and vanilla_has_hallucination:
+            # 获取图片文件名
+            image_filename = f"COCO_val2014_{str(image_id).zfill(12)}.jpg"
+
+            # 简化句子数据
+            simplified_deco = simplify_sentence_data(deco_sentence)
+            simplified_vanilla = simplify_sentence_data(vanilla_sentence)
+
+            # 判断谁的效果更好(幻视率更低)
+            # CHAIRs 和 CHAIRi 都是越小越好
+            # 优先使用 CHAIRi 作为主要判断标准, 如果 CHAIRi 相同则使用 CHAIRs
+            deco_chairs = deco_metrics.get('CHAIRs', 0)
+            deco_chairi = deco_metrics.get('CHAIRi', 0)
+            vanilla_chairs = vanilla_metrics.get('CHAIRs', 0)
+            vanilla_chairi = vanilla_metrics.get('CHAIRi', 0)
+
+            if deco_chairi < vanilla_chairi:
+                better_method = "deco"
+            elif deco_chairi > vanilla_chairi:
+                better_method = "vanilla"
+            else:
+                # CHAIRi 相同, 使用 CHAIRs 判断
+                if deco_chairs < vanilla_chairs:
+                    better_method = "deco"
+                elif deco_chairs > vanilla_chairs:
+                    better_method = "vanilla"
+                else:
+                    # 两者都相同, 默认标记为 equal (实际上应该不会出现这种情况)
+                    better_method = "equal"
+
+            case_info = {
+                "image_id": image_filename,  # 使用完整的图片文件名
+                "better_method": better_method,  # 说明谁的效果更好
+                "vanilla_data": simplified_vanilla,
+                "deco_data": simplified_deco,
+                "difference": {
+                    "CHAIRs": deco_chairs - vanilla_chairs,
+                    "CHAIRi": deco_chairi - vanilla_chairi,
+                    "Recall": deco_metrics.get('Recall', 0) - vanilla_metrics.get('Recall', 0),
+                    "Len": deco_metrics.get('Len', 0) - vanilla_metrics.get('Len', 0)
+                }
+            }
+            both_hallucinated_cases.append(case_info)
+
+    # 保存结果
+    result = {
+        "summary": {
+            "total_cases": len(common_image_ids),
+            "both_hallucinated_cases": len(both_hallucinated_cases),
+            "both_hallucinated_rate": len(both_hallucinated_cases) / len(common_image_ids) if len(common_image_ids) > 0 else 0
+        },
+        "both_hallucinated_cases": both_hallucinated_cases
+    }
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    return result
 
 
 def print_comparison_table(deco_results, vanilla_results):
@@ -942,7 +1170,7 @@ def main():
                 with open(deco_results_file, 'r', encoding='utf-8') as f:
                     deco_results = json.load(f)
 
-                # 生成对比 JSON 文件
+                # 生成对比 JSON 文件(CHAIRs/CHAIRi 不一致的 case)
                 comparison_file = args.output_file.replace('.jsonl', '_comparison.json')
                 comparison_result = compare_deco_vs_vanilla(
                     deco_results=deco_results,
@@ -952,13 +1180,28 @@ def main():
                     output_file=comparison_file
                 )
 
+                # 保存两个方法都出现幻视的 error 例子
+                both_hallucinated_file = args.output_file.replace('.jsonl', '_both_hallucinated_errors.json')
+                both_hallucinated_result = save_both_hallucinated_errors(
+                    deco_results=deco_results,
+                    vanilla_results=vanilla_results,
+                    deco_captions_file=args.output_file,
+                    vanilla_captions_file=vanilla_output_file,
+                    output_file=both_hallucinated_file
+                )
+
                 # 打印对比表格
                 print_comparison_table(deco_results=deco_results, vanilla_results=vanilla_results)
 
                 print(f"\n✓ 对比结果已保存到: {comparison_file}")
                 print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
-                print(f"  - 描述不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
+                print(f"  - CHAIRs/CHAIRi 不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
                 print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
+
+                print(f"\n✓ 两个方法都出现幻视的错误例子已保存到: {both_hallucinated_file}")
+                print(f"  - 总样本数: {both_hallucinated_result['summary']['total_cases']}")
+                print(f"  - 都出现幻视的样本数: {both_hallucinated_result['summary']['both_hallucinated_cases']}")
+                print(f"  - 都出现幻视的比例: {both_hallucinated_result['summary']['both_hallucinated_rate']:.2%}")
             else:
                 print("⚠️  无法找到评估结果文件, 跳过对比")
     else:
