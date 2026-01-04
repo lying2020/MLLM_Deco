@@ -237,7 +237,28 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
 
     # 返回额外的信息用于 attention 分析
     all_attentions = output_dict.attentions if hasattr(output_dict, 'attentions') else None
-    all_hidden_states = output_dict.hidden_states if hasattr(output_dict, 'hidden_states') else None
+    all_hidden_states_raw = output_dict.hidden_states if hasattr(output_dict, 'hidden_states') else None
+
+    # 过滤掉embedding层（第一个隐藏层），只保留transformer层的隐藏状态
+    # all_hidden_states_raw 的结构：每个步骤包含33个元素（索引0是embedding层，索引1-32是transformer层）
+    # 过滤后：每个步骤只包含32个transformer层的隐藏状态
+    all_hidden_states = None
+    if all_hidden_states_raw is not None:
+        if isinstance(all_hidden_states_raw, (tuple, list)):
+            # 对每个步骤的hidden_states，去掉第一个元素（embedding层）
+            all_hidden_states = []
+            for step_hidden_states in all_hidden_states_raw:
+                if step_hidden_states is None:
+                    all_hidden_states.append(None)
+                elif isinstance(step_hidden_states, (tuple, list)) and len(step_hidden_states) > 0:
+                    # 跳过第一个元素（embedding层），只保留transformer层（索引1-32）
+                    transformer_hidden_states = step_hidden_states[1:] if len(step_hidden_states) > 1 else step_hidden_states
+                    all_hidden_states.append(transformer_hidden_states)
+                else:
+                    all_hidden_states.append(step_hidden_states)
+            all_hidden_states = tuple(all_hidden_states) if isinstance(all_hidden_states_raw, tuple) else all_hidden_states
+        else:
+            all_hidden_states = all_hidden_states_raw
 
     # 返回原始的 output_ids（从模型生成的完整序列，包含input+output），用于 attention 分析
     return outputs, output_token_len, input_token_len, output_ids, all_attentions, all_hidden_states
@@ -344,137 +365,153 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
     # 对于每个名词，找到它在序列中的位置
     for word, node_word in nouns:
         word_lower = word.lower()
-        node_word_lower = node_word.lower()
 
         token_positions = []
         token_texts = []
+        token_groups = []  # 存储token组，每个组是一个连续的token范围 [(start_idx, end_idx), ...]
 
         # 方法：精确匹配，只匹配真正组成目标词汇的token （如 "the"）
         # 1. 首先检查单个token是否精确等于目标词汇（去除前后空格）
         # 2. 如果单个token匹配失败，使用滑动窗口匹配多个token的组合（处理被分解的单词, 如 "chair" → "ch" + "air"）
         # 3. 对于多词短语，也使用滑动窗口匹配（如 "traffic light"）
-        search_words = [word_lower, node_word_lower] if word_lower != node_word_lower else [word_lower]
+        search_word = word_lower
 
-        for search_word in search_words:
-            if not search_word:
-                continue
+        if not search_word:
+            continue
 
-            # 1. 检查单个token精确匹配（快速路径）
-            single_token_matched = False
-            for token_idx, token_id in enumerate(generated_ids):
-                token_text = tokenizer.decode([token_id], skip_special_tokens=False).strip().lower()
-                if token_text == search_word:
-                    if token_idx not in token_positions:
-                        token_positions.append(token_idx)
-                        token_texts.append(tokenizer.decode([token_id], skip_special_tokens=False))
-                    single_token_matched = True
+        # 1. 检查单个token精确匹配（快速路径）
+        single_token_matched = False
+        for token_idx, token_id in enumerate(generated_ids):
+            token_text = tokenizer.decode([token_id], skip_special_tokens=False).strip().lower()
+            if token_text == search_word:
+                if token_idx not in token_positions:
+                    token_positions.append(token_idx)
+                    token_texts.append(tokenizer.decode([token_id], skip_special_tokens=False))
+                    # 单个token作为一个组
+                    token_groups.append((token_idx, token_idx))
+                single_token_matched = True
 
-            # 2. 如果单个token匹配失败，或者目标词汇是多词（如 "traffic light"），使用滑动窗口匹配
-            # 对于单个单词，也尝试多token组合匹配（处理被tokenizer分解的情况）
-            if not single_token_matched or ' ' in search_word:
-                import re
+        # 2. 如果单个token匹配失败，或者目标词汇是多词（如 "traffic light"），使用滑动窗口匹配
+        # 对于单个单词，也尝试多token组合匹配（处理被tokenizer分解的情况）
+        if not single_token_matched or ' ' in search_word:
+            import re
 
-                # 确定滑动窗口的最大大小
-                # 对于单个单词，尝试2-5个token的组合（通常一个单词最多被分解成2-3个token）
-                # 对于多词短语，使用词数+2作为最大窗口
-                if ' ' in search_word:
-                    words_in_phrase = search_word.split()
-                    max_window_size = min(len(words_in_phrase) + 2, len(generated_ids))
-                    min_window_size = len(words_in_phrase)
-                else:
-                    # 单个单词：尝试1-5个token的组合（1已经在上面检查过了，这里从2开始）
-                    max_window_size = min(5, len(generated_ids))
-                    min_window_size = 2
-
-                # 使用滑动窗口匹配
-                for window_size in range(min_window_size, max_window_size + 1):
-                    for start_idx in range(len(generated_ids) - window_size + 1):
-                        # 获取窗口内的token序列
-                        window_tokens = generated_ids[start_idx:start_idx + window_size]
-                        window_text = tokenizer.decode(window_tokens, skip_special_tokens=False).strip().lower()
-
-                        # 检查窗口文本是否包含完整的目标词汇（作为完整词）
-                        # 使用单词边界确保精确匹配
-                        pattern = r'\b' + re.escape(search_word) + r'\b'
-                        match = re.search(pattern, window_text)
-
-                        if match:
-                            # 找到目标词汇在窗口文本中的位置
-                            phrase_start = match.start()
-                            phrase_end = match.end()
-
-                            # 通过累积字符位置找到包含目标词汇的token
-                            char_pos = 0
-                            matched_tokens = []
-                            for i in range(window_size):
-                                token_text = tokenizer.decode([generated_ids[start_idx + i]], skip_special_tokens=False)
-                                token_start = char_pos
-                                token_end = char_pos + len(token_text)
-
-                                # 检查token是否与目标词汇的字符范围有重叠
-                                if token_start < phrase_end and token_end > phrase_start:
-                                    matched_tokens.append(start_idx + i)
-
-                                char_pos = token_end
-
-                                # 如果已经超过目标词汇的结束位置，可以停止
-                                if char_pos > phrase_end:
-                                    break
-
-                            # 添加匹配的token（只添加之前未匹配的）
-                            for token_idx in matched_tokens:
-                                if token_idx not in token_positions:
-                                    token_positions.append(token_idx)
-                                    token_texts.append(tokenizer.decode([generated_ids[token_idx]], skip_special_tokens=False))
-
-                            # 找到一次匹配后，继续查找下一次出现（不break，允许同一词汇多次出现）
-                            # 但为了避免重复匹配相同的token组合，可以记录已匹配的窗口起始位置
-                            # 这里简化处理：找到匹配后继续查找，但通过token_positions去重
-
-        if token_positions:
-            # 获取匹配的token的详细信息
-            matched_tokens_detail = []
-            for abs_pos in token_positions:
-                token_idx = abs_pos  # LLaVA 的 output_ids 不包含 input，所以 abs_pos 就是 token_idx
-                if 0 <= token_idx < len(all_tokens_detail):
-                    matched_tokens_detail.append(all_tokens_detail[token_idx])
-
-            # 如果该 word 已存在，合并 token_positions
-            if word in object_tokens_info:
-                # 合并 token_positions（去重并排序）
-                existing_positions = set(object_tokens_info[word]['token_positions'])
-                new_positions = set(token_positions)
-                merged_positions = sorted(list(existing_positions | new_positions))
-
-                # 合并 token_texts 和 matched_tokens_detail
-                existing_texts = object_tokens_info[word]['token_texts']
-                existing_details = object_tokens_info[word]['matched_tokens_detail']
-
-                # 添加新的 token_texts（去重）
-                for token_text in token_texts:
-                    if token_text not in existing_texts:
-                        existing_texts.append(token_text)
-
-                # 添加新的 matched_tokens_detail（基于 position 去重）
-                existing_detail_positions = {detail['absolute_position'] for detail in existing_details}
-                for detail in matched_tokens_detail:
-                    if detail['absolute_position'] not in existing_detail_positions:
-                        existing_details.append(detail)
-                        existing_detail_positions.add(detail['absolute_position'])
-
-                # 更新信息
-                object_tokens_info[word]['token_positions'] = merged_positions
-                object_tokens_info[word]['token_texts'] = existing_texts
-                object_tokens_info[word]['matched_tokens_detail'] = existing_details
+            # 确定滑动窗口的最大大小
+            # 对于单个单词，尝试2-5个token的组合（通常一个单词最多被分解成2-3个token）
+            # 对于多词短语，使用词数+2作为最大窗口
+            if ' ' in search_word:
+                words_in_phrase = search_word.split()
+                max_window_size = min(len(words_in_phrase) + 2, len(generated_ids))
+                min_window_size = len(words_in_phrase)
             else:
-                # 首次出现，创建新条目
-                object_tokens_info[word] = {
-                    'object_word': word,
-                    'node_word': node_word,
-                    'token_positions': token_positions,
-                    'token_texts': token_texts,
-                    'matched_tokens_detail': matched_tokens_detail
-                }
+                # 单个单词：尝试1-5个token的组合（1已经在上面检查过了，这里从2开始）
+                max_window_size = min(5, len(generated_ids))
+                min_window_size = 2
+
+            # 记录已匹配的token范围，避免重复匹配
+            # matched_ranges: [(start_token_idx, end_token_idx), ...]
+            matched_ranges = []
+
+            # 使用滑动窗口匹配
+            for window_size in range(min_window_size, max_window_size + 1):
+                for start_idx in range(len(generated_ids) - window_size + 1):
+                    # 检查这个窗口是否与已匹配的范围有重叠
+                    end_idx = start_idx + window_size - 1
+                    is_overlapping = False
+                    for matched_start, matched_end in matched_ranges:
+                        # 如果当前窗口与已匹配的范围有重叠，跳过
+                        if not (end_idx < matched_start or start_idx > matched_end):
+                            is_overlapping = True
+                            break
+
+                    if is_overlapping:
+                        continue
+
+                    # 获取窗口内的token序列
+                    window_tokens = generated_ids[start_idx:start_idx + window_size]
+                    window_text = tokenizer.decode(window_tokens, skip_special_tokens=False).strip().lower()
+
+                    # 关键检查：只有当窗口解码后的文本正好等于目标词汇时，才认为是有效匹配
+                    # 这样可以确保窗口内的所有token都用于匹配目标词汇，避免部分匹配
+                    # 例如：如果窗口是 [7, 8]，解码后是 "airplane"，正好等于目标词汇，匹配成功
+                    # 如果窗口是 [7, 8, 9]，解码后是 "airplanepark"，不等于目标词汇，不应该匹配
+                    if window_text == search_word:
+                        # 精确匹配成功，记录这个匹配范围
+                        matched_start_token = start_idx
+                        matched_end_token = start_idx + window_size - 1
+                        matched_ranges.append((matched_start_token, matched_end_token))
+
+                        # 添加窗口内的所有token
+                        for i in range(window_size):
+                            token_idx = start_idx + i
+                            if token_idx not in token_positions:
+                                token_positions.append(token_idx)
+                                token_texts.append(tokenizer.decode([generated_ids[token_idx]], skip_special_tokens=False))
+
+                        token_groups.append((matched_start_token, matched_end_token))
+
+        if not token_positions:
+            continue
+
+        # 获取匹配的token的详细信息
+        matched_tokens_detail = []
+        for abs_pos in token_positions:
+            token_idx = abs_pos  # LLaVA 的 output_ids 不包含 input，所以 abs_pos 就是 token_idx
+            if 0 <= token_idx < len(all_tokens_detail):
+                matched_tokens_detail.append(all_tokens_detail[token_idx])
+
+        # 如果该 word 已存在，合并 token_positions
+        if word in object_tokens_info:
+            # 合并 token_positions（去重并排序）
+            existing_positions = set(object_tokens_info[word]['token_positions'])
+            new_positions = set(token_positions)
+            merged_positions = sorted(list(existing_positions | new_positions))
+
+            # 合并 token_texts 和 matched_tokens_detail
+            existing_texts = object_tokens_info[word]['token_texts']
+            existing_details = object_tokens_info[word]['matched_tokens_detail']
+
+            # 添加新的 token_texts（去重）
+            for token_text in token_texts:
+                if token_text not in existing_texts:
+                    existing_texts.append(token_text)
+
+            # 添加新的 matched_tokens_detail（基于 position 去重）
+            existing_detail_positions = {detail['absolute_position'] for detail in existing_details}
+            for detail in matched_tokens_detail:
+                if detail['absolute_position'] not in existing_detail_positions:
+                    existing_details.append(detail)
+                    existing_detail_positions.add(detail['absolute_position'])
+
+            # 合并 token_groups
+            existing_groups = object_tokens_info[word].get('token_groups', [])
+            # 合并并去重token组
+            all_groups = existing_groups + token_groups
+            # 去重：如果两个组的范围相同，只保留一个
+            unique_groups = []
+            seen_groups = set()
+            for group in all_groups:
+                if group not in seen_groups:
+                    unique_groups.append(group)
+                    seen_groups.add(group)
+            # 按起始位置排序
+            unique_groups.sort(key=lambda x: x[0])
+
+            # 更新信息
+            object_tokens_info[word]['token_positions'] = merged_positions
+            object_tokens_info[word]['token_texts'] = existing_texts
+            object_tokens_info[word]['matched_tokens_detail'] = existing_details
+            object_tokens_info[word]['token_groups'] = unique_groups
+        else:
+            # 首次出现，创建新条目
+            object_tokens_info[word] = {
+                'object_word': word,
+                'node_word': node_word,
+                'token_positions': token_positions,
+                'token_texts': token_texts,
+                'matched_tokens_detail': matched_tokens_detail,
+                'token_groups': token_groups  # 存储token组信息
+            }
 
     # 返回结果，包含所有token的详细信息
     return object_tokens_info, {
@@ -980,18 +1017,32 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     step_lm_head_outputs = {}
 
     # 收集所有目标 token 位置（来自 object_tokens_info）
-    # 只取每个物体的第一次出现的位置（第一个 token 位置）
+    # 基于 token_groups 选择：对于每个token组，包含该组内的所有token位置
     target_token_positions = set()
     for object_word, obj_info in object_tokens_info.items():
+        token_groups = obj_info.get('token_groups', [])
         token_positions = obj_info.get('token_positions', [])
-        if not token_positions:
+
+        if not token_groups and not token_positions:
             continue
 
-        # 只取第一次出现的位置（第一个 token 位置）
-        target_token_positions.add(token_positions[0])
-        if len(token_positions) > 1:
-            target_token_positions.add(token_positions[-1])
-            print(f"  ⚠️  物体 {object_word} 在 {token_positions} 位置出现多次，取第一次和最后一次的位置")
+        # 如果有token_groups，使用token_groups；否则回退到token_positions
+        if token_groups:
+            # 对于每个token组，添加该组内的所有token位置
+            for group_start, group_end in token_groups:
+                # 添加该组范围内的所有token位置
+                for token_idx in range(group_start, group_end + 1):
+                    target_token_positions.add(token_idx)
+
+            if len(token_groups) > 1:
+                print(f"  ⚠️  物体 {object_word} 有 {len(token_groups)} 个token组: {token_groups}")
+        else:
+            # 如果没有token_groups，回退到原来的逻辑
+            if token_positions:
+                target_token_positions.add(token_positions[0])
+                if len(token_positions) > 1:
+                    target_token_positions.add(token_positions[-1])
+                    print(f"  ⚠️  物体 {object_word} 在 {token_positions} 位置出现多次，取第一次和最后一次的位置")
 
     # 只为 object_tokens_info 中的关键词对应的 token 位置提取 logits 信息
     if all_hidden_states is not None and hasattr(model, 'lm_head') and target_token_positions:
@@ -1030,14 +1081,12 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                 print(f"    - 当前step_idx: {step_idx}, 对应token位置: {step_idx}")
 
             # 提取所有层的logits
-            # 注意：step_hidden_states 包含 33 个元素：
-            #   - 索引 0: embedding 层的输出（不是 transformer 层）
-            #   - 索引 1-32: 32 个 transformer 层的输出
-            # 我们只处理 transformer 层（索引 1-32），跳过 embedding 层（索引 0）
+            # 注意：step_hidden_states 现在只包含 32 个 transformer 层的输出（embedding层已在获取时被移除）
+            #   - 索引 0-31: 32 个 transformer 层的输出
             # 保存时使用 transformer 层的索引（0-31），对应第1-32个transformer层
             if isinstance(step_hidden_states, (tuple, list)):
-                # 跳过 embedding 层（索引 0），从索引 1 开始处理 transformer 层
-                for layer_idx_all in range(1, len(step_hidden_states)):
+                # 从索引 0 开始处理所有 transformer 层（embedding层已被移除）
+                for layer_idx_all in range(len(step_hidden_states)):
                     layer_hidden = step_hidden_states[layer_idx_all]
                     if isinstance(layer_hidden, torch.Tensor):
                         if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
@@ -1063,13 +1112,13 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                                 # 通过lm_head得到logits（与最后一层相同的操作）
                                 layer_logits = model.lm_head(last_hidden_normalized)
 
-                                # 将 layer_idx_all (1-32) 映射为 transformer 层索引 (0-31)
-                                # layer_idx_all=1 -> transformer_layer_idx=0 (第1个transformer层)
-                                # layer_idx_all=32 -> transformer_layer_idx=31 (第32个transformer层)
-                                transformer_layer_idx = layer_idx_all - 1
+                                # layer_idx_all 直接对应 transformer 层索引 (0-31)
+                                # layer_idx_all=0 -> transformer_layer_idx=0 (第1个transformer层)
+                                # layer_idx_all=31 -> transformer_layer_idx=31 (第32个transformer层)
+                                transformer_layer_idx = layer_idx_all
 
                                 # Debug: 特别检查第32层（最后一个transformer层）
-                                # layer_idx_all=32 对应 transformer_layer_idx=31（第32个transformer层）
+                                # layer_idx_all=31 对应 transformer_layer_idx=31（第32个transformer层）
                                 if layer_idx_all == len(step_hidden_states) - 1:  # 最后一个transformer层（第32层）
                                     predicted_token_id = layer_logits.argmax().item()
                                     predicted_token_text = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
@@ -1107,128 +1156,157 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
         print(f"  ✓ 已为 {len(step_lm_head_outputs)} 个目标 token 位置提取logits信息")
 
     # 按步骤组织目标词汇：找出每个步骤对应的目标词汇（CHAIR识别的物体）
-    # step_target_words: {step_idx: [node_word1, node_word2, ...]}
-    # 只处理每个物体的第一次出现位置
+    # step_target_words: {word: {'steps': [step_idx1, step_idx2, ...], 'token_groups': [(start, end), ...]}}
+    # 对于多token的word，记录所有相关的步骤
     step_target_words = {}
-    # object_tokens_info 现在是字典，以 node_word 为 key
-    for node_word, obj_info in object_tokens_info.items():
+    # object_tokens_info 现在是字典，以 word 为 key
+    for word, obj_info in object_tokens_info.items():
         token_positions = obj_info['token_positions']
+        token_groups = obj_info.get('token_groups', [])
 
         if not token_positions:
             continue
 
-        # 只取第一次出现的位置（第一个 token 位置）
-        first_token_pos = token_positions[0]
-        step_idx = first_token_pos  # LLaVA 的 output_ids 不包含 input，所以 token_pos 就是 step_idx
+        # 从token_groups中提取所有相关的步骤
+        # 如果token_groups为空，则使用token_positions的第一个位置作为步骤
+        if token_groups:
+            # 从每个token组中提取步骤（使用组的起始位置作为步骤索引）
+            word_steps = [group[0] for group in token_groups]
+        else:
+            # 如果没有token_groups，使用第一个token位置作为步骤
+            word_steps = [token_positions[0]]
 
-        if step_idx not in step_target_words:
-            step_target_words[step_idx] = []
-        # 避免重复添加相同的词汇
-        if node_word not in step_target_words[step_idx]:
-            step_target_words[step_idx].append(node_word)
+        # 去重并排序
+        word_steps = sorted(list(set(word_steps)))
 
-    # 为每个有目标词汇的步骤提取attention map
-    for step_idx in sorted(step_target_words.keys()):
-        target_words = step_target_words[step_idx]
+        step_target_words[word] = {
+            'steps': word_steps,
+            'token_groups': token_groups,
+            'token_positions': token_positions
+        }
 
-        if not target_words or step_idx >= len(all_attentions) or all_attentions[step_idx] is None:
+    # 为每个目标词汇提取attention map（支持多token的word，叠加多个步骤）
+    for word, word_info in step_target_words.items():
+        word_steps = word_info['steps']
+        token_groups = word_info['token_groups']
+        token_positions = word_info['token_positions']
+
+        if not word_steps:
             continue
 
-        # 使用第一个目标词汇作为文件夹名（如果有多个，使用第一个）
-        target_word = target_words[0]
-        safe_word = target_word.replace(' ', '_').replace('/', '_').replace('\\', '_')
+        safe_word = word.replace(' ', '_').replace('/', '_').replace('\\', '_')
 
-        # 创建步骤文件夹：step_{step_idx+1}_{word}
-        step_dir = os.path.join(output_dir, f"step_{step_idx}_{safe_word}")
+        # 创建文件夹名：包含多个步骤的标签
+        # 例如：step_7_8_9_airplane（如果word在步骤7,8,9出现）
+        if len(word_steps) == 1:
+            step_label = f"step_{word_steps[0]}"
+        else:
+            step_label = f"step_{'_'.join(map(str, word_steps))}"
+
+        step_dir = os.path.join(output_dir, f"{step_label}_{safe_word}")
         os.makedirs(step_dir, exist_ok=True)
 
-        print(f"\n  [步骤 {step_idx}] 目标词汇: {', '.join(target_words)}")
+        print(f"\n  [词汇 '{word}'] 步骤: {word_steps}, Token组: {token_groups}")
         print(f"    输出目录: {os.path.basename(step_dir)}")
 
-        step_attentions = all_attentions[step_idx-1]
+        # 对于多token的word，需要叠加多个步骤的attention
+        # 收集所有相关步骤的attention maps
+        all_step_attention_maps = {}  # {layer_idx: [attention_map1, attention_map2, ...]}
+        all_step_predicted_tokens = {}  # {layer_idx: [token1, token2, ...]}
+        all_step_debug_info = {}  # {layer_idx: [debug_info1, debug_info2, ...]}
 
-        # 获取该步骤的hidden states（如果可用）
-        step_hidden_states = None
-        if all_hidden_states is not None and step_idx < len(all_hidden_states):
-            step_hidden_states = all_hidden_states[step_idx-1]
-
-        # 处理每一层的attention（只处理选定的层）
-        for layer_idx, layer_attn in enumerate(step_attentions):
-            if layer_idx not in selected_layers:
+        # 遍历每个相关步骤
+        for step_idx in word_steps:
+            if step_idx >= len(all_attentions) or all_attentions[step_idx] is None:
                 continue
 
-            if layer_attn is None:
-                continue
+            step_attentions = all_attentions[step_idx-1]
 
-            # 获取该层预测的token（通过hidden states和lm_head）
-            predicted_token_word = None
-            if step_hidden_states is not None and hasattr(model, 'lm_head'):
-                # step_hidden_states可能是tuple或list，包含所有层的hidden states
-                if isinstance(step_hidden_states, (tuple, list)) and layer_idx < len(step_hidden_states):
-                    layer_hidden = step_hidden_states[layer_idx]
-                    # 处理不同的tensor形状
-                    if isinstance(layer_hidden, torch.Tensor):
-                        if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
-                            last_hidden = layer_hidden[0, -1, :]  # 取最后一个token的hidden state
-                        elif len(layer_hidden.shape) == 2:  # [seq_len, hidden_size]
-                            last_hidden = layer_hidden[-1, :]
-                        else:
-                            last_hidden = None
+            # 获取该步骤的hidden states（如果可用）
+            step_hidden_states = None
+            if all_hidden_states is not None and step_idx < len(all_hidden_states):
+                step_hidden_states = all_hidden_states[step_idx-1]
 
-                        if last_hidden is not None:
-                            with torch.no_grad():
-                                # 对hidden state应用RMSNorm（与最后一层相同的操作）
-                                if norm_layer is not None:
-                                    # norm_layer期望输入形状为 [batch, seq_len, hidden_size] 或 [seq_len, hidden_size]
-                                    # 我们需要添加batch维度：[hidden_size] -> [1, hidden_size]
-                                    last_hidden_normalized = norm_layer(last_hidden.unsqueeze(0).to(device))
-                                    # 移除batch维度：[1, hidden_size] -> [hidden_size]
-                                    last_hidden_normalized = last_hidden_normalized.squeeze(0)
-                                else:
-                                    # 如果没有norm层，直接使用原始hidden state
-                                    last_hidden_normalized = last_hidden.to(device)
+            # 处理每一层的attention（只处理选定的层）
+            for layer_idx, layer_attn in enumerate(step_attentions):
+                if layer_idx not in selected_layers:
+                    continue
 
-                                # 通过lm_head得到logits（与最后一层相同的操作）
-                                layer_logits = model.lm_head(last_hidden_normalized)
-                                predicted_token_id = layer_logits.argmax().item()
-                                predicted_token_word = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
+                if layer_attn is None:
+                    continue
 
-            # 处理attention tensor的形状
-            if isinstance(layer_attn, tuple):
-                layer_attn = layer_attn[0]
+                # 获取该层预测的token（通过hidden states和lm_head）
+                predicted_token_word = None
+                if step_hidden_states is not None and hasattr(model, 'lm_head'):
+                    # step_hidden_states可能是tuple或list，包含所有层的hidden states
+                    # 注意：step_hidden_states现在只包含32个transformer层（embedding层已在获取时被移除）
+                    # 所以layer_idx直接对应step_hidden_states的索引
+                    hidden_state_idx = layer_idx  # 直接使用layer_idx，因为embedding层已被移除
+                    if isinstance(step_hidden_states, (tuple, list)) and hidden_state_idx < len(step_hidden_states):
+                        layer_hidden = step_hidden_states[hidden_state_idx]
+                        # 处理不同的tensor形状
+                        if isinstance(layer_hidden, torch.Tensor):
+                            if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
+                                last_hidden = layer_hidden[0, -1, :]  # 取最后一个token的hidden state
+                            elif len(layer_hidden.shape) == 2:  # [seq_len, hidden_size]
+                                last_hidden = layer_hidden[-1, :]
+                            else:
+                                last_hidden = None
 
-            if not isinstance(layer_attn, torch.Tensor):
-                continue
+                            if last_hidden is not None:
+                                with torch.no_grad():
+                                    # 对hidden state应用RMSNorm（与最后一层相同的操作）
+                                    if norm_layer is not None:
+                                        # norm_layer期望输入形状为 [batch, seq_len, hidden_size] 或 [seq_len, hidden_size]
+                                        # 我们需要添加batch维度：[hidden_size] -> [1, hidden_size]
+                                        last_hidden_normalized = norm_layer(last_hidden.unsqueeze(0).to(device))
+                                        # 移除batch维度：[1, hidden_size] -> [hidden_size]
+                                        last_hidden_normalized = last_hidden_normalized.squeeze(0)
+                                    else:
+                                        # 如果没有norm层，直接使用原始hidden state
+                                        last_hidden_normalized = last_hidden.to(device)
 
-            layer_attn_tensor = layer_attn
-            layer_attn_np = layer_attn_tensor.cpu().numpy()
+                                    # 通过lm_head得到logits（与最后一层相同的操作）
+                                    layer_logits = model.lm_head(last_hidden_normalized)
+                                    predicted_token_id = layer_logits.argmax().item()
+                                    predicted_token_word = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
 
-            # 收集debug信息
-            # 从attention tensor的形状推断Q和K的size
-            q_size = None
-            k_size = None
-            if len(layer_attn_np.shape) >= 2:
-                # attention shape通常是 [..., query_len, key_len]
-                if len(layer_attn_np.shape) == 4:
-                    # [batch, num_heads, query_len, key_len]
-                    _, _, q_size, k_size = layer_attn_np.shape
-                elif len(layer_attn_np.shape) == 3:
-                    # [num_heads, query_len, key_len]
-                    _, q_size, k_size = layer_attn_np.shape
-                elif len(layer_attn_np.shape) == 2:
-                    # [query_len, key_len]
-                    q_size, k_size = layer_attn_np.shape
+                # 处理attention tensor的形状
+                if isinstance(layer_attn, tuple):
+                    layer_attn = layer_attn[0]
 
-            debug_info = {
-                "step_idx": step_idx,
-                "layer_idx": layer_idx,
-                "target_words": target_words,
-                "predicted_token_word": predicted_token_word,
-                "attention_tensor_shape": list(layer_attn_np.shape),
-                "attention_tensor_dtype": str(layer_attn_np.dtype),
-                "q_size": int(q_size) if q_size is not None else None,
-                "k_size": int(k_size) if k_size is not None else None,
-            }
+                if not isinstance(layer_attn, torch.Tensor):
+                    continue
+
+                layer_attn_tensor = layer_attn
+                layer_attn_np = layer_attn_tensor.cpu().numpy()
+
+                # 收集debug信息
+                # 从attention tensor的形状推断Q和K的size
+                q_size = None
+                k_size = None
+                if len(layer_attn_np.shape) >= 2:
+                    # attention shape通常是 [..., query_len, key_len]
+                    if len(layer_attn_np.shape) == 4:
+                        # [batch, num_heads, query_len, key_len]
+                        _, _, q_size, k_size = layer_attn_np.shape
+                    elif len(layer_attn_np.shape) == 3:
+                        # [num_heads, query_len, key_len]
+                        _, q_size, k_size = layer_attn_np.shape
+                    elif len(layer_attn_np.shape) == 2:
+                        # [query_len, key_len]
+                        q_size, k_size = layer_attn_np.shape
+
+                debug_info = {
+                    "step_idx": step_idx,
+                    "layer_idx": layer_idx,
+                    "target_word": word,
+                    "predicted_token_word": predicted_token_word,
+                    "attention_tensor_shape": list(layer_attn_np.shape),
+                    "attention_tensor_dtype": str(layer_attn_np.dtype),
+                    "q_size": int(q_size) if q_size is not None else None,
+                    "k_size": int(k_size) if k_size is not None else None,
+                }
 
             # 处理attention tensor的形状并收集debug信息
             if len(layer_attn_np.shape) == 4:
@@ -1313,71 +1391,205 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                 image_attention = image_attention[:576]
                 debug_info["truncation_applied"] = len(image_attention) - 576
 
-            # Reshape到24×24，保持原始logits值，不归一化
-            patch_size = 24
-            attention_map = image_attention.reshape(patch_size, patch_size)
+                # Reshape到24×24，保持原始logits值，不归一化
+                patch_size = 24
+                attention_map = image_attention.reshape(patch_size, patch_size)
 
-            debug_info["attention_map_24x24"] = {
-                "shape": list(attention_map.shape),
-                "min": float(attention_map.min()),
-                "max": float(attention_map.max()),
-                "mean": float(attention_map.mean()),
-                "std": float(attention_map.std()),
-                "values": attention_map.tolist()  # 保存24x24的具体数值
+                debug_info["attention_map_24x24"] = {
+                    "shape": list(attention_map.shape),
+                    "min": float(attention_map.min()),
+                    "max": float(attention_map.max()),
+                    "mean": float(attention_map.mean()),
+                    "std": float(attention_map.std()),
+                    "values": attention_map.tolist()  # 保存24x24的具体数值
+                }
+
+                # 收集该层的attention map和相关信息
+                if layer_idx not in all_step_attention_maps:
+                    all_step_attention_maps[layer_idx] = []
+                    all_step_predicted_tokens[layer_idx] = []
+                    all_step_debug_info[layer_idx] = []
+
+                all_step_attention_maps[layer_idx].append(attention_map)
+                all_step_predicted_tokens[layer_idx].append(predicted_token_word)
+                all_step_debug_info[layer_idx].append(debug_info)
+
+        # 对于每个层，叠加多个步骤的attention maps
+        for layer_idx in sorted(all_step_attention_maps.keys()):
+            if layer_idx not in selected_layers:
+                continue
+
+            attention_maps = all_step_attention_maps[layer_idx]
+            predicted_tokens = all_step_predicted_tokens[layer_idx]
+            debug_infos = all_step_debug_info[layer_idx]
+
+            if not attention_maps:
+                continue
+
+            # 叠加多个步骤的attention maps（求平均）
+            if len(attention_maps) == 1:
+                combined_attention_map = attention_maps[0]
+                combined_predicted_token = predicted_tokens[0] if predicted_tokens[0] else None
+            else:
+                # 多个步骤：叠加（求平均）
+                combined_attention_map = np.mean(attention_maps, axis=0)
+                # 组合多个步骤的predicted tokens
+                combined_predicted_token = '_'.join([t for t in predicted_tokens if t]) if any(predicted_tokens) else None
+
+            # 组合多个步骤的debug信息
+            combined_debug_info = {
+                "word": word,
+                "steps": word_steps,
+                "token_groups": token_groups,
+                "num_steps": len(attention_maps),
+                "layer_idx": layer_idx,
+                "combined_attention_stats": {
+                    "min": float(combined_attention_map.min()),
+                    "max": float(combined_attention_map.max()),
+                    "mean": float(combined_attention_map.mean()),
+                    "std": float(combined_attention_map.std())
+                },
+                "individual_steps": debug_infos
             }
 
             # 打印debug信息
-            print(f"\n    [Debug] Step {step_idx+1}, Layer {layer_idx}, Target: {', '.join(target_words)}")
-            print(f"      - Q size: {debug_info.get('q_size', 'N/A')}, K size: {debug_info.get('k_size', 'N/A')}")
-            print(f"      - Attention tensor原始shape: {debug_info['attention_tensor_shape']}")
-            print(f"      - Last row attention shape: {debug_info['last_row_attention_shape']}")
-            print(f"      - 图像token位置: {image_token_start} 到 {image_token_end_actual} (共{len(valid_image_positions)}个)")
-            print(f"      - 提取的图像attention shape: {list(image_attention.shape)}")
-            print(f"      - 最终24×24 attention map: min={debug_info['attention_map_24x24']['min']:.4e}, max={debug_info['attention_map_24x24']['max']:.4e}")
-            if predicted_token_word:
-                print(f"      - 该层预测的token: '{predicted_token_word}'")
+            print(f"\n    [Debug] 词汇 '{word}', Layer {layer_idx}, 步骤: {word_steps}")
+            print(f"      - 叠加的步骤数: {len(attention_maps)}")
+            print(f"      - 最终24×24 attention map: min={combined_debug_info['combined_attention_stats']['min']:.4e}, max={combined_debug_info['combined_attention_stats']['max']:.4e}")
+            if combined_predicted_token:
+                print(f"      - 组合的预测tokens: '{combined_predicted_token}'")
 
-            # 可视化attention map
+            # 可视化叠加后的attention map
             # 使用目标词汇作为token名称
-            token_text = ', '.join(target_words)
+            token_text = word
             token_name = safe_word
 
+            # 使用第一个步骤的索引作为step_idx（用于文件名）
+            step_idx_for_filename = word_steps[0]
+
             visualize_object_attention_map(
-                attention_map, image, layer_idx, step_idx, token_text, token_name,
-                patch_size, step_dir, predicted_token_word=predicted_token_word, debug_info=debug_info
+                combined_attention_map, image, layer_idx, step_idx_for_filename, token_text, token_name,
+                patch_size, step_dir, predicted_token_word=combined_predicted_token, debug_info=combined_debug_info
             )
 
-    # 处理完所有物体后，为每个生成步骤生成5×32 heatmap
+    # 处理完所有物体后，为每个目标词汇生成5×32 heatmap（支持多步骤叠加）
     if step_lm_head_outputs:
-        print(f"\n  [生成5×32 Heatmap] 为 {len(step_lm_head_outputs)} 个生成步骤生成heatmap...")
+        print(f"\n  [生成5×32 Heatmap] 为目标词汇生成heatmap...")
 
-        # 为每个步骤生成heatmap和保存JSON
-        for step_idx, layer_outputs in step_lm_head_outputs.items():
-            if not layer_outputs:
+        # 为每个目标词汇生成heatmap（可能包含多个步骤）
+        for word, word_info in step_target_words.items():
+            word_steps = word_info['steps']
+            if not word_steps:
                 continue
 
-            # 创建该步骤的输出目录
-            step_output_dir = os.path.join(output_dir, f"step_{step_idx}")
+            # 收集该词汇所有相关步骤的layer_outputs
+            word_layer_outputs = {}  # {layer_idx: [top_p_info1, top_p_info2, ...]}
+
+            for step_idx in word_steps:
+                if step_idx not in step_lm_head_outputs:
+                    continue
+
+                layer_outputs = step_lm_head_outputs[step_idx]
+                if not layer_outputs:
+                    continue
+
+                # 收集每个层的输出
+                for layer_idx, top_p_info in layer_outputs.items():
+                    if layer_idx not in word_layer_outputs:
+                        word_layer_outputs[layer_idx] = []
+                    word_layer_outputs[layer_idx].append(top_p_info)
+
+            if not word_layer_outputs:
+                continue
+
+            # 对于每个层，叠加多个步骤的结果（求平均概率）
+            combined_layer_outputs = {}
+            for layer_idx, top_p_info_list in word_layer_outputs.items():
+                if not top_p_info_list:
+                    continue
+
+                # 如果只有一个步骤，直接使用
+                if len(top_p_info_list) == 1:
+                    combined_layer_outputs[layer_idx] = top_p_info_list[0]
+                else:
+                    # 多个步骤：叠加top_5_tokens的概率（求平均）
+                    # 收集所有步骤的top_5_tokens
+                    all_top5_tokens = []
+                    for top_p_info in top_p_info_list:
+                        all_top5_tokens.extend(top_p_info.get('top_5_tokens', []))
+
+                    # 按token_id分组，求平均概率
+                    token_probs = {}  # {token_id: [prob1, prob2, ...]}
+                    token_texts = {}  # {token_id: token_text}
+                    token_logits = {}  # {token_id: [logit1, logit2, ...]}
+
+                    for token_info in all_top5_tokens:
+                        token_id = token_info['token_id']
+                        if token_id not in token_probs:
+                            token_probs[token_id] = []
+                            token_texts[token_id] = token_info['token_text']
+                            token_logits[token_id] = []
+                        token_probs[token_id].append(token_info['probability'])
+                        token_logits[token_id].append(token_info['logit'])
+
+                    # 计算平均概率和平均logit，取top 5
+                    avg_token_info = []
+                    for token_id, probs in token_probs.items():
+                        avg_prob = np.mean(probs)
+                        avg_logit = np.mean(token_logits[token_id])
+                        avg_token_info.append({
+                            'token_id': token_id,
+                            'token_text': token_texts[token_id],
+                            'probability': float(avg_prob),
+                            'logit': float(avg_logit)
+                        })
+
+                    # 按概率排序，取top 5
+                    avg_token_info.sort(key=lambda x: x['probability'], reverse=True)
+                    top_5_tokens = avg_token_info[:5]
+
+                    # 使用第一个步骤的max_logit_token作为参考
+                    max_logit_token = top_p_info_list[0].get('max_logit_token', {})
+
+                    combined_layer_outputs[layer_idx] = {
+                        'max_logit_token': max_logit_token,
+                        'top_5_tokens': top_5_tokens,
+                        'top_p_threshold': top_p_info_list[0].get('top_p_threshold', 0.9),
+                        'total_top_p_tokens': len(avg_token_info)
+                    }
+
+            if not combined_layer_outputs:
+                continue
+
+            safe_word = word.replace(' ', '_').replace('/', '_').replace('\\', '_')
+
+            # 创建输出目录（包含多个步骤的标签）
+            if len(word_steps) == 1:
+                step_label = f"step_{word_steps[0]}"
+            else:
+                step_label = f"step_{'_'.join(map(str, word_steps))}"
+
+            step_output_dir = os.path.join(output_dir, f"{step_label}_{safe_word}")
             os.makedirs(step_output_dir, exist_ok=True)
 
-            # 生成5×32 heatmap
+            # 生成5×32 heatmap（使用叠加后的结果）
             visualize_top5_logits_heatmap(
-                layer_outputs, step_output_dir, step_idx, num_total_layers
+                combined_layer_outputs, step_output_dir, word_steps[0], num_total_layers
             )
 
             # 保存词汇语义信息到JSON文件
             # 转换为可序列化格式
             lm_head_data = {}
-            for layer_key, top_p_info in layer_outputs.items():
+            for layer_key, top_p_info in combined_layer_outputs.items():
                 # 创建top_p_info的副本，但不包含top_p_tokens字段
                 top_p_info_filtered = {k: v for k, v in top_p_info.items() if k != 'top_p_tokens'}
                 lm_head_data[str(layer_key)] = top_p_info_filtered
 
-            # 保存JSON文件
-            json_file = os.path.join(step_output_dir, f"step_{step_idx}_top5_tokens.json")
+            # 保存JSON文件（包含多个步骤的标签）
+            json_file = os.path.join(step_output_dir, f"{step_label}_top5_tokens.json")
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(lm_head_data, f, ensure_ascii=False, indent=2)
-            print(f"  ✓ 步骤 {step_idx} 的词汇语义信息已保存: {os.path.basename(json_file)}")
+            print(f"  ✓ 词汇 '{word}' (步骤 {word_steps}) 的词汇语义信息已保存: {os.path.basename(json_file)}")
 
 
 def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
@@ -2097,7 +2309,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default= None,  # 13348,  # 6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default= 13348,  # 13348,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
