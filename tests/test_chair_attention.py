@@ -2081,7 +2081,7 @@ def main():
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
-        "num_samples": 10,  # 默认只处理1个图像（用于测试 attention map）
+        "num_samples": 500,  # 默认只处理1个图像（用于测试 attention map）
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
         "target_layers": [15, 17, 23, 29, 31]  # 默认只处理偶数层（减少输出）
@@ -2097,7 +2097,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default=13348,  # 6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default= None,  # 13348,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
