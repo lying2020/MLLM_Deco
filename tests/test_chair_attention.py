@@ -32,7 +32,8 @@ import warnings
 # 抑制常见的无害警告
 warnings.filterwarnings('ignore', message='.*You are using a model of type llava to instantiate a model of type llava_llama.*')
 warnings.filterwarnings('ignore', category=FutureWarning, module='huggingface_hub')
-
+# 忽略字体警告
+warnings.filterwarnings('ignore', category=UserWarning, message='Glyph.*missing from font')
 # 添加项目路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir) if os.path.basename(current_dir) != 'MLLM_Deco' else current_dir
@@ -580,10 +581,10 @@ def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
 
 
 def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, num_layers=32):
-    """生成5×32的heatmap，显示每层前5个最高logits的token
+    """生成5×32的heatmap，显示每层前5个最高概率的token
 
-    使用绿色渐变colormap，并对logits取对数以增强对比度
-    像素点之间有间隔，并在每个像素点上标注词汇
+    使用绿色渐变colormap显示概率值
+    像素点之间有间隔，并在每个像素点上标注词汇（旋转45度）
 
     Args:
         layer_lm_head_outputs: 字典，包含每层的lm_head输出信息
@@ -591,10 +592,11 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
         step_idx: 生成步骤索引
         num_layers: 总层数（默认32）
     """
-    # 收集所有层的前5个tokens
-    # 创建一个5×32的矩阵，存储logits值
-    logits_matrix = np.full((5, num_layers), np.nan)  # 使用NaN表示无效值
-    token_texts_matrix = [[''] * num_layers for _ in range(5)]  # 存储token文本
+    # 收集所有层的前top_tokens_num个tokens
+    top_tokens_num = 5
+    # 创建一个5×32的矩阵，存储softmax后的概率值
+    probability_matrix = np.full((top_tokens_num, num_layers), np.nan)  # 使用NaN表示无效值
+    token_texts_matrix = [[''] * num_layers for _ in range(top_tokens_num)]  # 存储token文本
 
     # 遍历所有层
     for layer_key, top_p_info in layer_lm_head_outputs.items():
@@ -602,63 +604,59 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
         if layer_key == 'final_layer':
             continue
 
-        layer_idx = int(layer_key) if isinstance(layer_key, str) and layer_key.isdigit() else None
-        if layer_idx is None or layer_idx >= num_layers:
+        layer_idx = int(layer_key)
+        if layer_idx >= num_layers:
             continue
 
-        # 获取前5个tokens
+        # 获取前top_tokens_num个tokens
         top_5_tokens = top_p_info.get('top_5_tokens', [])
         rank = 0
         for token_info in top_5_tokens:
-            if rank < 5:  # 最多5个
-                logits_matrix[rank, layer_idx] = token_info['logit']
+            if rank < top_tokens_num:  # 最多top_tokens_num个
+                probability_matrix[rank, layer_idx] = token_info['probability']
                 token_texts_matrix[rank][layer_idx] = token_info['token_text']
                 rank += 1
             else:
                 break
 
-    # 对logits取对数以增强对比度
     # 只处理非NaN的值
-    valid_logits = logits_matrix[~np.isnan(logits_matrix)]
-    if len(valid_logits) == 0:
-        print(f"  ⚠️  步骤 {step_idx+1}: 没有有效的logits，跳过heatmap生成")
+    valid_probabilities = probability_matrix[~np.isnan(probability_matrix)]
+    if len(valid_probabilities) == 0:
+        print(f"  ⚠️  步骤 {step_idx+1}: 没有有效的概率值，跳过heatmap生成")
         return
 
-    logits_min = valid_logits.min()
-    if logits_min < 0:
-        # 如果有负数，先shift到正数
-        logits_shifted = logits_matrix - logits_min + 1
-    else:
-        logits_shifted = logits_matrix + 1
+    # 计算figsize，使得每个像素点的高宽相等
+    # 5行32列，所以高度应该是宽度的 5/32
+    # 设置一个合适的宽度，然后根据比例计算高度
+    base_width = 20
+    base_height = base_width * (top_tokens_num / num_layers)
+    fig, ax = plt.subplots(figsize=(base_width, base_height))
 
-    # 取对数，NaN值保持为NaN
-    logits_log = np.full_like(logits_shifted, np.nan)
-    valid_mask = ~np.isnan(logits_shifted)
-    logits_log[valid_mask] = np.log(logits_shifted[valid_mask])
-
-    # 创建heatmap，使用更大的figsize以容纳间隔和标注
-    fig, ax = plt.subplots(figsize=(20, 8))
+    # 设置aspect ratio，确保每个像素点的高宽相等
+    # 由于数据是 5行32列，我们需要让 x 和 y 的单位长度相等
+    ax.set_aspect('equal', adjustable='box')
 
     # 使用pcolormesh而不是imshow，这样可以控制像素块之间的间隔
     # 需要扩展矩阵以匹配pcolormesh的要求（需要多一行一列）
-    logits_log_extended = np.full((6, num_layers + 1), np.nan)
-    logits_log_extended[:5, :num_layers] = logits_log
+    probability_extended = np.full((top_tokens_num + 1, num_layers + 1), np.nan)
+    probability_extended[:top_tokens_num, :num_layers] = probability_matrix
 
     # 创建坐标网格（pcolormesh需要比数据多一个点的网格）
-    X = np.arange(num_layers + 1)
-    Y = np.arange(6)
+    # shading='flat' 要求 C 的维度是 (Y-1, X-1)，所以网格需要比数据多1个点
+    X = np.arange(num_layers + 2)  # 增加1个点
+    Y = np.arange(top_tokens_num + 2)  # 增加1个点
     X_grid, Y_grid = np.meshgrid(X, Y)
 
     # 绘制heatmap，使用绿色渐变colormap，设置edgecolors来创建间隔效果
-    im = ax.pcolormesh(X_grid, Y_grid, logits_log_extended, cmap='Greens',
+    im = ax.pcolormesh(X_grid, Y_grid, probability_extended, cmap='Greens',
                        edgecolors='white', linewidths=2.0,
-                       vmin=np.nanmin(logits_log), vmax=np.nanmax(logits_log),
+                       vmin=np.nanmin(probability_matrix), vmax=np.nanmax(probability_matrix),
                        shading='flat')
 
     # 设置坐标轴
     ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
     ax.set_ylabel('Top 5 Rank', fontsize=12, fontweight='bold')
-    ax.set_title(f'Top 5 Logits Heatmap (Log Scale) - Step {step_idx+1}\n(Color represents log(logit value))',
+    ax.set_title(f'Top 5 Probability Heatmap - Step {step_idx+1}\n(Color represents probability value)',
                  fontsize=14, fontweight='bold')
 
     # 设置x轴刻度（层索引）- 放在单元格中心
@@ -666,52 +664,49 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     ax.set_xticklabels([f'L{i}' for i in range(num_layers)], rotation=45, ha='right', fontsize=8)
 
     # 设置y轴刻度（排名）- 放在单元格中心
-    ax.set_yticks(np.arange(5) + 0.5)
-    ax.set_yticklabels([f'Rank {i+1}' for i in range(5)], fontsize=10)
+    ax.set_yticks(np.arange(top_tokens_num) + 0.5)
+    ax.set_yticklabels([f'Rank {i+1}' for i in range(top_tokens_num)], fontsize=10)
 
-    # 在每个像素块中心标注token文本（词汇）
-    for rank in range(5):
+    # 在每个像素块中心标注token文本（词汇），旋转45度
+    for rank in range(top_tokens_num):
         for layer_idx in range(num_layers):
             token_text = token_texts_matrix[rank][layer_idx]
-            logit_value = logits_matrix[rank, layer_idx]
+            prob_value = probability_matrix[rank, layer_idx]
 
             # 只标注有效的token
-            if token_text and not np.isnan(logit_value):
+            if token_text and not np.isnan(prob_value):
                 # 清理token文本，移除换行符和特殊字符，限制长度
                 clean_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
                 # 限制长度，避免文本过长
                 if len(clean_text) > 12:
                     clean_text = clean_text[:12] + '...'
 
-                # 根据logits值选择文本颜色（深色或浅色）
-                logit_log_value = logits_log[rank, layer_idx]
-                if not np.isnan(logit_log_value):
-                    max_logit = np.nanmax(logits_log)
-                    min_logit = np.nanmin(logits_log)
-                    if max_logit > min_logit:
-                        normalized = (logit_log_value - min_logit) / (max_logit - min_logit)
-                        text_color = 'white' if normalized > 0.5 else 'black'
-                    else:
-                        text_color = 'black'
+                # 根据概率值选择文本颜色（深色或浅色）
+                max_prob = np.nanmax(probability_matrix)
+                min_prob = np.nanmin(probability_matrix)
+                if max_prob > min_prob:
+                    normalized = (prob_value - min_prob) / (max_prob - min_prob)
+                    text_color = 'white' if normalized > 0.5 else 'black'
                 else:
                     text_color = 'black'
 
-                # 在单元格中心标注文本（词汇）
+                # 在单元格中心标注文本（词汇），旋转45度
                 # 使用半透明背景以提高可读性
                 ax.text(layer_idx + 0.5, rank + 0.5, clean_text,
                        ha='center', va='center',
                        fontsize=9, color=text_color, fontweight='bold',
+                       rotation=45,  # 旋转45度
                        bbox=dict(boxstyle='round,pad=0.3',
                                 facecolor='white' if text_color == 'black' else 'black',
                                 alpha=0.6, edgecolor='none'))
 
     # 添加colorbar
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('Log(Logit Value)', fontsize=10, fontweight='bold')
+    cbar.set_label('Probability', fontsize=10, fontweight='bold')
 
     # 设置坐标轴范围，确保显示所有单元格
     ax.set_xlim(0, num_layers)
-    ax.set_ylim(0, 5)
+    ax.set_ylim(0, top_tokens_num)
 
     plt.tight_layout()
 
@@ -721,13 +716,12 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     plt.close()
 
     # 统计信息
-    valid_count = np.sum(~np.isnan(logits_matrix))
-    total_count = 5 * num_layers
-    print(f"  ✓ 步骤 {step_idx+1} 的Top 5 Logits Heatmap已保存: {os.path.basename(heatmap_file)}")
+    valid_count = np.sum(~np.isnan(probability_matrix))
+    total_count = top_tokens_num * num_layers
+    print(f"  ✓ 步骤 {step_idx+1} 的Top 5 Probability Heatmap已保存: {os.path.basename(heatmap_file)}")
     print(f"    有效token数量: {valid_count}/{total_count}")
-    if len(valid_logits) > 0:
-        print(f"    原始logits范围: [{valid_logits.min():.4f}, {valid_logits.max():.4f}]")
-        print(f"    对数logits范围: [{np.nanmin(logits_log):.4f}, {np.nanmax(logits_log):.4f}]")
+    if len(valid_probabilities) > 0:
+        print(f"    概率值范围: [{valid_probabilities.min():.4f}, {valid_probabilities.max():.4f}]")
 
 
 def enhance_attention_map(attention_map, method='min_max_normalize'):
@@ -1046,8 +1040,14 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                 print(f"    - 当前step_idx: {step_idx}, 对应token位置: {step_idx}")
 
             # 提取所有层的logits
+            # 注意：step_hidden_states 包含 33 个元素：
+            #   - 索引 0: embedding 层的输出（不是 transformer 层）
+            #   - 索引 1-32: 32 个 transformer 层的输出
+            # 我们只处理 transformer 层（索引 1-32），跳过 embedding 层（索引 0）
+            # 保存时使用 transformer 层的索引（0-31），对应第1-32个transformer层
             if isinstance(step_hidden_states, (tuple, list)):
-                for layer_idx_all in range(len(step_hidden_states)):
+                # 跳过 embedding 层（索引 0），从索引 1 开始处理 transformer 层
+                for layer_idx_all in range(1, len(step_hidden_states)):
                     layer_hidden = step_hidden_states[layer_idx_all]
                     if isinstance(layer_hidden, torch.Tensor):
                         if len(layer_hidden.shape) == 3:  # [batch, seq_len, hidden_size]
@@ -1073,8 +1073,14 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                                 # 通过lm_head得到logits（与最后一层相同的操作）
                                 layer_logits = model.lm_head(last_hidden_normalized)
 
-                                # Debug: 特别检查第32层（索引31）
-                                if layer_idx_all == len(step_hidden_states) - 1:  # 最后一层（第32层）
+                                # 将 layer_idx_all (1-32) 映射为 transformer 层索引 (0-31)
+                                # layer_idx_all=1 -> transformer_layer_idx=0 (第1个transformer层)
+                                # layer_idx_all=32 -> transformer_layer_idx=31 (第32个transformer层)
+                                transformer_layer_idx = layer_idx_all - 1
+
+                                # Debug: 特别检查第32层（最后一个transformer层）
+                                # layer_idx_all=32 对应 transformer_layer_idx=31（第32个transformer层）
+                                if layer_idx_all == len(step_hidden_states) - 1:  # 最后一个transformer层（第32层）
                                     predicted_token_id = layer_logits.argmax().item()
                                     predicted_token_text = tokenizer.decode([predicted_token_id], skip_special_tokens=True)
 
@@ -1105,7 +1111,8 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                                         print(f"    - 或者: hidden state的索引对应关系可能有问题")
 
                                 top_p_info = extract_top_p_tokens(layer_logits, tokenizer, threshold_top_p=0.9)
-                                step_lm_head_outputs[step_idx][layer_idx_all] = top_p_info
+                                # 使用 transformer 层索引 (0-31) 作为键，对应第1-32个transformer层
+                                step_lm_head_outputs[step_idx][transformer_layer_idx] = top_p_info
 
         print(f"  ✓ 已为 {len(step_lm_head_outputs)} 个目标 token 位置提取logits信息")
 
@@ -1360,7 +1367,7 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
                 continue
 
             # 创建该步骤的输出目录
-            step_output_dir = os.path.join(output_dir, f"step_{step_idx+1}")
+            step_output_dir = os.path.join(output_dir, f"step_{step_idx}")
             os.makedirs(step_output_dir, exist_ok=True)
 
             # 生成5×32 heatmap
@@ -1372,13 +1379,15 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
             # 转换为可序列化格式
             lm_head_data = {}
             for layer_key, top_p_info in layer_outputs.items():
-                lm_head_data[str(layer_key)] = top_p_info
+                # 创建top_p_info的副本，但不包含top_p_tokens字段
+                top_p_info_filtered = {k: v for k, v in top_p_info.items() if k != 'top_p_tokens'}
+                lm_head_data[str(layer_key)] = top_p_info_filtered
 
             # 保存JSON文件
-            json_file = os.path.join(step_output_dir, f"step_{step_idx+1}_top5_tokens.json")
+            json_file = os.path.join(step_output_dir, f"step_{step_idx}_top5_tokens.json")
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(lm_head_data, f, ensure_ascii=False, indent=2)
-            print(f"  ✓ 步骤 {step_idx+1} 的词汇语义信息已保存: {os.path.basename(json_file)}")
+            print(f"  ✓ 步骤 {step_idx} 的词汇语义信息已保存: {os.path.basename(json_file)}")
 
 
 def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
@@ -2082,7 +2091,7 @@ def main():
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
-        "num_samples": 100,  # 默认只处理1个图像（用于测试 attention map）
+        "num_samples": 10,  # 默认只处理1个图像（用于测试 attention map）
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
         "target_layers": [15, 23, 31]  # 默认只处理偶数层（减少输出）

@@ -5,7 +5,7 @@ __pycache__
 pope_visualized/
 # C extensions
 *.so
-
+log*.txt
 .github/
 # Distribution folders for models
 Qwen2.5-VL-7B-Instruct/
