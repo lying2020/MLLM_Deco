@@ -262,7 +262,7 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
             - token_texts: 对应的token文本列表
     """
     # 使用字典结构，以 node_word 作为 key，避免重复
-    # object_tokens_info: {node_word: {object_word, token_positions, token_texts, matched_tokens_detail}}
+    # object_tokens_info: {object_word: {object_word, token_positions, token_texts, matched_tokens_detail}}
     object_tokens_info = {}
 
     if not caption or not caption.strip():
@@ -274,43 +274,11 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
 
     # 如果没有提供chair_evaluator，使用简单的NLTK方法识别名词
     if chair_evaluator is None:
-        import nltk
-        from nltk.stem import WordNetLemmatizer
-        from nltk.corpus import wordnet
+        raise ValueError("chair_evaluator is required")
 
-        # 确保NLTK数据已下载
-        try:
-            nltk.data.find('tokenizers/punkt_tab')
-        except LookupError:
-            try:
-                nltk.data.find('tokenizers/punkt')
-            except LookupError:
-                nltk.download('punkt', quiet=True)
-
-        try:
-            nltk.data.find('taggers/averaged_perceptron_tagger')
-        except LookupError:
-            nltk.download('averaged_perceptron_tagger', quiet=True)
-
-        try:
-            nltk.data.find('corpora/wordnet')
-        except LookupError:
-            nltk.download('wordnet', quiet=True)
-
-        # 使用NLTK识别名词
-        words = nltk.word_tokenize(caption.lower())
-        tagged_sent = nltk.pos_tag(words)
-        wnl = WordNetLemmatizer()
-
-        nouns = []
-        for word, pos in tagged_sent:
-            if pos.startswith('NN'):  # 名词
-                lemma = wnl.lemmatize(word, pos=wordnet.NOUN)
-                nouns.append((word, lemma))
-    else:
-        # 使用CHAIR的方法识别物体
-        words, node_words, idxs, double_words = chair_evaluator.caption_to_words(caption)
-        nouns = [(w, nw) for w, nw in zip(words, node_words)]
+    # 使用CHAIR的方法识别物体
+    words, node_words, idxs, double_words = chair_evaluator.caption_to_words(caption)
+    nouns = [(w, nw) for w, nw in zip(words, node_words)]
 
     if not nouns:
         # 即使没有找到物体，也返回token详细信息
@@ -381,43 +349,61 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
         token_positions = []
         token_texts = []
 
-        # 方法：精确匹配，只匹配真正组成目标词汇的token
+        # 方法：精确匹配，只匹配真正组成目标词汇的token （如 "the"）
         # 1. 首先检查单个token是否精确等于目标词汇（去除前后空格）
+        # 2. 如果单个token匹配失败，使用滑动窗口匹配多个token的组合（处理被分解的单词, 如 "chair" → "ch" + "air"）
+        # 3. 对于多词短语，也使用滑动窗口匹配（如 "traffic light"）
         search_words = [word_lower, node_word_lower] if word_lower != node_word_lower else [word_lower]
 
         for search_word in search_words:
             if not search_word:
                 continue
 
-            # 检查单个token精确匹配
+            # 1. 检查单个token精确匹配（快速路径）
+            single_token_matched = False
             for token_idx, token_id in enumerate(generated_ids):
                 token_text = tokenizer.decode([token_id], skip_special_tokens=False).strip().lower()
                 if token_text == search_word:
                     if token_idx not in token_positions:
                         token_positions.append(token_idx)
                         token_texts.append(tokenizer.decode([token_id], skip_special_tokens=False))
+                    single_token_matched = True
 
-            # 2. 如果目标词汇是多词（如 "traffic light"），使用滑动窗口匹配
-            if ' ' in search_word:
-                words_in_phrase = search_word.split()
-                max_window_size = min(len(words_in_phrase) + 2, len(generated_ids))  # 允许一些容差
+            # 2. 如果单个token匹配失败，或者目标词汇是多词（如 "traffic light"），使用滑动窗口匹配
+            # 对于单个单词，也尝试多token组合匹配（处理被tokenizer分解的情况）
+            if not single_token_matched or ' ' in search_word:
+                import re
 
-                for window_size in range(len(words_in_phrase), max_window_size + 1):
+                # 确定滑动窗口的最大大小
+                # 对于单个单词，尝试2-5个token的组合（通常一个单词最多被分解成2-3个token）
+                # 对于多词短语，使用词数+2作为最大窗口
+                if ' ' in search_word:
+                    words_in_phrase = search_word.split()
+                    max_window_size = min(len(words_in_phrase) + 2, len(generated_ids))
+                    min_window_size = len(words_in_phrase)
+                else:
+                    # 单个单词：尝试1-5个token的组合（1已经在上面检查过了，这里从2开始）
+                    max_window_size = min(5, len(generated_ids))
+                    min_window_size = 2
+
+                # 使用滑动窗口匹配
+                for window_size in range(min_window_size, max_window_size + 1):
                     for start_idx in range(len(generated_ids) - window_size + 1):
                         # 获取窗口内的token序列
                         window_tokens = generated_ids[start_idx:start_idx + window_size]
                         window_text = tokenizer.decode(window_tokens, skip_special_tokens=False).strip().lower()
 
-                        # 检查窗口文本是否包含完整的目标短语（作为完整词）
-                        import re
+                        # 检查窗口文本是否包含完整的目标词汇（作为完整词）
+                        # 使用单词边界确保精确匹配
                         pattern = r'\b' + re.escape(search_word) + r'\b'
-                        if re.search(pattern, window_text):
-                            # 找到目标短语在窗口文本中的位置
-                            match = re.search(pattern, window_text)
+                        match = re.search(pattern, window_text)
+
+                        if match:
+                            # 找到目标词汇在窗口文本中的位置
                             phrase_start = match.start()
                             phrase_end = match.end()
 
-                            # 通过累积字符位置找到包含目标短语的token
+                            # 通过累积字符位置找到包含目标词汇的token
                             char_pos = 0
                             matched_tokens = []
                             for i in range(window_size):
@@ -425,13 +411,13 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
                                 token_start = char_pos
                                 token_end = char_pos + len(token_text)
 
-                                # 检查token是否与目标短语的字符范围有重叠
+                                # 检查token是否与目标词汇的字符范围有重叠
                                 if token_start < phrase_end and token_end > phrase_start:
                                     matched_tokens.append(start_idx + i)
 
                                 char_pos = token_end
 
-                                # 如果已经超过目标短语的结束位置，可以停止
+                                # 如果已经超过目标词汇的结束位置，可以停止
                                 if char_pos > phrase_end:
                                     break
 
@@ -441,8 +427,9 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
                                     token_positions.append(token_idx)
                                     token_texts.append(tokenizer.decode([generated_ids[token_idx]], skip_special_tokens=False))
 
-                            # 找到一次匹配后，继续查找下一次出现
-                            break
+                            # 找到一次匹配后，继续查找下一次出现（不break，允许同一词汇多次出现）
+                            # 但为了避免重复匹配相同的token组合，可以记录已匹配的窗口起始位置
+                            # 这里简化处理：找到匹配后继续查找，但通过token_positions去重
 
         if token_positions:
             # 获取匹配的token的详细信息
@@ -452,16 +439,16 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
                 if 0 <= token_idx < len(all_tokens_detail):
                     matched_tokens_detail.append(all_tokens_detail[token_idx])
 
-            # 如果该 node_word 已存在，合并 token_positions
-            if node_word in object_tokens_info:
+            # 如果该 word 已存在，合并 token_positions
+            if word in object_tokens_info:
                 # 合并 token_positions（去重并排序）
-                existing_positions = set(object_tokens_info[node_word]['token_positions'])
+                existing_positions = set(object_tokens_info[word]['token_positions'])
                 new_positions = set(token_positions)
                 merged_positions = sorted(list(existing_positions | new_positions))
 
                 # 合并 token_texts 和 matched_tokens_detail
-                existing_texts = object_tokens_info[node_word]['token_texts']
-                existing_details = object_tokens_info[node_word]['matched_tokens_detail']
+                existing_texts = object_tokens_info[word]['token_texts']
+                existing_details = object_tokens_info[word]['matched_tokens_detail']
 
                 # 添加新的 token_texts（去重）
                 for token_text in token_texts:
@@ -476,12 +463,12 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
                         existing_detail_positions.add(detail['absolute_position'])
 
                 # 更新信息
-                object_tokens_info[node_word]['token_positions'] = merged_positions
-                object_tokens_info[node_word]['token_texts'] = existing_texts
-                object_tokens_info[node_word]['matched_tokens_detail'] = existing_details
+                object_tokens_info[word]['token_positions'] = merged_positions
+                object_tokens_info[word]['token_texts'] = existing_texts
+                object_tokens_info[word]['matched_tokens_detail'] = existing_details
             else:
                 # 首次出现，创建新条目
-                object_tokens_info[node_word] = {
+                object_tokens_info[word] = {
                     'object_word': word,
                     'node_word': node_word,
                     'token_positions': token_positions,
@@ -995,13 +982,16 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     # 收集所有目标 token 位置（来自 object_tokens_info）
     # 只取每个物体的第一次出现的位置（第一个 token 位置）
     target_token_positions = set()
-    for node_word, obj_info in object_tokens_info.items():
+    for object_word, obj_info in object_tokens_info.items():
         token_positions = obj_info.get('token_positions', [])
         if not token_positions:
             continue
 
         # 只取第一次出现的位置（第一个 token 位置）
         target_token_positions.add(token_positions[0])
+        if len(token_positions) > 1:
+            target_token_positions.add(token_positions[-1])
+            print(f"  ⚠️  物体 {object_word} 在 {token_positions} 位置出现多次，取第一次和最后一次的位置")
 
     # 只为 object_tokens_info 中的关键词对应的 token 位置提取 logits 信息
     if all_hidden_states is not None and hasattr(model, 'lm_head') and target_token_positions:
@@ -1892,9 +1882,9 @@ def eval_model(args):
                 print(f"     - 找到的物体数: {len(object_tokens_info)}")
 
             if object_tokens_info:
-                print(f"\n  [物体识别] 找到 {len(object_tokens_info)} 个不同的物体:")
-                # object_tokens_info 现在是字典，以 node_word 为 key
-                for node_word, obj_info in object_tokens_info.items():
+                print(f"\n  [物体识别] 找到 {len(object_tokens_info)} 个不同物体名字的词汇(可能是同一个物体不同的描述方式):")
+                # object_tokens_info 现在是字典，以 object_word 为 key
+                for object_word, obj_info in object_tokens_info.items():
                     print(f"    - {obj_info['object_word']} (规范化: {obj_info['node_word']})")
                     print(f"      Token位置: {obj_info['token_positions']} (共 {len(obj_info['token_positions'])} 个位置)")
                     print(f"      匹配的Token数量: {len(obj_info.get('matched_tokens_detail', []))}")
@@ -2094,7 +2084,7 @@ def main():
         "num_samples": 10,  # 默认只处理1个图像（用于测试 attention map）
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
-        "target_layers": [15, 23, 31]  # 默认只处理偶数层（减少输出）
+        "target_layers": [15, 17, 23, 29, 31]  # 默认只处理偶数层（减少输出）
     }
 
     # 解析参数(所有参数都有默认值)
@@ -2107,7 +2097,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default=None,  # 6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default=13348,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
