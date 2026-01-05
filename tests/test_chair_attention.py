@@ -899,20 +899,21 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     plt.close()
     print(f"    ✓ 图3 (Attention Map) 已保存: {os.path.basename(output_file_3)}")
 
-    # 单独保存图3的colorbar
-    fig_cbar3 = plt.figure(figsize=(1, 6))
-    ax_cbar3 = plt.subplot(1, 1, 1)
-    ax_cbar3.axis('off')
-    # 创建colorbar
-    sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
-    sm3.set_array([])
-    cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
-    cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
-    filename_parts_cbar3 = filename_base + ["attention_map_colorbar.png"]
-    output_file_cbar3 = os.path.join(output_dir, "_".join(filename_parts_cbar3))
-    plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
-    plt.close()
-    print(f"    ✓ 图3 Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
+    # 单独保存图3的colorbar（不使用前缀，因为不同层的colorbar都一样）
+    output_file_cbar3 = os.path.join(output_dir, "attention_map_colorbar.png")
+    # 检查是否已经保存过colorbar，避免重复保存
+    if not os.path.exists(output_file_cbar3):
+        fig_cbar3 = plt.figure(figsize=(1, 6))
+        ax_cbar3 = plt.subplot(1, 1, 1)
+        ax_cbar3.axis('off')
+        # 创建colorbar
+        sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+        sm3.set_array([])
+        cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
+        cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
+        plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"    ✓ 图3 Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
 
     # 4. 单独保存增强后的attention map和原图叠加（图4）
     fig4 = plt.figure(figsize=(8, 8))
@@ -927,8 +928,9 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
     ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=14, fontweight='bold')  # 12 * 1.2 = 14.4，约14
     ax4.axis('off')
-    # 保存图4（不使用前缀）
-    output_file_4 = os.path.join(output_dir, "attention_map_overlay.png")
+    # 保存图4（使用前缀）
+    filename_parts_4 = filename_base + ["attention_map_overlay.png"]
+    output_file_4 = os.path.join(output_dir, "_".join(filename_parts_4))
     plt.savefig(output_file_4, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"    ✓ 图4 (Attention Map Overlay) 已保存: {os.path.basename(output_file_4)}")
