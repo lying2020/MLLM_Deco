@@ -563,9 +563,13 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
 
 def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
     """从logits中提取top-p tokens，输出所有threshold内的logits、token和词汇
-
+        概率计算说明：
+        - 输入 logits: 经过 lm_head 后的原始分数（未归一化）
+        - 计算概率: probs = torch.softmax(logits, dim=-1)
+        - 返回的 'probability' 字段是经过 softmax 归一化后的概率值（范围 [0, 1]）
+        - 这个概率值用于 heatmap 的颜色深度显示
     Args:
-        logits: [vocab_size] 的logits tensor
+        logits: [vocab_size] 的logits tensor，来自 model.lm_head(hidden_state)
         tokenizer: tokenizer对象
         threshold_top_p: top-p阈值（默认0.9）
 
@@ -576,7 +580,7 @@ def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
     if not isinstance(logits, torch.Tensor):
         logits = torch.tensor(logits)
 
-    # 计算softmax概率
+    # 这是将 logits 转换为概率分布的关键步骤，公式：P(i) = exp(logits[i]) / sum(exp(logits[j])) for all j
     probs = torch.softmax(logits, dim=-1)
 
     # 按概率排序
@@ -614,19 +618,60 @@ def extract_top_p_tokens(logits, tokenizer, threshold_top_p=0.9):
         })
 
     # 获取前5个最高logits的tokens
+    # 注意：不同层可能预测相同的token_id，导致解码后的token_text重复，这是正常的模型行为
+    # 但是，同一层的top5中不应该有重复的token_text（虽然token_id不同）
+    # 如果遇到重复的token_text，跳过它，继续取下一个不同的token
     top_5_indices = torch.topk(logits, k=min(5, len(logits))).indices
     top_5_tokens = []
+    seen_texts = set()  # 用于跟踪已见过的token_text，避免同一层内重复
+
+    # 先尝试从top5中获取5个不同的token_text
     for idx in top_5_indices:
+        if len(top_5_tokens) >= 5:
+            break
         token_id = idx.item()
         token_text = tokenizer.decode([token_id])
+        # 清理token_text，用于比较（去除首尾空格）
+        clean_token_text = token_text.strip()
+
+        # 如果这个token_text已经见过，跳过
+        if clean_token_text in seen_texts:
+            continue
+
+        seen_texts.add(clean_token_text)
         logit_value = logits[token_id].item()
         prob_value = probs[token_id].item()
         top_5_tokens.append({
             'token_id': int(token_id),
-            'token_text': token_text,
+            'token_text': token_text,  # 保留原始token_text（可能包含空格）
             'logit': float(logit_value),
             'probability': float(prob_value)
         })
+
+    # 如果top5中还有重复，继续从剩余的tokens中取，直到有5个不同的token_text
+    if len(top_5_tokens) < 5:
+        # 获取所有tokens，按logits降序排序
+        all_indices = torch.argsort(logits, descending=True)
+        for idx in all_indices:
+            if len(top_5_tokens) >= 5:
+                break
+            token_id = idx.item()
+            token_text = tokenizer.decode([token_id])
+            clean_token_text = token_text.strip()
+
+            # 如果这个token_text已经见过，跳过
+            if clean_token_text in seen_texts:
+                continue
+
+            seen_texts.add(clean_token_text)
+            logit_value = logits[token_id].item()
+            prob_value = probs[token_id].item()
+            top_5_tokens.append({
+                'token_id': int(token_id),
+                'token_text': token_text,
+                'logit': float(logit_value),
+                'probability': float(prob_value)
+            })
 
     result = {
         'max_logit_token': {
@@ -649,7 +694,13 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
 
     使用绿色渐变colormap显示概率值
     像素点之间有间隔，并在每个像素点上标注词汇（旋转45度）
-
+    概率计算流程：
+    1. 从每一层的 hidden state 提取特征
+    2. 通过 norm_layer 进行归一化（如果存在）
+    3. 通过 model.lm_head 得到 logits（原始分数，未归一化）
+    4. 在 extract_top_p_tokens 函数中，对 logits 应用 softmax 得到概率：
+       probs = torch.softmax(logits, dim=-1)
+    5. 每个像素的颜色深度 = softmax(logits)[token_id]，即经过 lm_head 后再经过 softmax 的概率值
     Args:
         layer_lm_head_outputs: 字典，包含每层的lm_head输出信息
         output_dir: 输出目录
@@ -659,6 +710,7 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     # 收集所有层的前top_tokens_num个tokens
     top_tokens_num = 5
     # 创建一个5×32的矩阵，存储softmax后的概率值
+    # 注意：这里的概率值来自 extract_top_p_tokens 函数，是经过 lm_head 后再经过 softmax 的概率
     probability_matrix = np.full((top_tokens_num, num_layers), np.nan)  # 使用NaN表示无效值
     token_texts_matrix = [[''] * num_layers for _ in range(top_tokens_num)]  # 存储token文本
 
@@ -727,11 +779,11 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     num_ticks = 6
     tick_indices = np.linspace(0, num_layers - 1, num_ticks, dtype=int)
     ax.set_xticks(tick_indices + 0.5)
-    ax.set_xticklabels([f'L{i}' for i in tick_indices], rotation=45, ha='right', fontsize=8, fontweight='bold')
+    ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=8, fontweight='bold')
 
     # 设置y轴刻度（排名）- 放在单元格中心
     ax.set_yticks(np.arange(top_tokens_num) + 0.5)
-    ax.set_yticklabels([f'Rank {i+1}' for i in range(top_tokens_num)], fontsize=10)
+    ax.set_yticklabels([f'{i+1}' for i in range(top_tokens_num)], fontsize=10)
 
     # 在每个像素块中心标注token文本（词汇），旋转45度
     for rank in range(top_tokens_num):
@@ -1635,7 +1687,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                 if any(not np.isnan(p) for p in rank1_probs):
                     rank1_data.append((step_idx, rank1_probs))
                     rank1_texts.append(rank1_token_texts)
-                    token_labels.append(f"Token {step_idx}")
+                    token_labels.append(f"{step_idx}")
                     # 同时收集到all_rank1_data中，用于生成整合图
                     all_rank1_data.append((word, step_idx, rank1_probs, rank1_token_texts))
 
@@ -1685,7 +1737,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
 
             # 设置坐标轴
             ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Token', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Token Index', fontsize=12, fontweight='bold')
 
             # 标题：如果有多个group，在标题中标注group信息
             if group_idx is not None and len(groups_to_process) > 1:
@@ -1698,7 +1750,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             num_ticks = 6
             tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], rotation=45, ha='right', fontsize=8, fontweight='bold')
+            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=8, fontweight='bold')
 
             # 设置y轴刻度（token）
             ax.set_yticks(np.arange(num_tokens) + 0.5)
@@ -1818,7 +1870,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                shading='flat')
 
             # 设置坐标轴（增大到1.5倍）
-            # ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
+            ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
             # ax.set_ylabel('Token', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
             ax.set_title(f'Rank1 Probability Heatmap - All Words ({num_all_tokens} tokens)',
                          fontsize=14, fontweight='bold')
@@ -1827,7 +1879,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             num_ticks = 6
             tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], rotation=45, ha='right', fontsize=12, fontweight='bold')  # 8 * 1.5 = 12
+            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=12, fontweight='bold')  # 8 * 1.5 = 12
 
             # 设置y轴刻度（token）- 加粗并增大到1.5倍
             ax.set_yticks(np.arange(num_all_tokens) + 0.5)
@@ -2758,7 +2810,7 @@ def main():
         "model_path": project.llava_v15_7b_path,
         "device": device,
         "coco_root": project.coco_data_path,  # 需要根据实际情况修改
-        "image_id_list_file": "pope_coco/coco_baseline_500.json",
+        "image_id_list_file": "pope_coco/coco_baseline_bad.json",
         "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
