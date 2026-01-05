@@ -275,47 +275,9 @@ class HeatmapConcentrationAnalyzer:
 
         return result
 
-    def compare_multiple_heatmaps(self, heatmap_dict, visualize_all=False):
-        """
-        比较多个heatmap的集中度
-
-        参数:
-        - heatmap_dict: {名称: heatmap数据} 的字典
-        - visualize_all: 是否可视化所有heatmap
-
-        返回:
-        - DataFrame或字典列表，按集中度排序
-        """
-        results = []
-
-        for name, heatmap_data in heatmap_dict.items():
-            # 计算每个heatmap的集中度
-            result = self.calculate_concentration_index(heatmap_data, visualize=visualize_all)
-            result['name'] = name
-            results.append(result)
-
-        # 按集中度排序
-        sorted_results = sorted(results, key=lambda x: x['concentration_index'], reverse=True)
-
-        # 打印比较结果
-        print("=" * 80)
-        print("Heatmap Concentration Comparison")
-        print("=" * 80)
-        for i, res in enumerate(sorted_results):
-            print(f"{i+1}. {res['name']}:")
-            print(f"   Concentration Index: {res['concentration_index']:.3f}")
-            print(f"   High Pixels: {res['high_pixel_count']} ({self.top_percentile}% threshold)")
-            print(f"   Compactness: {res['compactness']:.3f}")
-            print(f"   Size Coefficient: {res['size_coefficient']:.3f}")
-            print(f"   Connectivity: {res['connectivity']:.3f}")
-            print(f"   Regions: {res['num_regions']}")
-            print()
-
-        return sorted_results
-
 
 # 使用示例函数
-def analyze_heatmap_concentration(heatmap_input, top_percentile=10, visualize=True):
+def analyze_heatmap_concentration(heatmap_input, top_percentile=5, visualize=False):
     """
     快速分析函数：一站式分析heatmap集中度
 
@@ -1585,21 +1547,21 @@ def _extract_layer_logits_for_tokens(model, tokenizer, output_ids, all_hidden_st
                                 if original_logit is not None:
                                     original_rank = torch.sum(layer_logits > original_logit).item() + 1
 
-                                print(f"\n  [Debug Layer 32] Step {step_idx+1}:")
-                                print(f"    - 原始输出 token_id: {original_token_id}")
-                                print(f"    - 原始输出 token_text: '{original_token_text}'")
-                                print(f"    - 第32层预测 token_id (argmax): {predicted_token_id}")
-                                print(f"    - 第32层预测 token_text (argmax): '{predicted_token_text}'")
-                                print(f"    - 是否一致: {original_token_id == predicted_token_id}")
-                                if original_token_id != predicted_token_id:
-                                    predicted_logit = layer_logits[predicted_token_id].item()
-                                    print(f"    - ⚠️  不一致！")
-                                    if original_logit is not None:
-                                        print(f"    - 原始token logit: {original_logit:.4f} (排名: {original_rank})")
-                                    print(f"    - 预测token logit: {predicted_logit:.4f} (排名: 1)")
-                                    print(f"    - Top-5 tokens: {list(zip(top5_tokens, [f'{logit:.4f}' for logit in top5_logits.tolist()]))}")
-                                    print(f"    - 可能原因: 使用了采样（temperature > 0），实际生成的token不是argmax")
-                                    print(f"    - 或者: hidden state的索引对应关系可能有问题")
+                                # print(f"\n  [Debug Layer 32] Step {step_idx+1}:")
+                                # print(f"    - 原始输出 token_id: {original_token_id}")
+                                # print(f"    - 原始输出 token_text: '{original_token_text}'")
+                                # print(f"    - 第32层预测 token_id (argmax): {predicted_token_id}")
+                                # print(f"    - 第32层预测 token_text (argmax): '{predicted_token_text}'")
+                                # print(f"    - 是否一致: {original_token_id == predicted_token_id}")
+                                # if original_token_id != predicted_token_id:
+                                #     predicted_logit = layer_logits[predicted_token_id].item()
+                                #     print(f"    - ⚠️  不一致！")
+                                #     if original_logit is not None:
+                                #         print(f"    - 原始token logit: {original_logit:.4f} (排名: {original_rank})")
+                                #     print(f"    - 预测token logit: {predicted_logit:.4f} (排名: 1)")
+                                #     print(f"    - Top-5 tokens: {list(zip(top5_tokens, [f'{logit:.4f}' for logit in top5_logits.tolist()]))}")
+                                #     print(f"    - 可能原因: 使用了采样（temperature > 0），实际生成的token不是argmax")
+                                #     print(f"    - 或者: hidden state的索引对应关系可能有问题")
 
                             top_p_info = extract_top_p_tokens(layer_logits, tokenizer, threshold_top_p=0.9)
                             step_lm_head_outputs[step_idx][transformer_layer_idx] = top_p_info
@@ -1698,7 +1660,7 @@ def _process_attention_tensor(layer_attn):
 def _extract_head_layer_attention_data(layer_attn, image_token_start, num_image_tokens, num_heads=32):
     """
     提取head-layer attention数据（32×32 heatmap）
-    不平均multi head，而是平均576个视觉token，得到每个head的平均attention值
+    不平均multi head，保留每个head的完整576个视觉token的attention值
 
     Args:
         layer_attn: attention tensor，形状可能是 [batch, num_heads, seq_len, seq_len] 或 [num_heads, seq_len, seq_len]
@@ -1707,7 +1669,7 @@ def _extract_head_layer_attention_data(layer_attn, image_token_start, num_image_
         num_heads: head的数量（默认32）
 
     Returns:
-        numpy array: 形状为 [num_heads] 的数组，每个元素是该head对576个视觉token的平均attention值
+        numpy array: 形状为 [num_heads, 576] 的数组，每个head保留完整的576个视觉token的attention值
     """
     if isinstance(layer_attn, tuple):
         layer_attn = layer_attn[0]
@@ -1781,21 +1743,27 @@ def _extract_head_layer_attention_data(layer_attn, image_token_start, num_image_
     if len(valid_image_positions) == 0:
         return None
 
-    # 对每个head，提取视觉token的attention并求平均
+    # 对每个head，提取视觉token的attention（保留完整的576个值，不平均）
     # last_row_attention: [num_heads, seq_len]
     # 提取视觉token部分: [num_heads, num_image_tokens]
     image_attention_per_head = last_row_attention[:, valid_image_positions]  # [num_heads, num_image_tokens]
 
-    # 对576个视觉token求平均，得到每个head的平均attention值
-    head_avg_attention = np.mean(image_attention_per_head, axis=1)  # [num_heads]
+    # 确保有576个值（如果不足，用0填充；如果超过，截断）
+    if image_attention_per_head.shape[1] < 576:
+        padding = np.zeros((image_attention_per_head.shape[0], 576 - image_attention_per_head.shape[1]))
+        image_attention_per_head = np.concatenate([image_attention_per_head, padding], axis=1)
+    elif image_attention_per_head.shape[1] > 576:
+        image_attention_per_head = image_attention_per_head[:, :576]
 
     # 确保有32个head（如果不足，用0填充；如果超过，截断）
-    if len(head_avg_attention) < num_heads:
-        head_avg_attention = np.pad(head_avg_attention, (0, num_heads - len(head_avg_attention)), mode='constant', constant_values=0)
-    elif len(head_avg_attention) > num_heads:
-        head_avg_attention = head_avg_attention[:num_heads]
+    if image_attention_per_head.shape[0] < num_heads:
+        padding = np.zeros((num_heads - image_attention_per_head.shape[0], 576))
+        image_attention_per_head = np.concatenate([image_attention_per_head, padding], axis=0)
+    elif image_attention_per_head.shape[0] > num_heads:
+        image_attention_per_head = image_attention_per_head[:num_heads, :]
 
-    return head_avg_attention
+    # 返回 [num_heads, 576] 形状的数组，每个head保留完整的576个值
+    return image_attention_per_head
 
 
 def _extract_image_attention_map(last_row_attention, image_token_start, num_image_tokens):
@@ -2162,6 +2130,50 @@ def _generate_heatmaps_for_words(step_target_words, step_lm_head_outputs, output
             print(f"  ✓ 词汇 '{word}' 步骤 {step_idx} 的词汇语义信息已保存: {os.path.basename(json_file)}")
 
 
+def _calculate_head_concentrations(layer_head_data_list, num_heads=32):
+    """
+    计算每个head的集中度指数
+
+    Args:
+        layer_head_data_list: 该层多个步骤的数据列表，每个元素是 [num_heads, 576] 形状
+        num_heads: head数量（默认32）
+
+    Returns:
+        numpy array: 形状为 [num_heads] 的数组，每个元素是该head的集中度指数（如果计算失败则使用平均值）
+    """
+    if not layer_head_data_list:
+        return None
+
+    # 对多个步骤求平均，得到 [num_heads, 576] 形状
+    layer_head_data_avg = np.mean(layer_head_data_list, axis=0)  # [num_heads, 576]
+
+    # 对每个head，将576个值reshape成24×24，然后计算集中度
+    head_concentrations = []
+    for head_idx in range(layer_head_data_avg.shape[0]):
+        head_576_values = layer_head_data_avg[head_idx, :]  # [576]
+        # Reshape成24×24
+        head_24x24 = head_576_values.reshape(24, 24)
+        # 计算集中度
+        try:
+            concentration_result = analyze_heatmap_concentration(head_24x24, top_percentile=3, visualize=False)
+            concentration_index = concentration_result.get('concentration_index', 0.0)
+        except Exception as e:
+            # 如果计算失败，使用原先的方案：对576个像素值求平均
+            concentration_index = np.mean(head_576_values)
+        head_concentrations.append(concentration_index)
+
+    # 转换为numpy数组 [num_heads]
+    head_concentrations_array = np.array(head_concentrations)
+
+    # 确保有32个head（如果不足，用0填充；如果超过，截断）
+    if len(head_concentrations_array) < num_heads:
+        head_concentrations_array = np.pad(head_concentrations_array, (0, num_heads - len(head_concentrations_array)), mode='constant', constant_values=0)
+    elif len(head_concentrations_array) > num_heads:
+        head_concentrations_array = head_concentrations_array[:num_heads]
+
+    return head_concentrations_array
+
+
 def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers=32, num_heads=32):
     """
     为所有目标词汇生成32×32 head-layer heatmap
@@ -2198,10 +2210,9 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
 
                 # 该层可能有多个步骤的数据，需要平均
                 layer_head_data_list = group_data[layer_idx]
-                if layer_head_data_list:
-                    # 对多个步骤求平均
-                    layer_head_data_avg = np.mean(layer_head_data_list, axis=0)  # [num_heads]
-                    all_head_layer_data.append(layer_head_data_avg)
+                head_concentrations_array = _calculate_head_concentrations(layer_head_data_list, num_heads)
+                if head_concentrations_array is not None:
+                    all_head_layer_data.append(head_concentrations_array)
 
     if not all_head_layer_data:
         print(f"  ⚠️  没有找到有效的head-layer attention数据，跳过heatmap生成")
@@ -2212,7 +2223,7 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
     global_min = float(np.nanmin(all_data_array))
     global_max = float(np.nanmax(all_data_array))
 
-    print(f"    全局最值范围: [{global_min:.6e}, {global_max:.6e}]")
+    print(f"    全局最值范围（集中度指数）: [{global_min:.6f}, {global_max:.6f}]")
 
     # 第二步：为每个词汇生成32×32 heatmap
     for word, attention_data in all_words_attention_data.items():
@@ -2249,12 +2260,9 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
                     continue
 
                 layer_head_data_list = group_data[layer_idx]
-                if layer_head_data_list:
-                    # 对多个步骤求平均
-                    layer_head_data_avg = np.mean(layer_head_data_list, axis=0)  # [num_heads]
-                    # 确保有32个head
-                    if len(layer_head_data_avg) == num_heads:
-                        heatmap_matrix[layer_idx, :] = layer_head_data_avg
+                head_concentrations_array = _calculate_head_concentrations(layer_head_data_list, num_heads)
+                if head_concentrations_array is not None and len(head_concentrations_array) == num_heads:
+                    heatmap_matrix[layer_idx, :] = head_concentrations_array
 
             # 检查是否有有效数据
             valid_data = heatmap_matrix[~np.isnan(heatmap_matrix)]
@@ -2308,7 +2316,7 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
 
             # 添加colorbar
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label('Average Attention Value', fontsize=18, fontweight='bold')
+            cbar.set_label('Concentration Index', fontsize=18, fontweight='bold')
 
             # 设置坐标轴范围
             ax.set_xlim(0, num_heads)
@@ -2381,7 +2389,19 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
             print(f"  ✓ 词汇 '{word}' {group_info} 的32×32 Head-Layer Heatmap已保存: {os.path.basename(heatmap_file)}")
             print(f"    有效值数量: {valid_count}/{total_count}")
             if len(valid_data) > 0:
-                print(f"    数据范围: [{valid_data.min():.6e}, {valid_data.max():.6e}] (全局范围: [{global_min:.6e}, {global_max:.6e}])")
+                print(f"    集中度范围: [{valid_data.min():.6f}, {valid_data.max():.6f}] (全局范围: [{global_min:.6f}, {global_max:.6f}])")
+
+            # 打印 layer 21 的 32 个 head 的集中度值
+            layer_21_idx = 21
+            if layer_21_idx < num_total_layers:
+                layer_21_concentrations = heatmap_matrix[layer_21_idx, :]
+                # 检查是否有有效数据
+                if not np.all(np.isnan(layer_21_concentrations)):
+                    # 将32个值格式化为一行，保留6位小数
+                    concentrations_str = ', '.join([f'{val:.6f}' if not np.isnan(val) else 'NaN' for val in layer_21_concentrations])
+                    print(f"    Layer 21 集中度值 (32个head): {concentrations_str}")
+                else:
+                    print(f"    Layer 21: 无有效数据")
 
 
 def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, output_dir, num_total_layers):
