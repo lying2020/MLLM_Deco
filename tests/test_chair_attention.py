@@ -890,7 +890,7 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     ax3 = plt.subplot(1, 1, 1)
     im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='nearest',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
-    ax3.set_title(f'Attention Map, Token: "{token_text}"', fontsize=14, fontweight='bold')  # 12 * 1.2 = 14.4，约14
+    ax3.set_title(f'Attention Map, Token: "{token_text}"', fontsize=21, fontweight='bold')  # 14 * 1.5 = 21
     ax3.axis('off')
     # 保存图3
     filename_parts_3 = filename_base + ["attention_map.png"]
@@ -926,7 +926,7 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     # 使用较低的alpha值，让原图更可见
     im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
-    ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=14, fontweight='bold')  # 12 * 1.2 = 14.4，约14
+    ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=21, fontweight='bold')  # 14 * 1.5 = 21
     ax4.axis('off')
     # 保存图4（使用前缀）
     filename_parts_4 = filename_base + ["attention_map_overlay.png"]
@@ -2785,7 +2785,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default= 33270,  # 13348,  # 6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default= None,  # 13348,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
