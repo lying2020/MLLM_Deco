@@ -60,6 +60,275 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from test_llava_v15_7b_attention import visualize_step_attention_map, plot_attention_pixel_grid, load_image
 
+import numpy as np
+from scipy.ndimage import label
+from skimage.measure import regionprops
+import matplotlib.pyplot as plt
+
+class HeatmapConcentrationAnalyzer:
+    """
+    Heatmap集中度分析器
+    支持输入：24×24数组、576一维数组、或图像文件路径
+    """
+
+    def __init__(self, top_percentile=10, weights=None):
+        """
+        初始化分析器
+
+        参数:
+        - top_percentile: 高像素点的百分比阈值 (默认10%)
+        - weights: 各指标的权重 [紧凑度, 大小系数, 连通性系数] (默认[0.5, 0.3, 0.2])
+        """
+        self.top_percentile = top_percentile
+
+        if weights is None:
+            self.weights = [0.5, 0.3, 0.2]  # 紧凑度, 大小系数, 连通性系数
+        else:
+            self.weights = weights
+
+    def preprocess_heatmap(self, heatmap_input):
+        """
+        预处理heatmap输入，统一转换为24×24的numpy数组
+
+        支持输入类型:
+        1. 24×24的numpy数组
+        2. 576个元素的一维数组/列表
+        3. 24×24的二维列表
+        """
+        # 转换为numpy数组
+        data = np.array(heatmap_input)
+
+        # 检查并重塑形状
+        if data.size == 576 and data.shape != (24, 24):
+            # 如果是576个元素的一维数组
+            if data.ndim == 1:
+                data = data.reshape(24, 24)
+            elif data.ndim == 2 and (data.shape[0] == 24 or data.shape[1] == 24):
+                # 可能是其他形状的24×24变形
+                data = data.reshape(24, 24)
+            else:
+                raise ValueError(f"输入形状 {data.shape} 无法转换为24×24")
+
+        elif data.shape != (24, 24):
+            raise ValueError(f"期望24×24的形状，但得到 {data.shape}")
+
+        return data
+
+    def visualize_heatmap(self, heatmap, binary_map=None, title="Heatmap"):
+        """
+        可视化heatmap和高像素点区域
+        """
+        fig, axes = plt.subplots(1, 3 if binary_map is not None else 1,
+                                figsize=(15, 5 if binary_map is not None else 5))
+
+        if binary_map is None:
+            ax = axes if isinstance(axes, plt.Axes) else axes[0]
+            im = ax.imshow(heatmap, cmap='hot', interpolation='nearest')
+            ax.set_title(title)
+            ax.axis('off')
+            plt.colorbar(im, ax=ax)
+        else:
+            # 显示原始heatmap
+            im1 = axes[0].imshow(heatmap, cmap='hot', interpolation='nearest')
+            axes[0].set_title(f'Original {title}')
+            axes[0].axis('off')
+            plt.colorbar(im1, ax=axes[0])
+
+            # 显示二值化图
+            axes[1].imshow(binary_map, cmap='gray', interpolation='nearest')
+            axes[1].set_title(f'Top {self.top_percentile}% Pixels')
+            axes[1].axis('off')
+
+            # 显示叠加图
+            overlay = np.zeros((*heatmap.shape, 3))
+            overlay[:,:,0] = heatmap / heatmap.max()  # 红色通道: heatmap
+            overlay[:,:,1] = binary_map  # 绿色通道: 高像素点区域
+            axes[2].imshow(overlay)
+            axes[2].set_title('Overlay: Heatmap + High Pixels')
+            axes[2].axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+    def extract_high_pixels(self, heatmap):
+        """
+        提取高像素点区域
+        """
+        # 计算阈值
+        threshold = np.percentile(heatmap, 100 - self.top_percentile)
+
+        # 创建二值化掩码
+        binary_map = (heatmap >= threshold).astype(np.uint8)
+
+        return binary_map, threshold
+
+    def calculate_concentration_index(self, heatmap_input, visualize=False):
+        """
+        计算heatmap的像素集中度指数
+
+        参数:
+        - heatmap_input: 输入heatmap (多种格式)
+        - visualize: 是否可视化结果
+
+        返回:
+        - dict: 包含各项指标和综合集中度
+        """
+        # 1. 预处理输入
+        heatmap = self.preprocess_heatmap(heatmap_input)
+
+        # 2. 提取高像素点
+        binary_map, threshold = self.extract_high_pixels(heatmap)
+
+        # 3. 统计基本信息
+        high_pixel_count = np.sum(binary_map)
+        total_pixels = heatmap.size
+
+        # 如果高像素点太少，返回最小集中度
+        if high_pixel_count == 0:
+            return {
+                'concentration_index': 0.0,
+                'compactness': 0.0,
+                'size_coefficient': 0.0,
+                'connectivity': 0.0,
+                'high_pixel_count': 0,
+                'threshold': threshold,
+                'message': 'No high pixels found'
+            }
+
+        # 4. 连通区域分析 (8连通)
+        labeled_array, num_features = label(binary_map, structure=np.ones((3, 3)))
+
+        # 如果只有一个高像素点，是完全集中
+        if high_pixel_count == 1:
+            result = {
+                'concentration_index': 1.0,
+                'compactness': 1.0,
+                'size_coefficient': 1.0,
+                'connectivity': 1.0,
+                'high_pixel_count': 1,
+                'threshold': threshold,
+                'num_regions': 1,
+                'message': 'Single high pixel - perfectly concentrated'
+            }
+
+            if visualize:
+                self.visualize_heatmap(heatmap, binary_map, f"Concentration: {1.0:.3f}")
+
+            return result
+
+        # 5. 获取连通区域属性
+        regions = regionprops(labeled_array)
+
+        # 计算各区域面积并找到最大区域
+        region_areas = [region.area for region in regions]
+        max_region_idx = np.argmax(region_areas)
+        max_region = regions[max_region_idx]
+
+        # 6. 计算各项指标
+
+        # (a) 紧凑度系数: 衡量高像素点的聚集紧密程度
+        y_coords, x_coords = np.where(binary_map == 1)
+        min_x, max_x = np.min(x_coords), np.max(x_coords)
+        min_y, max_y = np.min(y_coords), np.max(y_coords)
+        bounding_box_width = max_x - min_x + 1
+        bounding_box_height = max_y - min_y + 1
+        bounding_box_area = bounding_box_width * bounding_box_height
+
+        # 紧凑度: 1表示完全填充边界框，0表示非常稀疏
+        if bounding_box_area == 0:
+            C_compactness = 1.0
+        else:
+            C_compactness = high_pixel_count / bounding_box_area
+
+        # (b) 大小系数: 最大连通区域占比
+        C_size = max_region.area / high_pixel_count
+
+        # (c) 连通性系数: 衡量高像素点的连接程度
+        C_connectivity = 1 - (num_features / high_pixel_count)
+
+        # 7. 计算综合集中度指数
+        concentration_index = (
+            self.weights[0] * C_compactness +
+            self.weights[1] * C_size +
+            self.weights[2] * C_connectivity
+        )
+
+        # 8. 收集结果
+        result = {
+            'concentration_index': float(concentration_index),
+            'compactness': float(C_compactness),
+            'size_coefficient': float(C_size),
+            'connectivity': float(C_connectivity),
+            'high_pixel_count': int(high_pixel_count),
+            'threshold': float(threshold),
+            'num_regions': int(num_features),
+            'max_region_area': int(max_region.area),
+            'bounding_box_area': int(bounding_box_area),
+            'bounding_box_size': (int(bounding_box_width), int(bounding_box_height)),
+            'heatmap_shape': heatmap.shape
+        }
+
+        # 9. 可视化（如果启用）
+        if visualize:
+            title = f"Concentration Index: {concentration_index:.3f}"
+            self.visualize_heatmap(heatmap, binary_map, title)
+
+        return result
+
+    def compare_multiple_heatmaps(self, heatmap_dict, visualize_all=False):
+        """
+        比较多个heatmap的集中度
+
+        参数:
+        - heatmap_dict: {名称: heatmap数据} 的字典
+        - visualize_all: 是否可视化所有heatmap
+
+        返回:
+        - DataFrame或字典列表，按集中度排序
+        """
+        results = []
+
+        for name, heatmap_data in heatmap_dict.items():
+            # 计算每个heatmap的集中度
+            result = self.calculate_concentration_index(heatmap_data, visualize=visualize_all)
+            result['name'] = name
+            results.append(result)
+
+        # 按集中度排序
+        sorted_results = sorted(results, key=lambda x: x['concentration_index'], reverse=True)
+
+        # 打印比较结果
+        print("=" * 80)
+        print("Heatmap Concentration Comparison")
+        print("=" * 80)
+        for i, res in enumerate(sorted_results):
+            print(f"{i+1}. {res['name']}:")
+            print(f"   Concentration Index: {res['concentration_index']:.3f}")
+            print(f"   High Pixels: {res['high_pixel_count']} ({self.top_percentile}% threshold)")
+            print(f"   Compactness: {res['compactness']:.3f}")
+            print(f"   Size Coefficient: {res['size_coefficient']:.3f}")
+            print(f"   Connectivity: {res['connectivity']:.3f}")
+            print(f"   Regions: {res['num_regions']}")
+            print()
+
+        return sorted_results
+
+
+# 使用示例函数
+def analyze_heatmap_concentration(heatmap_input, top_percentile=10, visualize=True):
+    """
+    快速分析函数：一站式分析heatmap集中度
+
+    参数:
+    - heatmap_input: 输入数据 (24×24数组、576一维数组等)
+    - top_percentile: 高像素百分比阈值
+    - visualize: 是否可视化结果
+
+    返回:
+    - 集中度分析结果
+    """
+    analyzer = HeatmapConcentrationAnalyzer(top_percentile=top_percentile)
+    return analyzer.calculate_concentration_index(heatmap_input, visualize=visualize)
 
 def get_coco_val2014_images(coco_root: str, image_id_list: Optional[List[int]] = None, max_images: int = 0):
     """
@@ -770,20 +1039,20 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
                        shading='flat')
 
     # 设置坐标轴
-    ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Top 5 Rank', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')
+    ax.set_ylabel('Top 5 Rank', fontsize=18, fontweight='bold')
     ax.set_title(f'Top 5 Probability Heatmap - Step {step_idx+1}',
-                 fontsize=14, fontweight='bold')
+                 fontsize=18, fontweight='bold')
 
     # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗
     num_ticks = 6
     tick_indices = np.linspace(0, num_layers - 1, num_ticks, dtype=int)
     ax.set_xticks(tick_indices + 0.5)
-    ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=8, fontweight='bold')
+    ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=15, fontweight='bold')
 
     # 设置y轴刻度（排名）- 放在单元格中心
     ax.set_yticks(np.arange(top_tokens_num) + 0.5)
-    ax.set_yticklabels([f'{i+1}' for i in range(top_tokens_num)], fontsize=10)
+    ax.set_yticklabels([f'{i+1}' for i in range(top_tokens_num)], fontsize=15, fontweight='bold')
 
     # 在每个像素块中心标注token文本（词汇），旋转45度
     for rank in range(top_tokens_num):
@@ -826,13 +1095,14 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
 
     # 添加colorbar
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('Probability', fontsize=10, fontweight='bold')
+    cbar.set_label('Probability', fontsize=18, fontweight='bold')
 
     # 设置坐标轴范围，确保显示所有单元格
     ax.set_xlim(0, num_layers)
     ax.set_ylim(0, top_tokens_num)
 
-    plt.tight_layout()
+    # 注意：不使用 tight_layout()，因为保存时已使用 bbox_inches='tight'
+    # plt.tight_layout()  # 移除以避免警告
 
     # 保存图片
     heatmap_file = os.path.join(output_dir, f"top5_logits_heatmap_step_{step_idx+1}.png")
@@ -962,7 +1232,7 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
         sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
         sm3.set_array([])
         cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
-        cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
+        cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
         plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"    ✓ 图3 Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
@@ -998,8 +1268,8 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
         sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
         sm4.set_array([])
         cbar4 = plt.colorbar(sm4, ax=ax_cbar4, orientation='vertical', fraction=1.0)
-        cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
-        cbar4.set_label('Normalized Value', fontsize=12, fontweight='bold')  # 10 * 1.2 = 12
+        cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
+        cbar4.set_label('Normalized Value', fontsize=18, fontweight='bold')  # 10 * 1.2 = 12
         plt.savefig(output_file_cbar4, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"    ✓ 图4 Colorbar 已保存: {os.path.basename(output_file_cbar4)}")
@@ -1007,6 +1277,128 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     print(f"    ✓ Layer {layer_idx} attention maps已保存")
     print(f"      原始Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
     print(f"      增强后范围: [{attn_enhanced_min:.4f}, {attn_enhanced_max:.4f}]")
+
+
+def visualize_object_attention_map_global(attention_map, image, layer_idx, step_idx, token_text, token_name,
+                                         patch_size, output_dir, global_min, global_max, predicted_token_word=None):
+    """可视化物体token的attention map（使用全局最值归一化）
+
+    Args:
+        attention_map: 24x24的attention map（原始logits值，不归一化）
+        image: 原始图像
+        layer_idx: 层索引
+        step_idx: 生成步骤索引
+        token_text: token的文本内容（用于显示）
+        token_name: token的清理后的名称（用于文件名）
+        patch_size: patch大小（24）
+        output_dir: 输出目录
+        global_min: 全局最小值（用于归一化）
+        global_max: 全局最大值（用于归一化）
+        predicted_token_word: 该层预测的token词汇（用于文件名）
+    """
+    # 使用全局最值进行归一化
+    attn_values = attention_map.copy()
+
+    # 归一化到 [0, 1] 范围
+    if global_max > global_min:
+        attn_values_normalized = (attn_values - global_min) / (global_max - global_min)
+    else:
+        attn_values_normalized = np.zeros_like(attn_values)
+
+    # 获取值的范围用于显示
+    attn_min = attn_values.min()
+    attn_max = attn_values.max()
+    attn_normalized_min = attn_values_normalized.min()
+    attn_normalized_max = attn_values_normalized.max()
+
+    # 将原图resize成正方形，和attention map的尺寸一致
+    if isinstance(image, np.ndarray):
+        image_pil = Image.fromarray(image)
+    else:
+        image_pil = image
+
+    # 直接resize到方形尺寸（可能会压缩）
+    display_size = patch_size * 20  # 480x480
+    image_resized = image_pil.resize((display_size, display_size), Image.Resampling.LANCZOS)
+    image_array = np.array(image_resized)
+
+    # 统一所有子图的显示范围（都是正方形）
+    unified_extent = [0, patch_size, 0, patch_size]
+
+    # 构建文件名基础部分（添加 global 后缀）
+    filename_base = [f"layer_{layer_idx}", f"step_{step_idx}", f"token_{token_name}", "global"]
+
+    # 3. 单独保存归一化后的attention map（图3）
+    fig3 = plt.figure(figsize=(8, 8))
+    ax3 = plt.subplot(1, 1, 1)
+    im3 = ax3.imshow(attn_values_normalized, cmap='jet', interpolation='nearest',
+                     vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
+    ax3.set_title(f'Attention Map, Token: "{token_text}"', fontsize=21, fontweight='bold')
+    ax3.axis('off')
+    # 保存图3
+    filename_parts_3 = filename_base + ["attention_map.png"]
+    output_file_3 = os.path.join(output_dir, "_".join(filename_parts_3))
+    plt.savefig(output_file_3, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"    ✓ 图3 (Attention Map Global) 已保存: {os.path.basename(output_file_3)}")
+
+    # 单独保存图3的colorbar（使用global后缀）
+    output_file_cbar3 = os.path.join(output_dir, "attention_map_global_colorbar.png")
+    # 检查是否已经保存过colorbar，避免重复保存
+    if not os.path.exists(output_file_cbar3):
+        fig_cbar3 = plt.figure(figsize=(1, 6))
+        ax_cbar3 = plt.subplot(1, 1, 1)
+        ax_cbar3.axis('off')
+        # 创建colorbar（显示原始值范围）
+        sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
+        sm3.set_array([])
+        cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
+        cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.6e}'))
+        cbar3.set_label('Attention Value', fontsize=18, fontweight='bold')
+        plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"    ✓ 图3 Global Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
+
+    # 4. 单独保存归一化后的attention map和原图叠加（图4）
+    fig4 = plt.figure(figsize=(8, 8))
+    ax4 = plt.subplot(1, 1, 1)
+    # 先显示原图
+    ax4.imshow(image_array, extent=unified_extent, aspect='equal')
+    # 将attention map上采样到和原图相同的尺寸
+    scale_factor = display_size // patch_size
+    attn_upsampled = np.repeat(np.repeat(attn_values_normalized, scale_factor, axis=0), scale_factor, axis=1)
+    # 使用较低的alpha值，让原图更可见
+    im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
+                     vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
+    ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=21, fontweight='bold')
+    ax4.axis('off')
+    # 保存图4（使用前缀）
+    filename_parts_4 = filename_base + ["attention_map_overlay.png"]
+    output_file_4 = os.path.join(output_dir, "_".join(filename_parts_4))
+    plt.savefig(output_file_4, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"    ✓ 图4 (Attention Map Overlay Global) 已保存: {os.path.basename(output_file_4)}")
+
+    # 单独保存图4的colorbar（使用global后缀）
+    output_file_cbar4 = os.path.join(output_dir, "attention_map_overlay_global_colorbar.png")
+    # 检查是否已经保存过colorbar，避免重复保存
+    if not os.path.exists(output_file_cbar4):
+        fig_cbar4 = plt.figure(figsize=(1, 6))
+        ax_cbar4 = plt.subplot(1, 1, 1)
+        ax_cbar4.axis('off')
+        # 创建colorbar（显示原始值范围）
+        sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
+        sm4.set_array([])
+        cbar4 = plt.colorbar(sm4, ax=ax_cbar4, orientation='vertical', fraction=1.0)
+        cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.6e}'))
+        cbar4.set_label('Attention Value', fontsize=18, fontweight='bold')
+        plt.savefig(output_file_cbar4, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"    ✓ 图4 Global Colorbar 已保存: {os.path.basename(output_file_cbar4)}")
+
+    print(f"    ✓ Layer {layer_idx} global attention maps已保存")
+    print(f"      原始Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
+    print(f"      全局归一化范围: [0.0, 1.0] (全局最值: [{global_min:.6e}, {global_max:.6e}])")
 
 
 def _parse_step_generated_words(output_ids, tokenizer, outputs_text):
@@ -1303,6 +1695,109 @@ def _process_attention_tensor(layer_attn):
     return last_row_attention
 
 
+def _extract_head_layer_attention_data(layer_attn, image_token_start, num_image_tokens, num_heads=32):
+    """
+    提取head-layer attention数据（32×32 heatmap）
+    不平均multi head，而是平均576个视觉token，得到每个head的平均attention值
+
+    Args:
+        layer_attn: attention tensor，形状可能是 [batch, num_heads, seq_len, seq_len] 或 [num_heads, seq_len, seq_len]
+        image_token_start: 图像token的起始位置
+        num_image_tokens: 图像token的数量（通常是576）
+        num_heads: head的数量（默认32）
+
+    Returns:
+        numpy array: 形状为 [num_heads] 的数组，每个元素是该head对576个视觉token的平均attention值
+    """
+    if isinstance(layer_attn, tuple):
+        layer_attn = layer_attn[0]
+
+    if not isinstance(layer_attn, torch.Tensor):
+        return None
+
+    layer_attn_np = layer_attn.cpu().numpy()
+
+    # 处理不同形状的attention tensor
+    # 目标：提取最后一行的attention，形状应该是 [num_heads, seq_len]
+    if len(layer_attn_np.shape) == 4:
+        # [batch, num_heads, seq_len, seq_len]
+        batch_size, num_heads_actual, seq_len, _ = layer_attn_np.shape
+        if seq_len == 1:
+            # query_len == 1，取第一个batch，所有head，第一个query位置
+            last_row_attention = layer_attn_np[0, :, 0, :]  # [num_heads, seq_len]
+        else:
+            # 取第一个batch，所有head，最后一个query位置
+            last_row_attention = layer_attn_np[0, :, -1, :]  # [num_heads, seq_len]
+    elif len(layer_attn_np.shape) == 3:
+        # [num_heads, seq_len, seq_len] 或 [batch, seq_len, seq_len]
+        if layer_attn_np.shape[0] == num_heads or layer_attn_np.shape[0] > 10:
+            # 假设是 [num_heads, seq_len, seq_len]
+            num_heads_actual, seq_len, _ = layer_attn_np.shape
+            if seq_len == 1:
+                last_row_attention = layer_attn_np[:, 0, :]  # [num_heads, seq_len]
+            else:
+                last_row_attention = layer_attn_np[:, -1, :]  # [num_heads, seq_len]
+        else:
+            # 可能是 [batch, seq_len, seq_len]，需要先平均head
+            # 这种情况不应该出现，但为了兼容性处理
+            batch_size, seq_len, _ = layer_attn_np.shape
+            if seq_len == 1:
+                last_row_attention = layer_attn_np[0, 0, :]  # [seq_len]
+                # 无法分离head，返回None
+                return None
+            else:
+                last_row_attention = layer_attn_np[0, -1, :]  # [seq_len]
+                # 无法分离head，返回None
+                return None
+    elif len(layer_attn_np.shape) == 2:
+        # [seq_len, seq_len] 或 [num_heads, seq_len]
+        if layer_attn_np.shape[0] == num_heads or layer_attn_np.shape[0] > 10:
+            # 可能是 [num_heads, seq_len]，但缺少一个维度，可能是已经平均过了
+            # 这种情况无法分离head，返回None
+            return None
+        else:
+            # [seq_len, seq_len]
+            seq_len = layer_attn_np.shape[0]
+            if seq_len == 1:
+                last_row_attention = layer_attn_np[0, :]  # [seq_len]
+            else:
+                last_row_attention = layer_attn_np[-1, :]  # [seq_len]
+            # 无法分离head，返回None
+            return None
+    else:
+        return None
+
+    # 现在 last_row_attention 的形状应该是 [num_heads, seq_len]
+    if len(last_row_attention.shape) != 2:
+        return None
+
+    num_heads_actual, seq_len = last_row_attention.shape
+
+    # 提取576个视觉token的attention
+    actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
+    image_token_end_actual = min(image_token_start + actual_num_image_tokens, seq_len)
+    valid_image_positions = np.arange(image_token_start, image_token_end_actual)
+
+    if len(valid_image_positions) == 0:
+        return None
+
+    # 对每个head，提取视觉token的attention并求平均
+    # last_row_attention: [num_heads, seq_len]
+    # 提取视觉token部分: [num_heads, num_image_tokens]
+    image_attention_per_head = last_row_attention[:, valid_image_positions]  # [num_heads, num_image_tokens]
+
+    # 对576个视觉token求平均，得到每个head的平均attention值
+    head_avg_attention = np.mean(image_attention_per_head, axis=1)  # [num_heads]
+
+    # 确保有32个head（如果不足，用0填充；如果超过，截断）
+    if len(head_avg_attention) < num_heads:
+        head_avg_attention = np.pad(head_avg_attention, (0, num_heads - len(head_avg_attention)), mode='constant', constant_values=0)
+    elif len(head_avg_attention) > num_heads:
+        head_avg_attention = head_avg_attention[:num_heads]
+
+    return head_avg_attention
+
+
 def _extract_image_attention_map(last_row_attention, image_token_start, num_image_tokens):
     """从last_row_attention中提取图像attention map"""
     actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
@@ -1371,7 +1866,7 @@ def _get_predicted_token_for_layer(model, tokenizer, step_hidden_states, layer_i
 
 def _extract_attention_maps_for_word(model, tokenizer, word, word_info, all_attentions,
                                     all_hidden_states, selected_layers, image_token_start,
-                                    num_image_tokens, device):
+                                    num_image_tokens, device, num_total_layers=32):
     """为单个词汇提取attention map，按token_groups组织数据"""
     word_steps = word_info['steps']
     token_groups = word_info.get('token_groups', [])
@@ -1383,6 +1878,8 @@ def _extract_attention_maps_for_word(model, tokenizer, word, word_info, all_atte
     group_attention_maps = {}  # {group_idx: {layer_idx: [attention_map1, ...]}}
     group_predicted_tokens = {}  # {group_idx: {layer_idx: [token1, ...]}}
     group_token_probabilities = {}  # {group_idx: {layer_idx: [prob1, ...]}}
+    # 新增：32×32 head-layer attention数据
+    group_head_layer_attention = {}  # {group_idx: {layer_idx: [head_attention_array1, ...]}}
 
     # 如果没有token_groups，使用所有步骤作为一个组
     if not token_groups:
@@ -1393,6 +1890,7 @@ def _extract_attention_maps_for_word(model, tokenizer, word, word_info, all_atte
         group_attention_maps[group_idx] = {}
         group_predicted_tokens[group_idx] = {}
         group_token_probabilities[group_idx] = {}
+        group_head_layer_attention[group_idx] = {}
 
         # 遍历该组内的所有步骤
         for step_idx in range(group_start, group_end + 1):
@@ -1407,7 +1905,20 @@ def _extract_attention_maps_for_word(model, tokenizer, word, word_info, all_atte
                 step_hidden_states = all_hidden_states[attn_idx]
 
             for layer_idx, layer_attn in enumerate(step_attentions):
-                if layer_idx not in selected_layers or layer_attn is None:
+                if layer_attn is None:
+                    continue
+
+                # 提取32×32 head-layer attention数据（需要所有32层的数据）
+                head_attention_data = _extract_head_layer_attention_data(
+                    layer_attn, image_token_start, num_image_tokens, num_heads=32
+                )
+                if head_attention_data is not None:
+                    if layer_idx not in group_head_layer_attention[group_idx]:
+                        group_head_layer_attention[group_idx][layer_idx] = []
+                    group_head_layer_attention[group_idx][layer_idx].append(head_attention_data)
+
+                # 原有的attention map提取（只处理selected_layers）
+                if layer_idx not in selected_layers:
                     continue
 
                 predicted_token_word, probability = _get_predicted_token_for_layer(
@@ -1439,6 +1950,7 @@ def _extract_attention_maps_for_word(model, tokenizer, word, word_info, all_atte
         'group_attention_maps': group_attention_maps,
         'group_predicted_tokens': group_predicted_tokens,
         'group_token_probabilities': group_token_probabilities,
+        'group_head_layer_attention': group_head_layer_attention,
         'token_groups': token_groups
     }
 
@@ -1473,7 +1985,10 @@ def _combine_and_visualize_attention_maps(word, word_info, attention_data, image
         group_tokens = group_predicted_tokens[group_idx]
         group_probs = group_token_probabilities.get(group_idx, {})
 
-        # 为每个层叠加该组内的所有步骤
+        # 第一步：收集所有层的attention maps并计算全局最值
+        all_combined_maps = {}  # {layer_idx: combined_attention_map}
+        all_predicted_tokens_dict = {}  # {layer_idx: predicted_token}
+
         for layer_idx in sorted(group_maps.keys()):
             if layer_idx not in selected_layers:
                 continue
@@ -1503,12 +2018,42 @@ def _combine_and_visualize_attention_maps(word, word_info, attention_data, image
                     combined_attention_map = np.mean(attention_maps, axis=0)
                     combined_predicted_token = '_'.join([t for t in predicted_tokens if t]) if any(predicted_tokens) else None
 
+            all_combined_maps[layer_idx] = combined_attention_map
+            all_predicted_tokens_dict[layer_idx] = combined_predicted_token
+
+        # 第二步：计算全局最值（从selected_layers中的所有层）
+        if all_combined_maps:
+            all_values = []
+            for layer_idx, combined_map in all_combined_maps.items():
+                all_values.append(combined_map.flatten())
+
+            if all_values:
+                all_values_array = np.concatenate(all_values)
+                global_min = float(np.nanmin(all_values_array))
+                global_max = float(np.nanmax(all_values_array))
+
+                print(f"\n    [Global Normalization] 词汇 '{word}', Token组 {group_idx+1}:")
+                print(f"      全局最值范围: [{global_min:.6e}, {global_max:.6e}] (来自 {len(all_combined_maps)} 个层)")
+            else:
+                global_min = 0.0
+                global_max = 1.0
+        else:
+            global_min = 0.0
+            global_max = 1.0
+
+        # 第三步：为每个层生成attention map（使用原有的单独归一化方法）
+        for layer_idx in sorted(all_combined_maps.keys()):
+            combined_attention_map = all_combined_maps[layer_idx]
+            combined_predicted_token = all_predicted_tokens_dict[layer_idx]
+
             # 打印统计信息
             attn_min = float(combined_attention_map.min())
             attn_max = float(combined_attention_map.max())
             group_steps = list(range(group_start, group_end + 1))
             print(f"\n    [Debug] 词汇 '{word}', Layer {layer_idx}, Token组 {group_idx+1}: {group_steps}")
-            print(f"      - 叠加的步骤数: {len(attention_maps)}")
+            print(f"      - 叠加的步骤数: {len(group_maps[layer_idx])}")
+            probabilities = group_probs.get(layer_idx, [])
+            attention_maps = group_maps[layer_idx]
             if probabilities and len(probabilities) == len(attention_maps) and any(p > 0 for p in probabilities):
                 weights = np.array(probabilities)
                 weights = weights / weights.sum()
@@ -1527,10 +2072,32 @@ def _combine_and_visualize_attention_maps(word, word_info, attention_data, image
             if len(token_groups) > 1:
                 token_name = f"{token_name}_group{group_idx+1}"
 
+            # 使用原有的单独归一化方法
             visualize_object_attention_map(
                 combined_attention_map, image, layer_idx, step_idx_for_filename, token_text, token_name,
                 patch_size, step_dir, predicted_token_word=combined_predicted_token
             )
+
+        # 第四步：为每个层生成global归一化的attention map
+        group_steps = list(range(group_start, group_end + 1))
+        for layer_idx in sorted(all_combined_maps.keys()):
+            combined_attention_map = all_combined_maps[layer_idx]
+            combined_predicted_token = all_predicted_tokens_dict[layer_idx]
+
+            token_text = word
+            token_name = safe_word
+            step_idx_for_filename = str(group_steps[0]) + '_' + str(group_steps[-1])
+
+            # 如果多个组，在文件名中包含组信息
+            if len(token_groups) > 1:
+                token_name = f"{token_name}_group{group_idx+1}"
+
+            # 使用全局归一化方法
+            # 注释掉：不生成全局归一化的 attention map（图例生成效果一般）
+            # visualize_object_attention_map_global(
+            #     combined_attention_map, image, layer_idx, step_idx_for_filename, token_text, token_name,
+            #     patch_size, step_dir, global_min, global_max, predicted_token_word=combined_predicted_token
+            # )
 
 
 def _generate_heatmaps_for_words(step_target_words, step_lm_head_outputs, output_dir, num_total_layers):
@@ -1593,6 +2160,228 @@ def _generate_heatmaps_for_words(step_target_words, step_lm_head_outputs, output
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(lm_head_data, f, ensure_ascii=False, indent=2)
             print(f"  ✓ 词汇 '{word}' 步骤 {step_idx} 的词汇语义信息已保存: {os.path.basename(json_file)}")
+
+
+def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers=32, num_heads=32):
+    """
+    为所有目标词汇生成32×32 head-layer heatmap
+
+    Args:
+        step_target_words: 按步骤组织的目标词汇字典
+        all_words_attention_data: 所有词汇的attention数据字典 {word: attention_data}
+        output_dir: 输出目录
+        num_total_layers: 总层数（默认32）
+        num_heads: head数量（默认32）
+    """
+    if not all_words_attention_data:
+        return
+
+    print(f"\n  [生成32×32 Head-Layer Heatmap] 为目标词汇生成heatmap...")
+
+    # 第一步：收集所有词汇的所有32×32数据，计算全局最值
+    all_head_layer_data = []  # 存储所有32×32数据用于计算全局最值
+
+    for word, attention_data in all_words_attention_data.items():
+        group_head_layer_attention = attention_data.get('group_head_layer_attention', {})
+        token_groups = attention_data.get('token_groups', [])
+
+        for group_idx, (group_start, group_end) in enumerate(token_groups):
+            if group_idx not in group_head_layer_attention:
+                continue
+
+            group_data = group_head_layer_attention[group_idx]
+
+            # 为每个层收集数据
+            for layer_idx in range(num_total_layers):
+                if layer_idx not in group_data:
+                    continue
+
+                # 该层可能有多个步骤的数据，需要平均
+                layer_head_data_list = group_data[layer_idx]
+                if layer_head_data_list:
+                    # 对多个步骤求平均
+                    layer_head_data_avg = np.mean(layer_head_data_list, axis=0)  # [num_heads]
+                    all_head_layer_data.append(layer_head_data_avg)
+
+    if not all_head_layer_data:
+        print(f"  ⚠️  没有找到有效的head-layer attention数据，跳过heatmap生成")
+        return
+
+    # 计算全局最值
+    all_data_array = np.array(all_head_layer_data)  # [N, num_heads]
+    global_min = float(np.nanmin(all_data_array))
+    global_max = float(np.nanmax(all_data_array))
+
+    print(f"    全局最值范围: [{global_min:.6e}, {global_max:.6e}]")
+
+    # 第二步：为每个词汇生成32×32 heatmap
+    for word, attention_data in all_words_attention_data.items():
+        word_info = step_target_words.get(word)
+        if not word_info:
+            continue
+
+        word_steps = word_info['steps']
+        token_groups = attention_data.get('token_groups', [])
+        group_head_layer_attention = attention_data.get('group_head_layer_attention', {})
+
+        safe_word = word.replace(' ', '_').replace('/', '_').replace('\\', '_')
+        if len(word_steps) == 1:
+            step_label = f"step_{word_steps[0]}"
+        else:
+            step_label = f"step_{'_'.join(map(str, word_steps))}"
+
+        step_output_dir = os.path.join(output_dir, f"{step_label}_{safe_word}")
+        os.makedirs(step_output_dir, exist_ok=True)
+
+        # 为每个token_group生成32×32 heatmap
+        for group_idx, (group_start, group_end) in enumerate(token_groups):
+            if group_idx not in group_head_layer_attention:
+                continue
+
+            group_data = group_head_layer_attention[group_idx]
+
+            # 创建32×32矩阵：y轴是32层，x轴是32个head
+            heatmap_matrix = np.full((num_total_layers, num_heads), np.nan)
+
+            # 填充矩阵
+            for layer_idx in range(num_total_layers):
+                if layer_idx not in group_data:
+                    continue
+
+                layer_head_data_list = group_data[layer_idx]
+                if layer_head_data_list:
+                    # 对多个步骤求平均
+                    layer_head_data_avg = np.mean(layer_head_data_list, axis=0)  # [num_heads]
+                    # 确保有32个head
+                    if len(layer_head_data_avg) == num_heads:
+                        heatmap_matrix[layer_idx, :] = layer_head_data_avg
+
+            # 检查是否有有效数据
+            valid_data = heatmap_matrix[~np.isnan(heatmap_matrix)]
+            if len(valid_data) == 0:
+                continue
+
+            # 创建heatmap
+            fig, ax = plt.subplots(figsize=(12, 12))
+
+            # 使用pcolormesh绘制heatmap
+            heatmap_extended = np.full((num_total_layers + 1, num_heads + 1), np.nan)
+            heatmap_extended[:num_total_layers, :num_heads] = heatmap_matrix
+
+            X = np.arange(num_heads + 2)
+            Y = np.arange(num_total_layers + 2)
+            X_grid, Y_grid = np.meshgrid(X, Y)
+
+            # 使用淡黄到深橙色的colormap
+            # 创建自定义colormap：从淡黄色到深橙色
+            colors = ['#FFF8DC', '#FFE4B5', '#FFD700', '#FFA500', '#FF8C00', '#FF7F50', '#FF6347', '#FF4500']
+            n_bins = 256
+            cmap = LinearSegmentedColormap.from_list('yellow_to_orange', colors, N=n_bins)
+
+            im = ax.pcolormesh(X_grid, Y_grid, heatmap_extended, cmap=cmap,
+                               edgecolors='white', linewidths=0.5,
+                               vmin=global_min, vmax=global_max,
+                               shading='flat')
+
+            # 设置坐标轴
+            ax.set_xlabel('Head Index', fontsize=18, fontweight='bold')
+            ax.set_ylabel('Layer Index', fontsize=18, fontweight='bold')
+
+            # 标题
+            if len(token_groups) > 1:
+                title = f'Head-Layer Attention Heatmap - {word}, Group {group_idx+1}'
+            else:
+                title = f'Head-Layer Attention Heatmap - {word}'
+            ax.set_title(title, fontsize=18, fontweight='bold')
+
+            # 设置x轴刻度（head索引）
+            num_ticks_x = 8
+            tick_indices_x = np.linspace(0, num_heads - 1, num_ticks_x, dtype=int)
+            ax.set_xticks(tick_indices_x + 0.5)
+            ax.set_xticklabels([f'H{i}' for i in tick_indices_x], fontsize=15, fontweight='bold')
+
+            # 设置y轴刻度（层索引）
+            num_ticks_y = 8
+            tick_indices_y = np.linspace(0, num_total_layers - 1, num_ticks_y, dtype=int)
+            ax.set_yticks(tick_indices_y + 0.5)
+            ax.set_yticklabels([f'L{i}' for i in tick_indices_y], fontsize=15, fontweight='bold')
+
+            # 添加colorbar
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Average Attention Value', fontsize=18, fontweight='bold')
+
+            # 设置坐标轴范围
+            ax.set_xlim(0, num_heads)
+            ax.set_ylim(0, num_total_layers)
+
+            # 计算并绘制权重均分线
+            # 计算所有权重值的总和
+            total_sum = np.nansum(heatmap_matrix)
+
+            if total_sum > 0:
+                # 目标：找到一条水平线，使得线以下（包括线本身）的权重值总和 = 线以上的权重值总和
+                target_sum = total_sum / 2.0
+
+                # 从 L0 开始，逐层累加权重值
+                cumulative_sum = 0.0
+                split_layer = None
+                split_position = None  # 在层内的位置（0.0 表示层底部，1.0 表示层顶部）
+
+                for layer_idx in range(num_total_layers):
+                    # 计算该层的权重值总和
+                    layer_sum = np.nansum(heatmap_matrix[layer_idx, :])
+
+                    if cumulative_sum + layer_sum < target_sum:
+                        # 累加值还未达到目标，继续下一层
+                        cumulative_sum += layer_sum
+                    elif cumulative_sum + layer_sum == target_sum:
+                        # 正好等于目标，线在该层的顶部（即下一层的底部）
+                        split_layer = layer_idx
+                        split_position = 1.0  # 层顶部
+                        break
+                    else:
+                        # 累加值超过目标，线在该层内部
+                        split_layer = layer_idx
+                        # 计算在该层内的位置
+                        remaining_sum = target_sum - cumulative_sum
+                        if layer_sum > 0:
+                            split_position = remaining_sum / layer_sum
+                        else:
+                            split_position = 0.0
+                        break
+
+                # 绘制水平线
+                if split_layer is not None:
+                    if split_position == 1.0:
+                        # 线在层的顶部，即下一层的底部
+                        y_position = split_layer + 1.0
+                    else:
+                        # 线在层内部
+                        y_position = split_layer + split_position
+
+                    # 绘制水平线（绿色，透明度0.3）
+                    ax.axhline(y=y_position, xmin=0, xmax=num_heads,
+                              color='green', linewidth=2.0, alpha=0.3, linestyle='-')
+
+                    # 打印调试信息
+                    print(f"    权重均分线位置: Layer {split_layer}, 层内位置 {split_position:.4f}, Y坐标 {y_position:.4f}")
+
+            # 保存图片
+            if len(token_groups) > 1:
+                heatmap_file = os.path.join(step_output_dir, f"head_layer_heatmap_{safe_word}_group{group_idx+1}.png")
+            else:
+                heatmap_file = os.path.join(step_output_dir, f"head_layer_heatmap_{safe_word}.png")
+            plt.savefig(heatmap_file, dpi=200, bbox_inches='tight')
+            plt.close()
+
+            # 统计信息
+            valid_count = np.sum(~np.isnan(heatmap_matrix))
+            total_count = num_total_layers * num_heads
+            group_info = f"Group {group_idx+1}" if len(token_groups) > 1 else ""
+            print(f"  ✓ 词汇 '{word}' {group_info} 的32×32 Head-Layer Heatmap已保存: {os.path.basename(heatmap_file)}")
+            print(f"    有效值数量: {valid_count}/{total_count}")
+            if len(valid_data) > 0:
+                print(f"    数据范围: [{valid_data.min():.6e}, {valid_data.max():.6e}] (全局范围: [{global_min:.6e}, {global_max:.6e}])")
 
 
 def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, output_dir, num_total_layers):
@@ -1736,25 +2525,25 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                shading='flat')
 
             # 设置坐标轴
-            ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Token Index', fontsize=12, fontweight='bold')
+            ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')
+            # ax.set_ylabel('Token Index', fontsize=18, fontweight='bold')
 
             # 标题：如果有多个group，在标题中标注group信息
             if group_idx is not None and len(groups_to_process) > 1:
                 title = f'Rank1 Probability Heatmap - {word}, Group {group_idx+1} ({num_tokens} token{"s" if num_tokens > 1 else ""})'
             else:
                 title = f'Rank1 Probability Heatmap - {word}, ({num_tokens} token{"s" if num_tokens > 1 else ""})'
-            ax.set_title(title, fontsize=14, fontweight='bold')
+            ax.set_title(title, fontsize=18, fontweight='bold')
 
             # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗
             num_ticks = 6
             tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=8, fontweight='bold')
+            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=15, fontweight='bold')
 
             # 设置y轴刻度（token）
             ax.set_yticks(np.arange(num_tokens) + 0.5)
-            ax.set_yticklabels(token_labels, fontsize=10)
+            ax.set_yticklabels(token_labels, fontsize=15, fontweight='bold')
 
             # 在每个单元格中心标注token文本（词汇），而不是概率值
             for row_idx in range(num_tokens):
@@ -1797,13 +2586,14 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
 
             # 添加colorbar
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label('Probability', fontsize=10, fontweight='bold')
+            cbar.set_label('Probability', fontsize=18, fontweight='bold')
 
             # 设置坐标轴范围
             ax.set_xlim(0, num_total_layers)
             ax.set_ylim(0, num_tokens)
 
-            plt.tight_layout()
+            # 注意：不使用 tight_layout()，因为保存时已使用 bbox_inches='tight'
+            # plt.tight_layout()  # 移除以避免警告
 
             # 保存图片：如果有多个group，在文件名中包含group信息
             if group_idx is not None and len(groups_to_process) > 1:
@@ -1842,7 +2632,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                 if layer_idx < len(texts):
                     all_token_texts_matrix[row_idx][layer_idx] = texts[layer_idx]
             # 标签包含词汇名和token索引
-            all_token_labels.append(f"Token {step_idx}")
+            all_token_labels.append(f"{step_idx}")
 
         # 只处理非NaN的值
         all_valid_probabilities = all_probability_matrix[~np.isnan(all_probability_matrix)]
@@ -1871,19 +2661,19 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
 
             # 设置坐标轴（增大到1.5倍）
             ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
-            # ax.set_ylabel('Token', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
+            ax.set_ylabel('Token Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
             ax.set_title(f'Rank1 Probability Heatmap - All Words ({num_all_tokens} tokens)',
-                         fontsize=14, fontweight='bold')
+                         fontsize=18, fontweight='bold')
 
             # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗（增大到1.5倍）
             num_ticks = 6
             tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=12, fontweight='bold')  # 8 * 1.5 = 12
+            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=15, fontweight='bold')  # 8 * 1.5 = 12
 
             # 设置y轴刻度（token）- 加粗并增大到1.5倍
             ax.set_yticks(np.arange(num_all_tokens) + 0.5)
-            ax.set_yticklabels(all_token_labels, fontsize=14, fontweight='bold')  # 9 * 1.5 = 13.5，约14
+            ax.set_yticklabels(all_token_labels, fontsize=15, fontweight='bold')  # 9 * 1.5 = 13.5，约14
 
             # 在每个单元格中心标注token文本（词汇），而不是概率值
             for row_idx in range(num_all_tokens):
@@ -1924,25 +2714,40 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                         facecolor='white' if text_color == 'black' else 'black',
                                         alpha=0.6, edgecolor='none'))
 
-            # 添加colorbar（减小到原来的十分之一）
-            cbar = plt.colorbar(im, ax=ax, fraction=0.042, pad=0.04)
-            cbar.set_label('Probability', fontsize=10, fontweight='bold')
-
             # 设置坐标轴范围
             ax.set_xlim(0, num_total_layers)
             ax.set_ylim(0, num_all_tokens)
 
-            plt.tight_layout()
+            # 注意：不使用 tight_layout()，因为保存时已使用 bbox_inches='tight'
+            # plt.tight_layout()  # 移除以避免警告
 
-            # 保存整合的heatmap到输出目录的根目录
+            # 保存整合的heatmap到输出目录的根目录（不包含colorbar）
             combined_heatmap_file = os.path.join(output_dir, "rank1_probability_heatmap_all_words.png")
             plt.savefig(combined_heatmap_file, dpi=200, bbox_inches='tight')
+            plt.close()
+
+            # 单独保存colorbar和标签
+            vmin = np.nanmin(all_probability_matrix)
+            vmax = np.nanmax(all_probability_matrix)
+            fig_cbar = plt.figure(figsize=(1.5, 8))
+            ax_cbar = plt.subplot(1, 1, 1)
+            ax_cbar.axis('off')
+            # 创建colorbar（显示概率值范围）
+            sm = plt.cm.ScalarMappable(cmap='Greens', norm=plt.Normalize(vmin=vmin, vmax=vmax))
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
+            cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
+            cbar.set_label('Probability', fontsize=18, fontweight='bold')
+            # 保存colorbar和标签
+            combined_colorbar_file = os.path.join(output_dir, "rank1_probability_heatmap_all_words_colorbar.png")
+            plt.savefig(combined_colorbar_file, dpi=200, bbox_inches='tight')
             plt.close()
 
             # 统计信息
             valid_count = np.sum(~np.isnan(all_probability_matrix))
             total_count = num_all_tokens * num_total_layers
             print(f"  ✓ 整合所有词汇的Rank1 Probability Heatmap已保存: {os.path.basename(combined_heatmap_file)}")
+            print(f"  ✓ Colorbar和标签已单独保存: {os.path.basename(combined_colorbar_file)}")
             print(f"    有效值数量: {valid_count}/{total_count}")
             print(f"    概率值范围: [{all_valid_probabilities.min():.4f}, {all_valid_probabilities.max():.4f}]")
 
@@ -2026,12 +2831,18 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     # 按步骤组织目标词汇
     step_target_words = _organize_target_words_by_steps(object_tokens_info)
 
+    # 收集所有词汇的attention数据（用于32×32 heatmap）
+    all_words_attention_data = {}
+
     # 为每个目标词汇提取attention map
     for word, word_info in step_target_words.items():
         attention_data = _extract_attention_maps_for_word(
             model, tokenizer, word, word_info, all_attentions, all_hidden_states,
-            selected_layers, image_token_start, num_image_tokens, device
+            selected_layers, image_token_start, num_image_tokens, device, num_total_layers
         )
+
+        # 保存attention数据用于后续生成32×32 heatmap
+        all_words_attention_data[word] = attention_data
 
         if attention_data.get('group_attention_maps'):
             _combine_and_visualize_attention_maps(
@@ -2043,6 +2854,9 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
 
     # 生成rank1概率heatmap（每个词汇的所有token的rank1行）
     _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, output_dir, num_total_layers)
+
+    # 生成32×32 head-layer heatmap
+    _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers, num_heads=32)
 
 
 def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
@@ -2583,6 +3397,35 @@ def eval_model(args):
                 print(f"     - 总Token数: {tokens_detail_info['total_tokens']}")
                 print(f"     - 找到的物体数: {len(object_tokens_info)}")
 
+            # 创建幻视词汇标记文件（空文件，仅用于标记）
+            hallucinated_words = chair_info.get('mscoco_hallucinated_words', [])
+            if hallucinated_words:
+                # 提取 node_word（规范化后的词汇），用下划线连接
+                node_words = [node_word for word, node_word in hallucinated_words]
+                # 去重并排序，确保文件名一致
+                unique_node_words = sorted(set(node_words))
+                # 清理文件名：替换可能不安全的字符
+                safe_words = [word.replace(' ', '_').replace('/', '_').replace('\\', '_')
+                             for word in unique_node_words]
+                marker_filename = '_'.join(safe_words)
+            else:
+                marker_filename = 'no_hallucinated'
+
+            # 创建空文件
+            marker_file = os.path.join(image_output_dir, marker_filename)
+            try:
+                with open(marker_file, 'w', encoding='utf-8') as f:
+                    pass  # 创建空文件
+                if verbose:
+                    print(f"  ✓ 幻视词汇标记文件已创建: {os.path.basename(marker_file)}")
+                    if hallucinated_words:
+                        print(f"     - 幻视词汇: {', '.join([node_word for _, node_word in hallucinated_words])}")
+                    else:
+                        print(f"     - 无幻视词汇")
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠️  创建幻视词汇标记文件失败: {e}")
+
             if object_tokens_info:
                 print(f"\n  [物体识别] 找到 {len(object_tokens_info)} 个不同物体名字的词汇(可能是同一个物体不同的描述方式):")
                 # object_tokens_info 现在是字典，以 object_word 为 key
@@ -2822,6 +3665,7 @@ def main():
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
         "num_samples": 500,  # 默认只处理1个图像（用于测试 attention map）
+        "single_image_id": 33270,  # 13348,  # 6153,  # 6153
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
         "target_layers": [15, 17, 23, 29, 31]  # 默认只处理偶数层（减少输出）
@@ -2837,7 +3681,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default= None,  # 13348,  # 6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default= default_config["single_image_id"],  # 13348,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
