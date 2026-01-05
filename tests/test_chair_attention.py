@@ -265,6 +265,43 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     return outputs, output_token_len, input_token_len, output_ids, all_attentions, all_hidden_states
 
 
+def _is_singular_plural_match(word1, word2):
+    """
+    检查两个单词是否是单复数关系
+
+    Args:
+        word1: 第一个单词（小写）
+        word2: 第二个单词（小写）
+
+    Returns:
+        bool: 如果是单复数关系返回True
+    """
+    if word1 == word2:
+        return True
+
+    # 检查 word2 是否是 word1 的复数形式
+    if word2 == word1 + "s" or word2 == word1 + "es":
+        return True
+
+    # 检查 word1 是否是 word2 的复数形式
+    if word1 == word2 + "s" or word1 == word2 + "es":
+        return True
+
+    # 处理一些特殊情况（如 y -> ies）
+    if word1.endswith("y") and word2 == word1[:-1] + "ies":
+        return True
+    if word2.endswith("y") and word1 == word2[:-1] + "ies":
+        return True
+
+    # 处理 f -> ves 的情况（如 leaf -> leaves）
+    if word1.endswith("f") and word2 == word1[:-1] + "ves":
+        return True
+    if word2.endswith("f") and word1 == word2[:-1] + "ves":
+        return True
+
+    return False
+
+
 def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_token_len, chair_evaluator=None):
     """
     识别描述中的名词/物体，并找到它们在生成序列中的 token 位置
@@ -380,11 +417,12 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
         if not search_word:
             continue
 
-        # 1. 检查单个token精确匹配（快速路径）
+        # 1. 检查单个token精确匹配（快速路径，支持单复数匹配）
         single_token_matched = False
         for token_idx, token_id in enumerate(generated_ids):
             token_text = tokenizer.decode([token_id], skip_special_tokens=False).strip().lower()
-            if token_text == search_word:
+            # 检查精确匹配或单复数匹配
+            if _is_singular_plural_match(token_text, search_word):
                 if token_idx not in token_positions:
                     token_positions.append(token_idx)
                     token_texts.append(tokenizer.decode([token_id], skip_special_tokens=False))
@@ -432,11 +470,12 @@ def identify_object_tokens_in_caption(caption, tokenizer, output_ids, input_toke
                     window_tokens = generated_ids[start_idx:start_idx + window_size]
                     window_text = tokenizer.decode(window_tokens, skip_special_tokens=False).strip().lower()
 
-                    # 关键检查：只有当窗口解码后的文本正好等于目标词汇时，才认为是有效匹配
+                    # 关键检查：只有当窗口解码后的文本正好等于目标词汇或单复数匹配时，才认为是有效匹配
                     # 这样可以确保窗口内的所有token都用于匹配目标词汇，避免部分匹配
                     # 例如：如果窗口是 [7, 8]，解码后是 "airplane"，正好等于目标词汇，匹配成功
                     # 如果窗口是 [7, 8, 9]，解码后是 "airplanepark"，不等于目标词汇，不应该匹配
-                    if window_text == search_word:
+                    # 支持单复数匹配：如果目标词汇是 "book"，窗口文本是 "books"，也应该匹配
+                    if _is_singular_plural_match(window_text, search_word):
                         # 精确匹配成功，记录这个匹配范围
                         matched_start_token = start_idx
                         matched_end_token = start_idx + window_size - 1
@@ -829,125 +868,89 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     attn_enhanced_min = attn_values_enhanced.min()
     attn_enhanced_max = attn_values_enhanced.max()
 
-    # 将原图resize成方形，和attention map的尺寸一致
-    # attention map是24x24，需要resize到相同的显示尺寸
+    # 将原图resize成正方形，和attention map的尺寸一致
     if isinstance(image, np.ndarray):
         image_pil = Image.fromarray(image)
     else:
         image_pil = image
 
-    # 直接resize到方形尺寸，不进行裁剪
-    # 这里resize到patch_size * 某个倍数，比如24*20=480，保持清晰度
-    display_size = patch_size * 20
+    # 直接resize到方形尺寸（可能会压缩）
+    display_size = patch_size * 20  # 480x480
     image_resized = image_pil.resize((display_size, display_size), Image.Resampling.LANCZOS)
     image_array = np.array(image_resized)
 
-    # 创建自定义colormap，只使用jet的前一半（从深蓝到淡黄，不包含深红）
-    jet_full = plt.colormaps['jet']
-    colors_half = jet_full(np.linspace(0, 0.75, 256))
-    jet_half = LinearSegmentedColormap.from_list('jet_half', colors_half)
-
-    # 创建1×4的可视化布局（添加增强版本）
-    # 每个子图都是正方形，所以总宽度应该是高度的4倍
-    subplot_size = 6  # 每个子图的高度（也是宽度，因为是正方形）
-    fig = plt.figure(figsize=(subplot_size * 4, subplot_size))
-
-    # 统一所有子图的aspect ratio，确保大小一致
-    # attention map是24x24，原图resize到480x480，需要统一显示尺寸
-    # 使用相同的extent来确保所有图显示相同的大小
-    attn_extent = [0, patch_size, 0, patch_size]  # attention map的extent
-    image_extent = [0, display_size, 0, display_size]  # 原图的extent
-
-    # 为了统一大小，我们需要让所有图使用相同的extent范围
-    # 使用attention map的extent作为基准，原图也使用相同的extent
+    # 统一所有子图的显示范围（都是正方形）
     unified_extent = [0, patch_size, 0, patch_size]
 
-    # 使用subplots_adjust来确保所有子图大小一致
-    # 为colorbar预留空间（右侧），并确保所有子图占据相同的空间
-    left_margin = 0.05
-    right_margin = 0.95  # 为colorbar预留空间
-    bottom_margin = 0.1
-    top_margin = 0.9
-    wspace = 0.15  # 子图之间的水平间距
-    hspace = 0.1   # 子图之间的垂直间距（虽然只有一行，但保留参数）
+    # 构建文件名基础部分
+    filename_base = [f"layer_{layer_idx}", f"step_{step_idx}", f"token_{token_name}"]
 
-    # 计算每个子图的宽度（考虑4个子图和间距）
-    subplot_width = (right_margin - left_margin - wspace * 3) / 4
-
-    # 1. 原图（resize成方形）
-    ax1 = plt.subplot(1, 4, 1)
-    ax1.set_position([left_margin, bottom_margin, subplot_width, top_margin - bottom_margin])
-    # 使用与attention map相同的extent，确保显示大小一致，aspect='equal'使子图成为正方形
-    ax1.imshow(image_array, extent=unified_extent, aspect='equal')
-    title1 = f'Original Image, Token: "{token_text}"'
-    # if predicted_token_word:
-    #     title1 += f'\nPredicted: "{predicted_token_word}"'
-    ax1.set_title(title1, fontsize=12, fontweight='bold')
-    ax1.axis('off')
-
-    # 2. 原始attention map（Jet colormap）
-    ax2 = plt.subplot(1, 4, 2)
-    ax2.set_position([left_margin + subplot_width + wspace, bottom_margin, subplot_width, top_margin - bottom_margin])
-    im2 = ax2.imshow(attn_values, cmap=jet_half, interpolation='bilinear',
-                     vmin=attn_min, vmax=attn_max, extent=unified_extent, aspect='equal')
-    ax2.set_title(f'Original Attention, Layer {layer_idx}', fontsize=12, fontweight='bold')
-    ax2.axis('off')
-    cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-    # 格式化：最多3位有效小数
-    def format_3sigfig(x, p):
-        if x == 0:
-            return '0'
-        # 计算有效数字位数
-        magnitude = np.floor(np.log10(abs(x)))
-        decimals = max(0, int(2 - magnitude))
-        return f'{x:.{decimals}f}'
-    cbar2.ax.yaxis.set_major_formatter(plt.FuncFormatter(format_3sigfig))
-    cbar2.set_label('Logit Value', fontsize=10, fontweight='bold')
-
-    # 3. 增强后的attention map
-    ax3 = plt.subplot(1, 4, 3)
-    ax3.set_position([left_margin + (subplot_width + wspace) * 2, bottom_margin, subplot_width, top_margin - bottom_margin])
+    # 3. 单独保存增强后的attention map（图3）
+    fig3 = plt.figure(figsize=(8, 8))
+    ax3 = plt.subplot(1, 1, 1)
     im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='nearest',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
-    ax3.set_title(f'Enhanced Attention, Layer {layer_idx} (Normalized)', fontsize=12, fontweight='bold')
+    ax3.set_title(f'Attention Map, Token: "{token_text}"', fontsize=14, fontweight='bold')  # 12 * 1.2 = 14.4，约14
     ax3.axis('off')
-    cbar3 = plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-    cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
-    cbar3.set_label('Normalized Value', fontsize=10, fontweight='bold')
+    # 保存图3
+    filename_parts_3 = filename_base + ["attention_map.png"]
+    output_file_3 = os.path.join(output_dir, "_".join(filename_parts_3))
+    plt.savefig(output_file_3, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"    ✓ 图3 (Attention Map) 已保存: {os.path.basename(output_file_3)}")
 
-    # 4. 增强后的attention map和原图叠加
-    ax4 = plt.subplot(1, 4, 4)
-    ax4.set_position([left_margin + (subplot_width + wspace) * 3, bottom_margin, subplot_width, top_margin - bottom_margin])
-    # 先显示原图，使用统一的extent
+    # 单独保存图3的colorbar
+    fig_cbar3 = plt.figure(figsize=(1, 6))
+    ax_cbar3 = plt.subplot(1, 1, 1)
+    ax_cbar3.axis('off')
+    # 创建colorbar
+    sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+    sm3.set_array([])
+    cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
+    cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
+    filename_parts_cbar3 = filename_base + ["attention_map_colorbar.png"]
+    output_file_cbar3 = os.path.join(output_dir, "_".join(filename_parts_cbar3))
+    plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"    ✓ 图3 Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
+
+    # 4. 单独保存增强后的attention map和原图叠加（图4）
+    fig4 = plt.figure(figsize=(8, 8))
+    ax4 = plt.subplot(1, 1, 1)
+    # 先显示原图
     ax4.imshow(image_array, extent=unified_extent, aspect='equal')
-    # 将attention map上采样到和原图相同的尺寸（使用numpy的repeat方法）
+    # 将attention map上采样到和原图相同的尺寸
     scale_factor = display_size // patch_size
     attn_upsampled = np.repeat(np.repeat(attn_values_enhanced, scale_factor, axis=0), scale_factor, axis=1)
-    # 如果尺寸不完全匹配，进行裁剪或填充
-    if attn_upsampled.shape[0] != display_size or attn_upsampled.shape[1] != display_size:
-        # 裁剪到正确尺寸
-        attn_upsampled = attn_upsampled[:display_size, :display_size]
-    # 使用较低的alpha值，让原图更可见，使用统一的extent
+    # 使用较低的alpha值，让原图更可见
     im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
-    ax4.set_title(f'Enhanced Overlay, Layer {layer_idx}', fontsize=12, fontweight='bold')
+    ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=14, fontweight='bold')  # 12 * 1.2 = 14.4，约14
     ax4.axis('off')
-    cbar4 = plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
-    cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
-    cbar4.set_label('Normalized Value', fontsize=10, fontweight='bold')
-
-    # 构建文件名：包含预测的token词汇
-    filename_parts = [f"layer_{layer_idx}", f"step_{step_idx}", f"token_{token_name}"]
-    # if predicted_token_word:
-    #     safe_predicted_word = predicted_token_word.replace(' ', '_').replace('/', '_').replace('\\', '_')[:20]  # 限制长度
-    #     filename_parts.append(f"pred_{safe_predicted_word}")
-    filename_parts.append("attention.png")
-    output_file = os.path.join(output_dir, "_".join(filename_parts))
-
-    plt.savefig(output_file, dpi=200, bbox_inches='tight')
+    # 保存图4（不使用前缀）
+    output_file_4 = os.path.join(output_dir, "attention_map_overlay.png")
+    plt.savefig(output_file_4, dpi=200, bbox_inches='tight')
     plt.close()
+    print(f"    ✓ 图4 (Attention Map Overlay) 已保存: {os.path.basename(output_file_4)}")
 
-    print(f"    ✓ Layer {layer_idx} attention map已保存: {os.path.basename(output_file)}")
+    # 单独保存图4的colorbar（不使用前缀，因为不同层的colorbar都一样）
+    output_file_cbar4 = os.path.join(output_dir, "attention_map_overlay_colorbar.png")
+    # 检查是否已经保存过colorbar，避免重复保存
+    if not os.path.exists(output_file_cbar4):
+        fig_cbar4 = plt.figure(figsize=(1, 6))
+        ax_cbar4 = plt.subplot(1, 1, 1)
+        ax_cbar4.axis('off')
+        # 创建colorbar
+        sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+        sm4.set_array([])
+        cbar4 = plt.colorbar(sm4, ax=ax_cbar4, orientation='vertical', fraction=1.0)
+        cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
+        cbar4.set_label('Normalized Value', fontsize=12, fontweight='bold')  # 10 * 1.2 = 12
+        plt.savefig(output_file_cbar4, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"    ✓ 图4 Colorbar 已保存: {os.path.basename(output_file_cbar4)}")
+
+    print(f"    ✓ Layer {layer_idx} attention maps已保存")
     print(f"      原始Logits范围: [{attn_min:.4e}, {attn_max:.4e}]")
     print(f"      增强后范围: [{attn_enhanced_min:.4f}, {attn_enhanced_max:.4f}]")
 
@@ -1054,10 +1057,10 @@ def _collect_target_token_positions(object_tokens_info):
         if len(token_groups)>0:
             for token_idx in range(token_groups[0][0], token_groups[0][1] + 1):
                 target_token_positions.add(token_idx)
-            if len(token_groups) > 1:
-                for token_idx in range(token_groups[-1][0], token_groups[-1][1] + 1):
-                    target_token_positions.add(token_idx)
-                print(f"  ⚠️  物体 {object_word} 有 {len(token_groups)} 个token组: {token_groups}")
+            # if len(token_groups) > 1:
+            #     for token_idx in range(token_groups[-1][0], token_groups[-1][1] + 1):
+            #         target_token_positions.add(token_idx)
+            #     print(f"  ⚠️  物体 {object_word} 有 {len(token_groups)} 个token组: {token_groups}")
         else:
             if token_positions:
                 target_token_positions.add(token_positions[0])
@@ -1176,9 +1179,9 @@ def _organize_target_words_by_steps(object_tokens_info):
             if len(token_groups) == 1:
                 filtered_token_groups = token_groups
             else:
-                # 只保留第一个和最后一个group
-                filtered_token_groups = [token_groups[0], token_groups[-1]]
-                print(f"  ⚠️  词汇 '{word}' 有 {len(token_groups)} 个token组: {token_groups}，只保留第一个和最后一个")
+                # 只保留第一个
+                filtered_token_groups = [token_groups[0]] # [token_groups[0], token_groups[-1]]
+                # print(f"  ⚠️  词汇 '{word}' 有 {len(token_groups)} 个token组: {token_groups}，只保留第一个和最后一个")
             # 从保留的groups中提取步骤和位置
             word_steps = []
             for group in filtered_token_groups:
@@ -1194,10 +1197,10 @@ def _organize_target_words_by_steps(object_tokens_info):
                     word_steps = [token_positions[0]]
                     filtered_token_positions = [token_positions[0]]
                 else:
-                    # 只保留第一个和最后一个位置
-                    word_steps = [token_positions[0], token_positions[-1]]
-                    filtered_token_positions = [token_positions[0], token_positions[-1]]
-                    print(f"  ⚠️  词汇 '{word}' 在 {token_positions} 位置出现多次，只保留第一次和最后一次的位置")
+                    # 只保留第一个
+                    word_steps = [token_positions[0]] # [token_positions[0], token_positions[-1]]
+                    filtered_token_positions = [token_positions[0]] # [token_positions[0], token_positions[-1]]
+                    # print(f"  ⚠️  词汇 '{word}' 在 {token_positions} 位置出现多次，只保留第一次和最后一次的位置")
             else:
                 continue
 
@@ -1785,7 +1788,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                 if layer_idx < len(texts):
                     all_token_texts_matrix[row_idx][layer_idx] = texts[layer_idx]
             # 标签包含词汇名和token索引
-            all_token_labels.append(f"{word}\nToken {step_idx}")
+            all_token_labels.append(f"Token {step_idx}")
 
         # 只处理非NaN的值
         all_valid_probabilities = all_probability_matrix[~np.isnan(all_probability_matrix)]
@@ -1812,21 +1815,21 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                vmin=np.nanmin(all_probability_matrix), vmax=np.nanmax(all_probability_matrix),
                                shading='flat')
 
-            # 设置坐标轴
-            ax.set_xlabel('Layer Index', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Token (by word)', fontsize=12, fontweight='bold')
+            # 设置坐标轴（增大到1.5倍）
+            # ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
+            # ax.set_ylabel('Token', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
             ax.set_title(f'Rank1 Probability Heatmap - All Words ({num_all_tokens} tokens)',
                          fontsize=14, fontweight='bold')
 
-            # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗
+            # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗（增大到1.5倍）
             num_ticks = 6
             tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], rotation=45, ha='right', fontsize=8, fontweight='bold')
+            ax.set_xticklabels([f'L{i}' for i in tick_indices], rotation=45, ha='right', fontsize=12, fontweight='bold')  # 8 * 1.5 = 12
 
-            # 设置y轴刻度（token）
+            # 设置y轴刻度（token）- 加粗并增大到1.5倍
             ax.set_yticks(np.arange(num_all_tokens) + 0.5)
-            ax.set_yticklabels(all_token_labels, fontsize=9)
+            ax.set_yticklabels(all_token_labels, fontsize=14, fontweight='bold')  # 9 * 1.5 = 13.5，约14
 
             # 在每个单元格中心标注token文本（词汇），而不是概率值
             for row_idx in range(num_all_tokens):
@@ -1867,8 +1870,8 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                         facecolor='white' if text_color == 'black' else 'black',
                                         alpha=0.6, edgecolor='none'))
 
-            # 添加colorbar
-            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            # 添加colorbar（减小到原来的十分之一）
+            cbar = plt.colorbar(im, ax=ax, fraction=0.042, pad=0.04)
             cbar.set_label('Probability', fontsize=10, fontweight='bold')
 
             # 设置坐标轴范围
@@ -1922,6 +1925,33 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
 
     # 加载图像
     image = _load_image(image_file)
+
+    # 拷贝原图到输出目录
+    import shutil
+    image_filename = os.path.basename(image_file)
+    copied_image_path = os.path.join(output_dir, image_filename)
+    try:
+        shutil.copy2(image_file, copied_image_path)
+        print(f"  ✓ 原图已拷贝到: {os.path.basename(copied_image_path)}")
+    except Exception as e:
+        print(f"  ⚠️  拷贝原图失败: {e}")
+
+    # 额外保存一张resize成正方形的原图
+    if isinstance(image, np.ndarray):
+        image_pil = Image.fromarray(image)
+    else:
+        image_pil = image
+    # Resize成正方形
+    patch_size = 24
+    display_size = patch_size * 20  # 480x480
+    image_resized = image_pil.resize((display_size, display_size), Image.Resampling.LANCZOS)
+    # 保存resize后的原图
+    resized_image_path = os.path.join(output_dir, "original_image_resized_square.png")
+    try:
+        image_resized.save(resized_image_path)
+        print(f"  ✓ Resize成正方形的原图已保存: {os.path.basename(resized_image_path)}")
+    except Exception as e:
+        print(f"  ⚠️  保存resize后的原图失败: {e}")
 
     # 确定目标层
     selected_layers, num_total_layers = _determine_target_layers(model, target_layers)
@@ -2753,7 +2783,7 @@ def main():
                        help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
                        help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个, 默认: 1)")
-    parser.add_argument("--single-image-id", type=int, default= None,  # 13348,  # 6153,  # 6153
+    parser.add_argument("--single-image-id", type=int, default= 33270,  # 13348,  # 6153,  # 6153
                        help="指定单个图像ID进行处理(如果指定, 将只处理该图像, 忽略其他参数)")
 
     # 模型参数
