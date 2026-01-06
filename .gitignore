@@ -6,6 +6,8 @@ pope_visualized/
 # C extensions
 *.so
 log*.txt
+pope_coco-*
+results*
 .github/
 # Distribution folders for models
 Qwen2.5-VL-7B-Instruct/
