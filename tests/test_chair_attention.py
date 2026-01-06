@@ -2421,14 +2421,17 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
             # 计算所有权重值的总和
             total_sum = np.nansum(heatmap_matrix)
 
+            # 初始化变量（用于JSON保存）
+            split_layer = None
+            split_position = None
+            y_position = None
+
             if total_sum > 0:
                 # 目标：找到一条水平线，使得线以下（包括线本身）的权重值总和 = 线以上的权重值总和
                 target_sum = total_sum / 2.0
 
                 # 从 L0 开始，逐层累加权重值
                 cumulative_sum = 0.0
-                split_layer = None
-                split_position = None  # 在层内的位置（0.0 表示层底部，1.0 表示层顶部）
 
                 for layer_idx in range(num_total_layers):
                     # 计算该层的权重值总和
@@ -2462,9 +2465,9 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
                         # 线在层内部
                         y_position = split_layer + split_position
 
-                    # 绘制水平线（绿色，透明度0.3）
-                    ax.axhline(y=y_position, xmin=0, xmax=num_heads,
-                              color='green', linewidth=2.0, alpha=0.3, linestyle='-')
+                    # # 绘制水平线（绿色，透明度0.3）
+                    # ax.axhline(y=y_position, xmin=0, xmax=num_heads,
+                    #           color='green', linewidth=2.0, alpha=0.3, linestyle='-')
 
                     # 打印调试信息
                     print(f"    权重均分线位置: Layer {split_layer}, 层内位置 {split_position:.4f}, Y坐标 {y_position:.4f}")
@@ -2477,11 +2480,36 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
             plt.savefig(heatmap_file, dpi=200, bbox_inches='tight')
             plt.close()
 
+            # 保存JSON文件（包含所有数据，方便后续重新生成）
+            json_data = {
+                'word': word,
+                'group_idx': group_idx if len(token_groups) > 1 else None,
+                'num_total_layers': int(num_total_layers),
+                'num_heads': int(num_heads),
+                'global_min': float(global_min),
+                'global_max': float(global_max),
+                'heatmap_matrix': [
+                    [float(v) if not np.isnan(v) else None for v in row]
+                    for row in heatmap_matrix
+                ],
+                'split_line': {
+                    'split_layer': int(split_layer) if split_layer is not None else None,
+                    'split_position': float(split_position) if split_position is not None else None,
+                    'y_position': float(y_position) if split_layer is not None else None,
+                    'total_sum': float(total_sum) if total_sum > 0 else None
+                } if split_layer is not None else None
+            }
+
+            json_file = os.path.splitext(heatmap_file)[0] + '.json'
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+
             # 统计信息
             valid_count = np.sum(~np.isnan(heatmap_matrix))
             total_count = num_total_layers * num_heads
             group_info = f"Group {group_idx+1}" if len(token_groups) > 1 else ""
             print(f"  ✓ 词汇 '{word}' {group_info} 的32×32 Head-Layer Heatmap已保存: {os.path.basename(heatmap_file)}")
+            print(f"  ✓ JSON数据文件已保存: {os.path.basename(json_file)}")
             print(f"    有效值数量: {valid_count}/{total_count}")
             if len(valid_data) > 0:
                 print(f"    集中度范围: [{valid_data.min():.6f}, {valid_data.max():.6f}] (全局范围: [{global_min:.6f}, {global_max:.6f}])")
