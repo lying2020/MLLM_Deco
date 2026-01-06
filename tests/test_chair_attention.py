@@ -61,7 +61,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from test_llava_v15_7b_attention import visualize_step_attention_map, plot_attention_pixel_grid, load_image
 
 import numpy as np
-from scipy.ndimage import label
+from scipy.ndimage import label, convolve
 from skimage.measure import regionprops
 import matplotlib.pyplot as plt
 
@@ -162,13 +162,14 @@ class HeatmapConcentrationAnalyzer:
 
         return binary_map, threshold
 
-    def calculate_concentration_index(self, heatmap_input, visualize=False):
+    def calculate_concentration_index(self, heatmap_input, visualize=False, top_k=4):
         """
-        计算heatmap的像素集中度指数
+        计算heatmap的像素集中度指数（基于方案C：卷积+聚类中心+权重筛选）
 
         参数:
         - heatmap_input: 输入heatmap (多种格式)
         - visualize: 是否可视化结果
+        - top_k: 选取的Top-K个参考点数量（默认4）
 
         返回:
         - dict: 包含各项指标和综合集中度
@@ -176,100 +177,193 @@ class HeatmapConcentrationAnalyzer:
         # 1. 预处理输入
         heatmap = self.preprocess_heatmap(heatmap_input)
 
-        # 2. 提取高像素点
-        binary_map, threshold = self.extract_high_pixels(heatmap)
-
-        # 3. 统计基本信息
-        high_pixel_count = np.sum(binary_map)
-        total_pixels = heatmap.size
-
-        # 如果高像素点太少，返回最小集中度
-        if high_pixel_count == 0:
+        # 检查heatmap是否全为0或无效
+        if np.all(heatmap == 0) or np.all(np.isnan(heatmap)):
             return {
                 'concentration_index': 0.0,
-                'compactness': 0.0,
-                'size_coefficient': 0.0,
-                'connectivity': 0.0,
-                'high_pixel_count': 0,
-                'threshold': threshold,
-                'message': 'No high pixels found'
+                'spatial_compactness': 0.0,
+                'pixel_weight_ratio': 0.0,
+                'message': 'Empty or invalid heatmap'
             }
 
-        # 4. 连通区域分析 (8连通)
-        labeled_array, num_features = label(binary_map, structure=np.ones((3, 3)))
+        # 2. 3×3卷积（全1核，stride=1，padding=0）→ 22×22
+        kernel = np.ones((3, 3))
+        convolved = convolve(heatmap, kernel, mode='valid')  # 得到22×22
 
-        # 如果只有一个高像素点，是完全集中
-        if high_pixel_count == 1:
-            result = {
-                'concentration_index': 1.0,
-                'compactness': 1.0,
-                'size_coefficient': 1.0,
-                'connectivity': 1.0,
-                'high_pixel_count': 1,
-                'threshold': threshold,
-                'num_regions': 1,
-                'message': 'Single high pixel - perfectly concentrated'
+        # 检查卷积结果是否有效
+        if convolved.size == 0 or np.all(np.isnan(convolved)):
+            return {
+                'concentration_index': 0.0,
+                'spatial_compactness': 0.0,
+                'pixel_weight_ratio': 0.0,
+                'message': 'Convolution failed'
             }
 
-            if visualize:
-                self.visualize_heatmap(heatmap, binary_map, f"Concentration: {1.0:.3f}")
+        # 3. 选取Top-K个点（从22×22中）
+        flat_indices = np.argsort(convolved.flatten())[-top_k:]
+        top_k_flat_indices = flat_indices[::-1]  # 从高到低排序
+        top_k_positions_22x22 = np.unravel_index(top_k_flat_indices, convolved.shape)  # (row_indices, col_indices)
 
-            return result
+        # 4. 映射回24×24坐标
+        # 卷积后的坐标(i, j)对应原始heatmap的(i, j)到(i+2, j+2)的3×3区域
+        # 我们使用区域中心点作为映射坐标：(i+1, j+1)
+        top_k_positions_24x24 = []
+        for i, j in zip(top_k_positions_22x22[0], top_k_positions_22x22[1]):
+            # 映射到原始坐标（确保在边界内）
+            orig_i = min(i + 1, heatmap.shape[0] - 1)
+            orig_j = min(j + 1, heatmap.shape[1] - 1)
+            top_k_positions_24x24.append((orig_i, orig_j))
 
-        # 5. 获取连通区域属性
-        regions = regionprops(labeled_array)
+        # 5. 收集候选点集合（K个参考点+每个点的8邻域，不去重）
+        candidate_points = []
+        for ref_i, ref_j in top_k_positions_24x24:
+            # 添加参考点本身
+            candidate_points.append((ref_i, ref_j))
+            # 添加8邻域
+            for di in [-1, 0, 1]:
+                for dj in [-1, 0, 1]:
+                    if di == 0 and dj == 0:
+                        continue  # 跳过参考点本身
+                    ni, nj = ref_i + di, ref_j + dj
+                    # 检查边界
+                    if 0 <= ni < heatmap.shape[0] and 0 <= nj < heatmap.shape[1]:
+                        candidate_points.append((ni, nj))
 
-        # 计算各区域面积并找到最大区域
-        region_areas = [region.area for region in regions]
-        max_region_idx = np.argmax(region_areas)
-        max_region = regions[max_region_idx]
+        if len(candidate_points) == 0:
+            return {
+                'concentration_index': 0.0,
+                'spatial_compactness': 0.0,
+                'pixel_weight_ratio': 0.0,
+                'message': 'No candidate points found'
+            }
 
-        # 6. 计算各项指标
+        # 6. 计算所有候选点到K个参考点的距离方差，选方差最小的作为聚类中心
+        def euclidean_distance(p1, p2):
+            """计算两点之间的欧氏距离"""
+            return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
-        # (a) 紧凑度系数: 衡量高像素点的聚集紧密程度
-        y_coords, x_coords = np.where(binary_map == 1)
-        min_x, max_x = np.min(x_coords), np.max(x_coords)
-        min_y, max_y = np.min(y_coords), np.max(y_coords)
-        bounding_box_width = max_x - min_x + 1
-        bounding_box_height = max_y - min_y + 1
-        bounding_box_area = bounding_box_width * bounding_box_height
+        min_variance = float('inf')
+        cluster_center = None
 
-        # 紧凑度: 1表示完全填充边界框，0表示非常稀疏
-        if bounding_box_area == 0:
-            C_compactness = 1.0
+        for ref_point in top_k_positions_24x24:
+            # 计算所有候选点到该参考点的距离
+            distances = [euclidean_distance(cand_point, ref_point) for cand_point in candidate_points]
+            distance_variance = np.var(distances)
+
+            if distance_variance < min_variance:
+                min_variance = distance_variance
+                cluster_center = ref_point
+
+        if cluster_center is None:
+            cluster_center = top_k_positions_24x24[0]  # 默认使用第一个参考点
+
+        # 7. 计算候选点到聚类中心的权重距离（logit*距离），剔除最远的10%
+        weighted_distances = []
+        for cand_point in candidate_points:
+            distance = euclidean_distance(cand_point, cluster_center)
+            logit_value = heatmap[cand_point[0], cand_point[1]]
+            # 处理NaN和负值
+            if np.isnan(logit_value) or logit_value < 0:
+                logit_value = 0.0
+            weighted_distance = logit_value * distance
+            weighted_distances.append((cand_point, weighted_distance))
+
+        # 按权重距离排序
+        weighted_distances.sort(key=lambda x: x[1], reverse=True)
+
+        # 剔除最远的10%
+        remove_count = max(1, int(len(weighted_distances) * 0.1))
+        filtered_candidate_points = [point for point, _ in weighted_distances[:-remove_count]]
+
+        if len(filtered_candidate_points) == 0:
+            return {
+                'concentration_index': 0.0,
+                'spatial_compactness': 0.0,
+                'pixel_weight_ratio': 0.0,
+                'message': 'No points after filtering'
+            }
+
+        # 8. 计算两个指标
+        # 8.1 空间指标：候选点的空间分布紧凑度
+        if len(filtered_candidate_points) == 1:
+            spatial_compactness = 1.0  # 单点，完全紧凑
         else:
-            C_compactness = high_pixel_count / bounding_box_area
+            # 计算候选点的边界框
+            y_coords = [p[0] for p in filtered_candidate_points]
+            x_coords = [p[1] for p in filtered_candidate_points]
+            min_x, max_x = min(x_coords), max(x_coords)
+            min_y, max_y = min(y_coords), max(y_coords)
+            bounding_box_width = max_x - min_x + 1
+            bounding_box_height = max_y - min_y + 1
+            bounding_box_area = bounding_box_width * bounding_box_height
 
-        # (b) 大小系数: 最大连通区域占比
-        C_size = max_region.area / high_pixel_count
+            # 计算到质心的平均距离
+            centroid_y = np.mean(y_coords)
+            centroid_x = np.mean(x_coords)
+            distances_to_centroid = [euclidean_distance(p, (centroid_y, centroid_x))
+                                    for p in filtered_candidate_points]
+            mean_distance = np.mean(distances_to_centroid)
 
-        # (c) 连通性系数: 衡量高像素点的连接程度
-        C_connectivity = 1 - (num_features / high_pixel_count)
+            # 计算距离的标准差（衡量分散程度）
+            distance_std = np.std(distances_to_centroid) if len(distances_to_centroid) > 1 else 0.0
 
-        # 7. 计算综合集中度指数
-        concentration_index = (
-            self.weights[0] * C_compactness +
-            self.weights[1] * C_size +
-            self.weights[2] * C_connectivity
-        )
+            # 紧凑度计算：
+            # 1. 密度：点数/边界框面积（点数越多、边界框越小，密度越高）
+            if bounding_box_area > 0:
+                density = len(filtered_candidate_points) / bounding_box_area
+            else:
+                density = 1.0
 
-        # 8. 收集结果
+            # 2. 距离因子：平均距离越小，紧凑度越高
+            # 使用归一化：假设最大可能距离为对角线长度
+            max_possible_distance = np.sqrt(heatmap.shape[0]**2 + heatmap.shape[1]**2)
+            normalized_mean_distance = mean_distance / max_possible_distance if max_possible_distance > 0 else 0.0
+            distance_factor = 1.0 / (1.0 + normalized_mean_distance)
+
+            # 3. 分散因子：标准差越小，越集中
+            normalized_std = distance_std / max_possible_distance if max_possible_distance > 0 else 0.0
+            dispersion_factor = 1.0 / (1.0 + normalized_std)
+
+            # 综合紧凑度：密度 × 距离因子 × 分散因子
+            # 归一化：理论上限需要根据实际情况调整，这里先简单归一化
+            spatial_compactness = density * distance_factor * dispersion_factor
+            # 归一化到[0, 1]（理论上限约为1.0，但实际可能超过，所以需要clamp）
+            spatial_compactness = min(1.0, spatial_compactness)
+
+        # 8.2 像素权重指标：候选点的总像素值占整张图的像素值比例
+        candidate_pixel_sum = sum(heatmap[p[0], p[1]] for p in filtered_candidate_points
+                                  if not np.isnan(heatmap[p[0], p[1]]))
+        total_pixel_sum = np.nansum(heatmap)
+
+        if total_pixel_sum > 0:
+            pixel_weight_ratio = candidate_pixel_sum / total_pixel_sum
+        else:
+            pixel_weight_ratio = 0.0
+
+        # 9. 计算综合集中度指数（两个指标相加）
+        # 由于两个指标都在[0, 1]范围内，可以直接相加，然后归一化
+        concentration_index = spatial_compactness + pixel_weight_ratio
+        # 归一化到[0, 1]（因为两个指标相加最大为2）
+        concentration_index = concentration_index / 2.0
+
+        # 10. 收集结果
         result = {
             'concentration_index': float(concentration_index),
-            'compactness': float(C_compactness),
-            'size_coefficient': float(C_size),
-            'connectivity': float(C_connectivity),
-            'high_pixel_count': int(high_pixel_count),
-            'threshold': float(threshold),
-            'num_regions': int(num_features),
-            'max_region_area': int(max_region.area),
-            'bounding_box_area': int(bounding_box_area),
-            'bounding_box_size': (int(bounding_box_width), int(bounding_box_height)),
+            'spatial_compactness': float(spatial_compactness),
+            'pixel_weight_ratio': float(pixel_weight_ratio),
+            'cluster_center': cluster_center,
+            'filtered_candidate_count': len(filtered_candidate_points),
+            'total_candidate_count': len(candidate_points),
+            'top_k_positions': top_k_positions_24x24,
             'heatmap_shape': heatmap.shape
         }
 
-        # 9. 可视化（如果启用）
+        # 11. 可视化（如果启用）
         if visualize:
+            # 创建二值化图显示候选点
+            binary_map = np.zeros_like(heatmap)
+            for point in filtered_candidate_points:
+                binary_map[point[0], point[1]] = 1
             title = f"Concentration Index: {concentration_index:.3f}"
             self.visualize_heatmap(heatmap, binary_map, title)
 
@@ -277,20 +371,21 @@ class HeatmapConcentrationAnalyzer:
 
 
 # 使用示例函数
-def analyze_heatmap_concentration(heatmap_input, top_percentile=5, visualize=False):
+def analyze_heatmap_concentration(heatmap_input, top_percentile=5, visualize=False, top_k=4):
     """
     快速分析函数：一站式分析heatmap集中度
 
     参数:
     - heatmap_input: 输入数据 (24×24数组、576一维数组等)
-    - top_percentile: 高像素百分比阈值
+    - top_percentile: 高像素百分比阈值（保留用于兼容性，新算法中不使用）
     - visualize: 是否可视化结果
+    - top_k: 选取的Top-K个参考点数量（默认4）
 
     返回:
     - 集中度分析结果
     """
     analyzer = HeatmapConcentrationAnalyzer(top_percentile=top_percentile)
-    return analyzer.calculate_concentration_index(heatmap_input, visualize=visualize)
+    return analyzer.calculate_concentration_index(heatmap_input, visualize=visualize, top_k=top_k)
 
 def get_coco_val2014_images(coco_root: str, image_id_list: Optional[List[int]] = None, max_images: int = 0):
     """
@@ -2763,11 +2858,39 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             plt.savefig(combined_colorbar_file, dpi=200, bbox_inches='tight')
             plt.close()
 
+            # 保存JSON文件（包含所有数据，方便后续手动筛选和重新生成）
+            json_data = {
+                'num_total_layers': int(num_total_layers),
+                'num_all_tokens': int(num_all_tokens),
+                'vmin': float(vmin),
+                'vmax': float(vmax),
+                'all_rank1_data': [
+                    {
+                        'word': word,
+                        'step_idx': int(step_idx),
+                        'probs': [float(p) if not np.isnan(p) else None for p in probs],
+                        'texts': texts
+                    }
+                    for word, step_idx, probs, texts in all_rank1_data
+                ],
+                'all_probability_matrix': [
+                    [float(p) if not np.isnan(p) else None for p in row]
+                    for row in all_probability_matrix
+                ],
+                'all_token_texts_matrix': all_token_texts_matrix,
+                'all_token_labels': all_token_labels
+            }
+
+            json_file = os.path.join(output_dir, "rank1_probability_heatmap_all_words.json")
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+
             # 统计信息
             valid_count = np.sum(~np.isnan(all_probability_matrix))
             total_count = num_all_tokens * num_total_layers
             print(f"  ✓ 整合所有词汇的Rank1 Probability Heatmap已保存: {os.path.basename(combined_heatmap_file)}")
             print(f"  ✓ Colorbar和标签已单独保存: {os.path.basename(combined_colorbar_file)}")
+            print(f"  ✓ JSON数据文件已保存: {os.path.basename(json_file)}")
             print(f"    有效值数量: {valid_count}/{total_count}")
             print(f"    概率值范围: [{all_valid_probabilities.min():.4f}, {all_valid_probabilities.max():.4f}]")
 
