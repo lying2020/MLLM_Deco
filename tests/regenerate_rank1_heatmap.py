@@ -27,6 +27,50 @@ def load_json_data(json_file):
     return data
 
 
+def build_matrices_from_rank1_data(all_rank1_data, num_total_layers):
+    """
+    从 all_rank1_data 构建所需的矩阵
+
+    Args:
+        all_rank1_data: rank1 数据列表
+        num_total_layers: 总层数
+
+    Returns:
+        tuple: (all_probability_matrix, all_token_texts_matrix, all_token_labels, vmin, vmax)
+    """
+    num_all_tokens = len(all_rank1_data)
+
+    all_probability_matrix = np.full((num_all_tokens, num_total_layers), np.nan)
+    all_token_texts_matrix = [[''] * num_total_layers for _ in range(num_all_tokens)]
+    all_token_labels = []
+    all_valid_probs = []
+
+    for row_idx, item in enumerate(all_rank1_data):
+        probs = item['probs']
+        texts = item['texts']
+        step_idx = item['step_idx']
+
+        for layer_idx in range(num_total_layers):
+            if layer_idx < len(probs) and probs[layer_idx] is not None:
+                prob_value = probs[layer_idx]
+                all_probability_matrix[row_idx, layer_idx] = prob_value
+                all_valid_probs.append(prob_value)
+            if layer_idx < len(texts):
+                all_token_texts_matrix[row_idx][layer_idx] = texts[layer_idx]
+
+        all_token_labels.append(f"{step_idx}")
+
+    # 计算 vmin 和 vmax
+    if all_valid_probs:
+        vmin = float(min(all_valid_probs))
+        vmax = float(max(all_valid_probs))
+    else:
+        vmin = 0.0
+        vmax = 1.0
+
+    return all_probability_matrix, all_token_texts_matrix, all_token_labels, vmin, vmax
+
+
 def filter_data(data, filter_words=None, filter_steps=None):
     """
     筛选数据
@@ -64,43 +108,12 @@ def filter_data(data, filter_words=None, filter_steps=None):
     filtered_data['all_rank1_data'] = filtered_rank1_data
     filtered_data['num_all_tokens'] = len(filtered_rank1_data)
 
-    # 重新构建矩阵
-    num_all_tokens = len(filtered_rank1_data)
-    num_total_layers = data['num_total_layers']
-
-    all_probability_matrix = np.full((num_all_tokens, num_total_layers), np.nan)
-    all_token_texts_matrix = [[''] * num_total_layers for _ in range(num_all_tokens)]
-    all_token_labels = []
-
-    for row_idx, item in enumerate(filtered_rank1_data):
-        probs = item['probs']
-        texts = item['texts']
-        step_idx = item['step_idx']
-
-        for layer_idx in range(num_total_layers):
-            if layer_idx < len(probs) and probs[layer_idx] is not None:
-                all_probability_matrix[row_idx, layer_idx] = probs[layer_idx]
-            if layer_idx < len(texts):
-                all_token_texts_matrix[row_idx][layer_idx] = texts[layer_idx]
-
-        all_token_labels.append(f"{step_idx}")
-
-    filtered_data['all_probability_matrix'] = [
-        [p if p is not None else None for p in row]
-        for row in all_probability_matrix
-    ]
-    filtered_data['all_token_texts_matrix'] = all_token_texts_matrix
-    filtered_data['all_token_labels'] = all_token_labels
-
-    # 重新计算vmin和vmax
-    all_valid_probs = [p for row in filtered_data['all_probability_matrix']
-                      for p in row if p is not None]
-    if all_valid_probs:
-        filtered_data['vmin'] = float(min(all_valid_probs))
-        filtered_data['vmax'] = float(max(all_valid_probs))
-    else:
-        filtered_data['vmin'] = 0.0
-        filtered_data['vmax'] = 1.0
+    # 从 all_rank1_data 重新构建矩阵并计算 vmin/vmax
+    _, _, _, vmin, vmax = build_matrices_from_rank1_data(
+        filtered_rank1_data, data['num_total_layers']
+    )
+    filtered_data['vmin'] = vmin
+    filtered_data['vmax'] = vmax
 
     return filtered_data
 
@@ -110,21 +123,18 @@ def regenerate_heatmap(data, output_dir, output_filename_prefix):
     从数据重新生成heatmap图例
 
     Args:
-        data: 数据字典
+        data: 数据字典（包含 all_rank1_data）
         output_dir: 输出目录
         output_filename_prefix: 输出文件名前缀（不含扩展名）
     """
-    # 提取数据
+    # 从 all_rank1_data 构建所需的矩阵
     num_total_layers = data['num_total_layers']
-    num_all_tokens = data['num_all_tokens']
-    all_probability_matrix = np.array([
-        [p if p is not None else np.nan for p in row]
-        for row in data['all_probability_matrix']
-    ])
-    all_token_texts_matrix = data['all_token_texts_matrix']
-    all_token_labels = data['all_token_labels']
-    vmin = data['vmin']
-    vmax = data['vmax']
+    all_rank1_data = data['all_rank1_data']
+
+    all_probability_matrix, all_token_texts_matrix, all_token_labels, vmin, vmax = \
+        build_matrices_from_rank1_data(all_rank1_data, num_total_layers)
+
+    num_all_tokens = len(all_rank1_data)
 
     # 检查是否有有效数据
     all_valid_probabilities = all_probability_matrix[~np.isnan(all_probability_matrix)]
@@ -286,7 +296,7 @@ def main():
     # 生成输出文件名前缀（输入文件名+时间戳）
     json_basename = os.path.splitext(os.path.basename(args.json_file))[0]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename_prefix = f"{json_basename}_{timestamp}"
+    output_filename_prefix = f"{json_basename}_new"
 
     # 解析筛选条件
     filter_words = None
@@ -300,6 +310,9 @@ def main():
     # 加载数据
     print(f"正在加载JSON文件: {args.json_file}")
     data = load_json_data(args.json_file)
+    # 如果 JSON 中没有 num_all_tokens，从 all_rank1_data 计算
+    if 'num_all_tokens' not in data:
+        data['num_all_tokens'] = len(data.get('all_rank1_data', []))
     print(f"  原始数据: {data['num_all_tokens']} 个tokens, {data['num_total_layers']} 层")
 
     # 筛选数据（如果需要）
