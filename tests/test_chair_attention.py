@@ -3835,8 +3835,8 @@ def main():
         "top_p": None,
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
-        "num_samples": 500,  # 默认只处理1个图像（用于测试 attention map）
-        "single_image_id": 33270,  # 13348,  # 6153,  # 6153
+        "num_samples": 0,  # 默认只处理1个图像（用于测试 attention map）
+        "single_image_id": None,  # 13348,  # 6153,  # 6153
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
         "target_layers": [15, 17, 23, 29, 31]  # 默认只处理偶数层（减少输出）
