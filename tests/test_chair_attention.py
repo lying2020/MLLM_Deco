@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
 """
+LLaVA v1.5 7B 模型架构分析和 Attention 可视化脚本
 CHAIR 评估脚本 - 生成图像描述并保存为 JSONL 格式
 参考 run_pope_eval.py 的实现, 针对 CHAIR benchmark 优化
 自动检测数据集和模型, 使用默认参数, 无需输入参数即可运行
+
+功能说明：
+1. 输出 LLaVA 整个网络架构的不同层的基本信息(网络类型、输入输出 size、参数量等)
+2. 输出文本或视觉的 hidden state，hidden layer 的 size，以及二者 attention 的信息
+3. 输出特定层(如所有偶数层或奇数层)的 transformer 层的 Q、K 信息，生成 heatmap
+4. 将 heatmap 映射到原图上的结果
+5. 所有结果保存在 tests/output/ 路径中
+
+功能说明
+提取每个生成步骤的所有 32 层 attention
+对每层取 attention 矩阵的最后一行(最后一个 hidden token 对序列中所有 token 的 attention)
+从最后一行中提取对图像 token 的 attention(576 个值)
+将 576 个值 reshape 到 24×24
+映射回原图并生成多种可视化
 
 CHAIR 评估需要:
 1. COCO 2014 val2014 图像目录
