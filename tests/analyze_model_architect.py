@@ -132,8 +132,9 @@ def analyze_model_architecture(model, tokenizer, output_dir):
                 print(f"  Patch数量: {vision_info['config'].get('num_patches', 'N/A')}")
 
     # 分析 MM Projector
-    if hasattr(model, 'mm_projector'):
-        projector = model.mm_projector
+    lang_model = model.get_model() if hasattr(model, 'get_model') else model
+    if hasattr(lang_model, 'mm_projector'):
+        projector = lang_model.mm_projector
         if projector is not None:
             projector_params, _ = count_parameters(projector)
             projector_info = {
@@ -325,6 +326,322 @@ def analyze_model_architecture(model, tokenizer, output_dir):
     return arch_info
 
 
+def extract_and_visualize_causal_mask(model, tokenizer, image_processor, image_file, prompt,
+                                      conv_mode, device, output_dir):
+    """提取并可视化 causal mask，特别标注视觉 token 区域"""
+    print("\n" + "=" * 80)
+    print("Causal Mask 提取和可视化")
+    print("=" * 80)
+
+    # 1. 准备输入
+    print("\n[步骤 1] 准备输入")
+    print("-" * 80)
+
+    image = load_image(image_file)
+    image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+
+    # 准备文本输入
+    if model.config.mm_use_im_start_end:
+        qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + prompt
+    else:
+        qs = DEFAULT_IMAGE_TOKEN + '\n' + prompt
+
+    conv = conv_templates[conv_mode].copy()
+    conv.append_message(conv.roles[0], qs)
+    conv.append_message(conv.roles[1], None)
+    full_prompt = conv.get_prompt()
+
+    input_ids = tokenizer_image_token(full_prompt, tokenizer, IMAGE_TOKEN_INDEX,
+                                     return_tensors='pt').unsqueeze(0).to(device)
+
+    print(f"  输入文本长度: {input_ids.shape[1]} tokens")
+
+    # 2. 提取图像特征并准备多模态输入
+    print("\n[步骤 2] 准备多模态输入")
+    print("-" * 80)
+
+    num_image_tokens = 0
+    with torch.no_grad():
+        # 获取图像特征
+        vision_tower = model.get_vision_tower()
+        if vision_tower is not None:
+            image_features = vision_tower(image_tensor.unsqueeze(0).half().to(device))
+            if hasattr(image_features, 'last_hidden_state'):
+                vision_hidden = image_features.last_hidden_state
+            elif isinstance(image_features, tuple):
+                vision_hidden = image_features[0]
+            elif isinstance(image_features, torch.Tensor):
+                vision_hidden = image_features
+            else:
+                vision_hidden = None
+
+            if vision_hidden is not None:
+                vision_hidden = model.get_model().mm_projector(vision_hidden)
+                num_image_tokens = vision_hidden.shape[1]
+                print(f"  图像 token 数量: {num_image_tokens}")
+            else:
+                print("  警告: 无法提取图像特征")
+        else:
+            print("  警告: Vision tower 不存在")
+
+        # 准备多模态输入
+        (
+            input_ids_processed,
+            position_ids,
+            attention_mask,
+            _,
+            inputs_embeds,
+            _
+        ) = model.prepare_inputs_labels_for_multimodal(
+            input_ids,
+            None,
+            None,
+            None,
+            None,
+            image_tensor.unsqueeze(0).half().to(device)
+        )
+
+        seq_len = inputs_embeds.shape[1] if inputs_embeds is not None else input_ids_processed.shape[1]
+        print(f"  处理后的序列长度: {seq_len}")
+
+    # 3. 确定图像 token 的位置
+    print("\n[步骤 3] 确定图像 token 位置")
+    print("-" * 80)
+
+    # 找到原始 input_ids 中 IMAGE_TOKEN_INDEX 的位置
+    image_token_positions = torch.where(input_ids[0] == IMAGE_TOKEN_INDEX)[0].tolist()
+    print(f"  原始 input_ids 中 IMAGE_TOKEN_INDEX 位置: {image_token_positions}")
+
+    # 根据 prepare_inputs_labels_for_multimodal 的逻辑计算图像 token 的实际位置
+    # 图像 token 会被插入到 IMAGE_TOKEN_INDEX 的位置
+    # 第一个 IMAGE_TOKEN_INDEX 之前的所有 token 数量就是图像 token 的起始位置
+    if len(image_token_positions) > 0:
+        first_image_pos = image_token_positions[0]
+        # 在 prepare_inputs_labels_for_multimodal 中，图像特征会替换 IMAGE_TOKEN_INDEX
+        # 所以图像 token 的起始位置 = first_image_pos（因为 IMAGE_TOKEN_INDEX 被替换了）
+        image_token_start = first_image_pos
+        image_token_end = image_token_start + num_image_tokens
+        print(f"  图像 token 位置范围: [{image_token_start}, {image_token_end})")
+        print(f"  图像 token 数量: {num_image_tokens}")
+    else:
+        image_token_start = None
+        image_token_end = None
+        print("  未找到图像 token")
+
+    # 4. 创建 causal mask
+    print("\n[步骤 4] 创建 Causal Mask")
+    print("-" * 80)
+
+    # 创建标准的 causal mask（下三角矩阵）
+    # causal_mask[i, j] = True 表示位置 i 可以 attend 到位置 j
+    # 对于 causal mask，i >= j 的位置应该是 True（可以 attend）
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+
+    print(f"  Causal mask 形状: {causal_mask.shape}")
+    print(f"  Causal mask 类型: {causal_mask.dtype}")
+
+    # 5. 可视化 causal mask
+    print("\n[步骤 5] 可视化 Causal Mask")
+    print("-" * 80)
+
+    # 转换为 numpy 用于可视化
+    mask_np = causal_mask.cpu().numpy().astype(float)
+
+    # 创建图形
+    fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+
+    # 左图：完整的 causal mask
+    ax1 = axes[0]
+    im1 = ax1.imshow(mask_np, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
+    ax1.set_title('Causal Mask Matrix (Full View)', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Key Position (Attendable Positions)', fontsize=12)
+    ax1.set_ylabel('Query Position (Current Token Position)', fontsize=12)
+
+    # 添加网格线以便更好地查看
+    ax1.set_xticks(range(0, seq_len, max(1, seq_len // 20)))
+    ax1.set_yticks(range(0, seq_len, max(1, seq_len // 20)))
+    ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+
+    # 标注图像 token 区域
+    if image_token_start is not None and image_token_end is not None:
+        # 在图像 token 区域添加矩形框
+        rect = patches.Rectangle(
+            (image_token_start - 0.5, image_token_start - 0.5),
+            num_image_tokens,
+            num_image_tokens,
+            linewidth=3,
+            edgecolor='blue',
+            facecolor='none',
+            label='Vision Token Region'
+        )
+        ax1.add_patch(rect)
+
+        # 添加文本标注
+        ax1.text(
+            image_token_start + num_image_tokens / 2,
+            image_token_start - 5,
+            f'Vision Tokens\n[{image_token_start}:{image_token_end}]',
+            ha='center',
+            va='bottom',
+            fontsize=10,
+            color='blue',
+            fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8, edgecolor='blue')
+        )
+
+        # 添加垂直线和水平线标记图像 token 区域
+        ax1.axvline(x=image_token_start - 0.5, color='blue', linestyle='--', linewidth=2, alpha=0.7)
+        ax1.axvline(x=image_token_end - 0.5, color='blue', linestyle='--', linewidth=2, alpha=0.7)
+        ax1.axhline(y=image_token_start - 0.5, color='blue', linestyle='--', linewidth=2, alpha=0.7)
+        ax1.axhline(y=image_token_end - 0.5, color='blue', linestyle='--', linewidth=2, alpha=0.7)
+
+    ax1.legend(loc='upper right')
+    plt.colorbar(im1, ax=ax1, label='Can Attend (1=Yes, 0=No)')
+
+    # 右图：放大的图像 token 区域（如果存在）
+    ax2 = axes[1]
+    if image_token_start is not None and image_token_end is not None:
+        # 显示图像 token 区域及其周围区域
+        margin = min(50, seq_len // 4)
+        start_idx = max(0, image_token_start - margin)
+        end_idx = min(seq_len, image_token_end + margin)
+
+        mask_zoom = mask_np[start_idx:end_idx, start_idx:end_idx]
+        im2 = ax2.imshow(mask_zoom, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
+        ax2.set_title(f'Causal Mask (Zoomed: Vision Token Region)', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Key Position', fontsize=12)
+        ax2.set_ylabel('Query Position', fontsize=12)
+
+        # 标注图像 token 区域
+        vis_start_rel = image_token_start - start_idx
+        vis_end_rel = image_token_end - start_idx
+        rect2 = patches.Rectangle(
+            (vis_start_rel - 0.5, vis_start_rel - 0.5),
+            num_image_tokens,
+            num_image_tokens,
+            linewidth=3,
+            edgecolor='red',
+            facecolor='none',
+            label='Vision Token Region'
+        )
+        ax2.add_patch(rect2)
+
+        # 添加网格和标注
+        ax2.set_xticks(range(0, mask_zoom.shape[1], max(1, mask_zoom.shape[1] // 10)))
+        ax2.set_yticks(range(0, mask_zoom.shape[0], max(1, mask_zoom.shape[0] // 10)))
+        ax2.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+
+        # 标注关键信息
+        ax2.text(
+            vis_start_rel + num_image_tokens / 2,
+            vis_start_rel - 2,
+            f'Vision Tokens\n[{image_token_start}:{image_token_end}]\n{num_image_tokens} tokens',
+            ha='center',
+            va='bottom',
+            fontsize=10,
+            color='red',
+            fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.8, edgecolor='red')
+        )
+
+        # 分析视觉 token 的因果限制
+        vision_mask_region = mask_np[image_token_start:image_token_end, image_token_start:image_token_end]
+        vision_self_attention = vision_mask_region.sum() / (num_image_tokens * num_image_tokens)
+
+        # 视觉 token 对之前文本 token 的 attention
+        if image_token_start > 0:
+            vision_to_text = mask_np[image_token_start:image_token_end, :image_token_start].sum() / (num_image_tokens * image_token_start)
+        else:
+            vision_to_text = 0.0
+
+        # 后续文本 token 对视觉 token 的 attention
+        if image_token_end < seq_len:
+            text_to_vision = mask_np[image_token_end:, image_token_start:image_token_end].sum() / ((seq_len - image_token_end) * num_image_tokens)
+        else:
+            text_to_vision = 0.0
+
+        info_text = (
+            f"Causal Mask Analysis:\n"
+            f"Vision self-attention: {vision_self_attention:.2%}\n"
+            f"Vision → Text (before): {vision_to_text:.2%}\n"
+            f"Text (after) → Vision: {text_to_vision:.2%}"
+        )
+        ax2.text(
+            0.02, 0.98,
+            info_text,
+            transform=ax2.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        )
+
+        ax2.legend(loc='lower right')
+    else:
+        # 如果没有图像 token，显示完整的 mask
+        im2 = ax2.imshow(mask_np, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
+        ax2.set_title('Causal Mask Matrix (No Vision Tokens)', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Key Position', fontsize=12)
+        ax2.set_ylabel('Query Position', fontsize=12)
+
+    plt.colorbar(im2, ax=ax2, label='Can Attend (1=Yes, 0=No)')
+
+    plt.tight_layout()
+
+    # 保存图片
+    mask_image_file = os.path.join(output_dir, "causal_mask_visualization.png")
+    plt.savefig(mask_image_file, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Causal mask 可视化已保存到: {mask_image_file}")
+
+    plt.close()
+
+    # 6. 保存详细信息到 JSON
+    mask_info = {
+        "sequence_length": int(seq_len),
+        "num_image_tokens": int(num_image_tokens) if image_token_start is not None else 0,
+        "image_token_start": int(image_token_start) if image_token_start is not None else None,
+        "image_token_end": int(image_token_end) if image_token_end is not None else None,
+        "causal_mask_shape": list(causal_mask.shape),
+        "causal_mask_dtype": str(causal_mask.dtype),
+        "mask_statistics": {
+            "total_attendable_pairs": int(causal_mask.sum().item()),
+            "total_pairs": int(causal_mask.numel()),
+            "attendable_ratio": float(causal_mask.sum().item() / causal_mask.numel())
+        }
+    }
+
+    if image_token_start is not None and image_token_end is not None:
+        vision_mask_region = mask_np[image_token_start:image_token_end, image_token_start:image_token_end]
+        vision_self_attention = vision_mask_region.sum() / (num_image_tokens * num_image_tokens)
+
+        if image_token_start > 0:
+            vision_to_text = mask_np[image_token_start:image_token_end, :image_token_start].sum() / (num_image_tokens * image_token_start)
+        else:
+            vision_to_text = 0.0
+
+        if image_token_end < seq_len:
+            text_to_vision = mask_np[image_token_end:, image_token_start:image_token_end].sum() / ((seq_len - image_token_end) * num_image_tokens)
+        else:
+            text_to_vision = 0.0
+
+        mask_info["vision_token_analysis"] = {
+            "vision_self_attention_ratio": float(vision_self_attention),
+            "vision_to_text_ratio": float(vision_to_text),
+            "text_to_vision_ratio": float(text_to_vision),
+            "explanation": {
+                "vision_self_attention": "Vision tokens can attend to each other (they are at the same time step)",
+                "vision_to_text": "Vision tokens can attend to previous text tokens (causal constraint allows)",
+                "text_to_vision": "Subsequent text tokens can attend to vision tokens (causal constraint allows)"
+            }
+        }
+
+    mask_info_file = os.path.join(output_dir, "causal_mask_info.json")
+    with open(mask_info_file, 'w', encoding='utf-8') as f:
+        json.dump(mask_info, f, ensure_ascii=False, indent=2)
+    print(f"✓ Causal mask 详细信息已保存到: {mask_info_file}")
+
+    return mask_info
+
+
 def trace_inference_dimensions(model, tokenizer, image_processor, image_file, prompt,
                                conv_mode, device, output_dir):
     """追踪推理过程中的维度变化"""
@@ -415,9 +732,10 @@ def trace_inference_dimensions(model, tokenizer, image_processor, image_file, pr
     print("\n[阶段 3] MM Projector")
     print("-" * 80)
 
-    if hasattr(model, 'mm_projector') and vision_hidden is not None:
+    lang_model = model.get_model() if hasattr(model, 'get_model') else model
+    if hasattr(lang_model, 'mm_projector') and vision_hidden is not None:
         with torch.no_grad():
-            projected_features = model.mm_projector(vision_hidden)
+            projected_features = lang_model.mm_projector(vision_hidden)
 
             projector_stage = {
                 "stage_name": "mm_projector",
@@ -640,8 +958,15 @@ def main():
     arch_info = analyze_model_architecture(model, tokenizer, args.output_dir)
 
     # 追踪推理维度
-    print("\n[3/3] 正在追踪推理维度...")
+    print("\n[3/4] 正在追踪推理维度...")
     dimension_trace = trace_inference_dimensions(
+        model, tokenizer, image_processor, args.image_file, args.prompt,
+        args.conv_mode, device, args.output_dir
+    )
+
+    # 提取和可视化 causal mask
+    print("\n[4/4] 正在提取和可视化 Causal Mask...")
+    mask_info = extract_and_visualize_causal_mask(
         model, tokenizer, image_processor, args.image_file, args.prompt,
         args.conv_mode, device, args.output_dir
     )
@@ -651,6 +976,8 @@ def main():
     print("=" * 80)
     print(f"架构信息: {os.path.join(args.output_dir, 'model_architecture.json')}")
     print(f"维度追踪: {os.path.join(args.output_dir, 'inference_dimension_trace.json')}")
+    print(f"Causal Mask 可视化: {os.path.join(args.output_dir, 'causal_mask_visualization.png')}")
+    print(f"Causal Mask 信息: {os.path.join(args.output_dir, 'causal_mask_info.json')}")
 
 
 if __name__ == "__main__":
