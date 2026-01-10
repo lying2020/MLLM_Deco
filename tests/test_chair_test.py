@@ -1354,7 +1354,7 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     print(f"    ✓ 图3 (Attention Map) 已保存: {os.path.basename(output_file_3)}")
 
     # 单独保存图3的colorbar（不使用前缀，因为不同层的colorbar都一样）
-    output_file_cbar3 = os.path.join(output_dir, "attention_map_colorbar.png")
+    output_file_cbar3 = os.path.join(output_dir, "colorbar_attention_map.png")
     # 检查是否已经保存过colorbar，避免重复保存
     if not os.path.exists(output_file_cbar3):
         fig_cbar3 = plt.figure(figsize=(1, 6))
@@ -1383,14 +1383,14 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=21, fontweight='bold')  # 14 * 1.5 = 21
     ax4.axis('off')
     # 保存图4（使用前缀）
-    filename_parts_4 = filename_base + ["attention_map_overlay.png"]
+    filename_parts_4 = ["overlay"] + filename_base + ["attention_map.png"]
     output_file_4 = os.path.join(output_dir, "_".join(filename_parts_4))
     plt.savefig(output_file_4, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"    ✓ 图4 (Attention Map Overlay) 已保存: {os.path.basename(output_file_4)}")
 
     # 单独保存图4的colorbar（不使用前缀，因为不同层的colorbar都一样）
-    output_file_cbar4 = os.path.join(output_dir, "attention_map_overlay_colorbar.png")
+    output_file_cbar4 = os.path.join(output_dir, "colorbar_overlay_attention_map.png")
     # 检查是否已经保存过colorbar，避免重复保存
     if not os.path.exists(output_file_cbar4):
         fig_cbar4 = plt.figure(figsize=(1, 6))
@@ -1475,7 +1475,7 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
     print(f"    ✓ 图3 (Attention Map Global) 已保存: {os.path.basename(output_file_3)}")
 
     # 单独保存图3的colorbar（使用global后缀）
-    output_file_cbar3 = os.path.join(output_dir, "attention_map_global_colorbar.png")
+    output_file_cbar3 = os.path.join(output_dir, "colorbar_global_attention_map.png")
     # 检查是否已经保存过colorbar，避免重复保存
     if not os.path.exists(output_file_cbar3):
         fig_cbar3 = plt.figure(figsize=(1, 6))
@@ -1505,14 +1505,14 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
     ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=21, fontweight='bold')
     ax4.axis('off')
     # 保存图4（使用前缀）
-    filename_parts_4 = filename_base + ["attention_map_overlay.png"]
+    filename_parts_4 = ["overlay"] + filename_base + ["attention_map.png"]
     output_file_4 = os.path.join(output_dir, "_".join(filename_parts_4))
     plt.savefig(output_file_4, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"    ✓ 图4 (Attention Map Overlay Global) 已保存: {os.path.basename(output_file_4)}")
 
     # 单独保存图4的colorbar（使用global后缀）
-    output_file_cbar4 = os.path.join(output_dir, "attention_map_overlay_global_colorbar.png")
+    output_file_cbar4 = os.path.join(output_dir, "colorbar_overlay_global_attention_map.png")
     # 检查是否已经保存过colorbar，避免重复保存
     if not os.path.exists(output_file_cbar4):
         fig_cbar4 = plt.figure(figsize=(1, 6))
@@ -3398,41 +3398,35 @@ def eval_model(args):
 
         if content.startswith('[') and content.endswith(']'):
             # JSON 数组格式
-            try:
-                cases = json.loads(content)
-                # 检查是否为 case 格式（包含 question_id, image, text）
-                if cases and isinstance(cases[0], dict) and 'question_id' in cases[0] and 'image' in cases[0] and 'text' in cases[0]:
-                    # 这是 case 格式的 JSON 文件
-                    use_case_format = True
-                    test_cases = load_test_cases_from_json(image_id_list_file, args.coco_root)
-                    print(f"✓ 从 JSON 文件读取了 {len(test_cases)} 个测试 case")
-                else:
-                    # 这是简单的图像文件名列表
-                    image_names = cases
-                    image_id_list = []
-                    for name in image_names:
-                        if isinstance(name, str):
-                            # 从文件名提取 image_id
-                            # 格式: "COCO_val2014_000000001171.jpg" 或 "COCO_val2014_000000001171"
-                            if name.endswith('.jpg'):
-                                name = name[:-4]  # 移除 .jpg 后缀
-                            # 提取最后的数字部分
-                            parts = name.split('_')
-                            if len(parts) > 0:
-                                image_id = int(parts[-1])
-                                image_id_list.append(image_id)
-                        elif isinstance(name, int):
-                            # 直接是数字 ID
-                            image_id_list.append(name)
-                        else:
-                            print(f"⚠️  警告: 无法处理的数据类型: {type(name)}, 值: {name}")
-                    print(f"✓ 从 JSON 文件读取了 {len(image_id_list)} 个图像 ID")
-            except json.JSONDecodeError:
-                print(f"⚠️  警告: JSON 解析失败，尝试作为文本文件处理")
-                use_case_format = False
-            except Exception as e:
-                print(f"⚠️  警告: 处理 JSON 文件时出错: {e}")
-                use_case_format = False
+            cases = json.loads(content)
+            # 检查是否为 case 格式（包含 question_id, image, text）
+            if cases and isinstance(cases[0], dict) and 'question_id' in cases[0] and 'image' in cases[0] and 'text' in cases[0]:
+                # 这是 case 格式的 JSON 文件
+                use_case_format = True
+                test_cases = load_test_cases_from_json(image_id_list_file, args.coco_root)
+                print(f"✓ 从 JSON 文件读取了 {len(test_cases)} 个测试 case")
+            else:
+                # 这是简单的图像文件名列表
+                image_names = cases
+                image_id_list = []
+                for name in image_names:
+                    if isinstance(name, str):
+                        # 从文件名提取 image_id
+                        # 格式: "COCO_val2014_000000001171.jpg" 或 "COCO_val2014_000000001171"
+                        if name.endswith('.jpg'):
+                            name = name[:-4]  # 移除 .jpg 后缀
+                        # 提取最后的数字部分
+                        parts = name.split('_')
+                        if len(parts) > 0:
+                            image_id = int(parts[-1])
+                            image_id_list.append(image_id)
+                    elif isinstance(name, int):
+                        # 直接是数字 ID
+                        image_id_list.append(name)
+                    else:
+                        print(f"⚠️  警告: 无法处理的数据类型: {type(name)}, 值: {name}")
+                print(f"✓ 从 JSON 文件读取了 {len(image_id_list)} 个图像 ID")
+
         else:
             # 文本文件格式(每行一个 ID)
             with open(image_id_list_file, 'r', encoding='utf-8') as f:
@@ -3983,7 +3977,7 @@ def main():
         "single_image_id": None,  # 13348,  # 6153,  # 6153
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
-        "target_layers": [15, 17, 23, 29, 31]  # 默认只处理偶数层（减少输出）
+        "target_layers": [0, 3, 5, 7, 9, 11, 13, 15, 17, 21, 23, 25, 29, 31]  # 默认只处理偶数层（减少输出）
     }
 
     # 解析参数(所有参数都有默认值)

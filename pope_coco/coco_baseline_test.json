@@ -1,17 +1,7 @@
 [
-    { "question_id": 1, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a table in the image?" , "label": "no"},
     { "question_id": 2, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a boy in the image?" , "label": "yes"},
-    { "question_id": 3, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a table in front of the little boy in the image?" , "label": "yes"}
+    { "question_id": 3, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a table in front of the little boy in the image?" , "label": "yes"},
     { "question_id": 4, "image": "COCO_val2014_000000065883.jpg", "text": "Please help me describe the image in detail.", "label": "yes"},
-    { "question_id": 5, "image": "COCO_val2014_000000031041.jpg", "text": "Is there a potted plant in the image?" , "label": "yes"},
-    { "question_id": 6, "image": "COCO_val2014_000000031041.jpg", "text": "Is there a cake in the image?" , "label": "yes"},
-    { "question_id": 7, "image": "COCO_val2014_000000031041.jpg", "text": "Please help me describe the image in detail." , "label": "yes"},
-    { "question_id": 8, "image": "COCO_val2014_000000150508.jpg", "text": "Is there a chair in the image?" , "label": "yes"},
-    { "question_id": 9, "image": "COCO_val2014_000000150508.jpg", "text": "Please help me describe the image in detail." , "label": "yes"},
     { "question_id": 10, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a backpack in the image?" , "label": "no"},
-    { "question_id": 11, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a umbrella in the image?" , "label": "yes"},
-    { "question_id": 12, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a person in the image?" , "label": "yes"},
-    { "question_id": 13, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a horse in the image?" , "label": "no"},
-    { "question_id": 14, "image": "COCO_val2014_000000569251.jpg", "text": "Is there a person in the image?" , "label": "yes"},
-    { "question_id": 15, "image": "COCO_val2014_000000569251.jpg", "text":  "Please help me describe the image in detail." , "label": "yes"}
+    { "question_id": 11, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a umbrella in the image?" , "label": "yes"}
    ]

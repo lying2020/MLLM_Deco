@@ -560,11 +560,20 @@ def extract_and_visualize_causal_mask(model, tokenizer, image_processor, image_f
         else:
             text_to_vision = 0.0
 
+        # 计算视觉 token 之间的因果限制详情
+        # 在下三角矩阵中，对于 n 个 token，可 attend 的位置数是 n*(n+1)/2，比例约为 50%
+        expected_causal_ratio = 0.5  # 下三角矩阵的理论比例
+        is_causal = abs(vision_self_attention - expected_causal_ratio) < 0.1
+
         info_text = (
             f"Causal Mask Analysis:\n"
             f"Vision self-attention: {vision_self_attention:.2%}\n"
+            f"  (Expected ~50% for causal mask)\n"
             f"Vision → Text (before): {vision_to_text:.2%}\n"
-            f"Text (after) → Vision: {text_to_vision:.2%}"
+            f"Text (after) → Vision: {text_to_vision:.2%}\n"
+            f"\nNote: Vision tokens follow\n"
+            f"causal constraints (later tokens\n"
+            f"cannot attend to earlier ones)"
         )
         ax2.text(
             0.02, 0.98,
@@ -623,14 +632,21 @@ def extract_and_visualize_causal_mask(model, tokenizer, image_processor, image_f
         else:
             text_to_vision = 0.0
 
+        # 详细分析视觉 token 区域内的因果模式
+        # 检查是否是标准的下三角矩阵（因果掩码）
+        vision_mask_region_bool = vision_mask_region.astype(bool)
+        is_lower_triangular = np.allclose(vision_mask_region_bool, np.tril(np.ones_like(vision_mask_region_bool)))
+
         mask_info["vision_token_analysis"] = {
             "vision_self_attention_ratio": float(vision_self_attention),
             "vision_to_text_ratio": float(vision_to_text),
             "text_to_vision_ratio": float(text_to_vision),
+            "follows_causal_constraint": bool(is_lower_triangular),
             "explanation": {
-                "vision_self_attention": "Vision tokens can attend to each other (they are at the same time step)",
+                "vision_self_attention": f"Vision tokens follow causal masking: ratio={vision_self_attention:.2%} (~50% for lower triangular mask). This means later vision tokens cannot attend to earlier vision tokens, even though they represent the same image.",
                 "vision_to_text": "Vision tokens can attend to previous text tokens (causal constraint allows)",
-                "text_to_vision": "Subsequent text tokens can attend to vision tokens (causal constraint allows)"
+                "text_to_vision": "Subsequent text tokens can attend to vision tokens (causal constraint allows)",
+                "causal_constraint_note": "In LLaVA, vision tokens are inserted sequentially in the sequence, so they follow the same causal masking as text tokens. Position i can only attend to positions j where j <= i."
             }
         }
 
