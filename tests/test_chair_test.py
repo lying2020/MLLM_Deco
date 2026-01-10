@@ -3141,7 +3141,8 @@ def _extract_step_attention_statistics(all_attentions, image_token_start, num_im
 
 
 def _visualize_step_attention_statistics(all_attentions, image_token_start, num_image_tokens,
-                                        num_total_layers, output_dir, tokenizer=None, output_ids=None):
+                                        num_total_layers, output_dir, tokenizer=None, output_ids=None,
+                                        object_tokens_info=None):
     """
     可视化推理步attention统计信息
 
@@ -3163,6 +3164,7 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
         output_dir: 输出目录
         tokenizer: tokenizer对象（可选，用于解码token词汇）
         output_ids: 输出序列的token IDs（可选，用于解码token词汇）
+        object_tokens_info: 物体token信息字典（可选，用于标注物体token对应的推理步）
     """
     print(f"\n  [生成推理步Attention统计] 提取并可视化attention统计信息...")
 
@@ -3204,7 +3206,7 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     max_ratio_value = step_ratio[max_ratio_idx]
 
     # 标注最高比值的点
-    ax1.plot(max_ratio_step, max_ratio_value, 'ro', markersize=10, label='Max Ratio')
+    ax1.plot(max_ratio_step, max_ratio_value, 'ro', markersize=10)
 
     # 如果提供了tokenizer和output_ids，解码对应的token词汇
     token_text = None
@@ -3224,8 +3226,8 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
 
     # 在最高点处添加标注
     if token_text:
-        # 添加文本标注，显示token词汇
-        ax1.annotate(f'Max: {token_text}\n(Ratio: {max_ratio_value:.4f})',
+        # 添加文本标注，显示token词汇和比率值
+        ax1.annotate(f'{token_text}\n(Ratio: {max_ratio_value:.4f})',
                     xy=(max_ratio_step, max_ratio_value),
                     xytext=(10, 10), textcoords='offset points',
                     bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
@@ -3233,12 +3235,68 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
                     fontsize=11, fontweight='bold')
     else:
         # 如果没有token词汇，只标注比率值
-        ax1.annotate(f'Max Ratio: {max_ratio_value:.4f}',
+        ax1.annotate(f'Ratio: {max_ratio_value:.4f}',
                     xy=(max_ratio_step, max_ratio_value),
                     xytext=(10, 10), textcoords='offset points',
                     bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
                     arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
                     fontsize=11, fontweight='bold')
+
+    # 标注物体token对应的推理步
+    if object_tokens_info:
+        object_token_steps = set()
+        object_token_words = {}  # {step: [word1, word2, ...]}
+
+        # 收集所有物体token的位置
+        for object_word, obj_info in object_tokens_info.items():
+            token_positions = obj_info.get('token_positions', [])
+            token_groups = obj_info.get('token_groups', [])
+
+            # 从token_groups或token_positions中提取推理步
+            if token_groups:
+                for group_start, group_end in token_groups:
+                    for step_idx in range(group_start, group_end + 1):
+                        if 0 <= step_idx < n_steps:
+                            object_token_steps.add(step_idx)
+                            if step_idx not in object_token_words:
+                                object_token_words[step_idx] = []
+                            object_token_words[step_idx].append(object_word)
+            elif token_positions:
+                for step_idx in token_positions:
+                    if 0 <= step_idx < n_steps:
+                        object_token_steps.add(step_idx)
+                        if step_idx not in object_token_words:
+                            object_token_words[step_idx] = []
+                        object_token_words[step_idx].append(object_word)
+
+        # 用不同颜色标注物体token对应的点
+        if object_token_steps:
+            object_steps_list = sorted(list(object_token_steps))
+            object_steps_plot = [s + 1 for s in object_steps_list]  # 转换为从1开始的步数
+            object_ratios_plot = [step_ratio[s] for s in object_steps_list]
+
+            # 用绿色标注物体token的点
+            ax1.plot(object_steps_plot, object_ratios_plot, 'go', markersize=8, alpha=0.7, label='Object Tokens')
+
+            # 为每个物体token点添加词汇标注（如果点不太密集的话）
+            # 只标注前几个，避免图表过于拥挤
+            max_annotations = min(5, len(object_steps_list))
+            for i, step_idx in enumerate(object_steps_list[:max_annotations]):
+                step_num = step_idx + 1
+                ratio_val = step_ratio[step_idx]
+                words = object_token_words.get(step_idx, [])
+                # 去重并限制显示长度
+                unique_words = list(set(words))[:2]  # 最多显示2个词汇
+                word_text = ', '.join(unique_words)
+                if len(words) > 2:
+                    word_text += '...'
+
+                # 添加小标注
+                ax1.annotate(word_text,
+                            xy=(step_num, ratio_val),
+                            xytext=(5, 5), textcoords='offset points',
+                            fontsize=8, alpha=0.8,
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgreen', alpha=0.5))
 
     # 保存图1
     fig1_file = os.path.join(output_dir, "step_attention_ratio.png")
@@ -3247,6 +3305,57 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     print(f"  ✓ 图1 (Attention Ratio) 已保存: {os.path.basename(fig1_file)}")
     if token_text:
         print(f"    最高比率对应的token词汇: '{token_text}' (Step {max_ratio_step}, Ratio: {max_ratio_value:.4f})")
+
+    # 保存每个推理步的ratio和对应的token词汇到JSON文件
+    step_ratio_tokens = []
+    if tokenizer is not None and output_ids is not None:
+        for step_idx in range(n_steps):
+            step_num = step_idx + 1  # 从1开始的步数
+            ratio_value = step_ratio[step_idx]
+            token_text_step = None
+            token_id_step = None
+
+            try:
+                # output_ids中不包含input信息，直接使用step_idx索引
+                if 0 <= step_idx < output_ids.shape[1]:
+                    token_id_step = int(output_ids[0, step_idx].item())
+                    token_text_step = tokenizer.decode([token_id_step], skip_special_tokens=True).strip()
+                    # 清理token文本，移除特殊字符
+                    token_text_step = token_text_step.replace('\n', ' ').replace('\r', ' ').strip()
+                    if not token_text_step:
+                        token_text_step = None
+            except Exception as e:
+                # 静默处理解码错误，继续处理下一个步骤
+                token_text_step = None
+
+            step_ratio_tokens.append({
+                'step': int(step_num),
+                'step_index': int(step_idx),  # 从0开始的索引
+                'ratio': float(ratio_value),
+                'token_id': token_id_step,
+                'token_text': token_text_step
+            })
+    else:
+        # 如果没有tokenizer或output_ids，只保存ratio
+        for step_idx in range(n_steps):
+            step_num = step_idx + 1
+            ratio_value = step_ratio[step_idx]
+            step_ratio_tokens.append({
+                'step': int(step_num),
+                'step_index': int(step_idx),
+                'ratio': float(ratio_value),
+                'token_id': None,
+                'token_text': None
+            })
+
+    # 保存到JSON文件
+    ratio_tokens_json_file = os.path.join(output_dir, "step_attention_ratio_tokens.json")
+    with open(ratio_tokens_json_file, 'w', encoding='utf-8') as f:
+        json.dump({
+            'n_steps': int(n_steps),
+            'steps': step_ratio_tokens
+        }, f, indent=2, ensure_ascii=False)
+    print(f"  ✓ 每个推理步的ratio和token词汇已保存到JSON: {os.path.basename(ratio_tokens_json_file)}")
 
     # 计算每层每步的比率（att_visual / att_all）
     step_att_ratio_per_layer = np.zeros_like(step_att_visual)  # [n, 32]
@@ -3294,9 +3403,18 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     ax4.set_xlabel('Step × Layer Index', fontsize=12, fontweight='bold')
     ax4.set_ylabel('Ratio (att_visual / att_all)', fontsize=12, fontweight='bold')
     ax4.set_title('Visual Attention Ratio per Step and Layer\n(att_visual / att_all)', fontsize=14, fontweight='bold')
-    # 设置x轴刻度：只标注32的整数倍（0, 32, 64, ...）
+    # 设置x轴刻度：根据数据量动态调整，最多显示15个刻度
     max_x = len(ratio_flat) - 1
-    tick_positions = np.arange(0, max_x + 1, 32)
+    max_ticks = 15  # 最多显示15个刻度
+    if max_x <= 32:
+        # 数据量小，每32个点标注一次
+        tick_positions = np.arange(0, max_x + 1, 32)
+    else:
+        # 数据量大，均匀分布显示刻度
+        tick_interval = max(32, int((max_x + 1) / max_ticks))
+        # 确保间隔是32的倍数
+        tick_interval = ((tick_interval // 32) + 1) * 32
+        tick_positions = np.arange(0, max_x + 1, tick_interval)
     ax4.set_xticks(tick_positions)
     ax4.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
     ax4.grid(True, alpha=0.3, axis='y')
@@ -3310,9 +3428,18 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     ax5.set_xlabel('Step × Layer Index', fontsize=12, fontweight='bold')
     ax5.set_ylabel('att_visual', fontsize=12, fontweight='bold')
     ax5.set_title('Visual Attention per Step and Layer\n(att_visual)', fontsize=14, fontweight='bold')
-    # 设置x轴刻度：只标注32的整数倍（0, 32, 64, ...）
+    # 设置x轴刻度：根据数据量动态调整，最多显示15个刻度
     max_x = len(visual_flat) - 1
-    tick_positions = np.arange(0, max_x + 1, 32)
+    max_ticks = 15  # 最多显示15个刻度
+    if max_x <= 32:
+        # 数据量小，每32个点标注一次
+        tick_positions = np.arange(0, max_x + 1, 32)
+    else:
+        # 数据量大，均匀分布显示刻度
+        tick_interval = max(32, int((max_x + 1) / max_ticks))
+        # 确保间隔是32的倍数
+        tick_interval = ((tick_interval // 32) + 1) * 32
+        tick_positions = np.arange(0, max_x + 1, tick_interval)
     ax5.set_xticks(tick_positions)
     ax5.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
     ax5.grid(True, alpha=0.3, axis='y')
@@ -3326,9 +3453,18 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     ax6.set_xlabel('Step × Layer Index', fontsize=12, fontweight='bold')
     ax6.set_ylabel('att_all', fontsize=12, fontweight='bold')
     ax6.set_title('All Attention per Step and Layer\n(att_all)', fontsize=14, fontweight='bold')
-    # 设置x轴刻度：只标注32的整数倍（0, 32, 64, ...）
+    # 设置x轴刻度：根据数据量动态调整，最多显示15个刻度
     max_x = len(all_flat) - 1
-    tick_positions = np.arange(0, max_x + 1, 32)
+    max_ticks = 15  # 最多显示15个刻度
+    if max_x <= 32:
+        # 数据量小，每32个点标注一次
+        tick_positions = np.arange(0, max_x + 1, 32)
+    else:
+        # 数据量大，均匀分布显示刻度
+        tick_interval = max(32, int((max_x + 1) / max_ticks))
+        # 确保间隔是32的倍数
+        tick_interval = ((tick_interval // 32) + 1) * 32
+        tick_positions = np.arange(0, max_x + 1, tick_interval)
     ax6.set_xticks(tick_positions)
     ax6.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
     ax6.grid(True, alpha=0.3, axis='y')
@@ -3475,7 +3611,7 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     # 生成推理步attention统计可视化
     _visualize_step_attention_statistics(
         all_attentions, image_token_start, num_image_tokens, num_total_layers, output_dir,
-        tokenizer=tokenizer, output_ids=output_ids
+        tokenizer=tokenizer, output_ids=output_ids, object_tokens_info=object_tokens_info
     )
 
 

@@ -1,7 +1,8 @@
 [
-    { "question_id": 2, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a boy in the image?  Yes or No?" , "label": "yes"},
-    { "question_id": 3, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a table in front of the little boy in the image?  Yes or No?" , "label": "yes"},
+    { "question_id": 2, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a boy in the image?  Please answer Yes or No." , "label": "yes"},
+    { "question_id": 3, "image": "COCO_val2014_000000065883.jpg", "text": "Is there a table in front of the little boy in the image?  Please answer Yes or No." , "label": "yes"},
     { "question_id": 4, "image": "COCO_val2014_000000065883.jpg", "text": "Please help me describe the image in detail.", "label": "yes"},
-    { "question_id": 10, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a backpack in the image?  Yes or No?" , "label": "no"},
-    { "question_id": 11, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a umbrella in the image?  Yes or No?" , "label": "yes"}
+    { "question_id": 10, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a backpack in the image?  Please answer Yes or No." , "label": "no"},
+    { "question_id": 11, "image": "COCO_val2014_000000167906.jpg", "text": "Is there a umbrella in the image?  Please answer Yes or No." , "label": "yes"},
+    { "question_id": 12, "image": "COCO_val2014_000000167906.jpg", "text": "Please help me describe the image in detail.", "label": "yes"}
    ]
