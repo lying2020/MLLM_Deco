@@ -6,6 +6,7 @@ POPE 评估脚本 - 直接运行版本
 """
 
 import argparse
+from jax import default_device
 import torch
 import os
 import json
@@ -44,6 +45,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 使用非交互式后端
 import matplotlib.pyplot as plt
+from torchvision import transforms
 
 
 def recorder(out):
@@ -79,51 +81,181 @@ def load_image(image_file):
     return image
 
 
-def add_gaussian_noise_ddpm(image_tensor, timestep, num_timesteps=1000, device='cuda:0'):
+def _tensor_to_pil_image(image_tensor):
+    """
+    将图像tensor转换为PIL Image
+
+    Args:
+        image_tensor: 形状为 [C, H, W] 的tensor，值范围在 [0, 1]
+
+    Returns:
+        PIL Image对象
+    """
+    # 确保tensor在CPU上
+    if image_tensor.is_cuda:
+        image_tensor = image_tensor.cpu()
+
+    # 将值限制在[0, 1]范围内
+    image_tensor = torch.clamp(image_tensor, 0.0, 1.0)
+
+    # 转换为numpy数组 [C, H, W] -> [H, W, C]
+    image_np = image_tensor.permute(1, 2, 0).numpy()
+
+    # 转换为[0, 255]范围的uint8
+    image_np = (image_np * 255).astype(np.uint8)
+
+    # 转换为PIL Image
+    image_pil = Image.fromarray(image_np)
+
+    return image_pil
+
+
+def add_gaussian_noise_ddpm(image_tensor, timestep, num_timesteps=1000, device='cuda:0', verbose=False):
     """
     DDPM前向扩散过程：对图像添加高斯噪声
 
+    重要说明：加噪声的时机和累积方式
+    - 输入：image_tensor 是 LLaVA 的 image_processor 输出
+    - LLaVA 使用 CLIPImageProcessor，它会对图像进行标准化：(image - mean) / std
+    - 标准化后的值范围不是 [0, 1]，而是大约在 [-2, 2] 左右
+    - 步骤1：检测并处理输入图像的值范围
+    - 步骤2：将图像转换到 [-1, 1] 范围（DDPM标准做法）
+    - 步骤3：在归一化后的图像上添加高斯噪声
+    - 步骤4：将加噪后的图像转换回原始范围（LLaVA期望的输入范围）
+
+    噪声累积方式：
+    - 使用DDPM的标准公式：x_t = sqrt(alpha_cumprod_t) * x_0 + sqrt(1 - alpha_cumprod_t) * noise
+    - 这个公式允许从原始图像 x_0 直接计算到任意时间步 t 的噪声图像 x_t
+    - 当 timestep 接近 num_timesteps-1 时，alpha_cumprod_t 应该接近 0，使得图像接近纯噪声
+    - 为了确保最后一步是纯噪声，我们调整 beta_end 使其在最后一步时 alpha_cumprod 足够小
+
     Args:
-        image_tensor: 原始图像tensor，形状为 [C, H, W]，值范围通常在[0, 1]（LLaVA的image_processor输出）
+        image_tensor: 原始图像tensor，形状为 [C, H, W]
+            - 如果是 CLIPImageProcessor 输出，值范围大约在 [-2, 2]（标准化后的值）
+            - 如果是简单的归一化，值范围在 [0, 1]
         timestep: 当前时间步（0到num_timesteps-1）
         num_timesteps: 总时间步数（默认1000）
         device: 设备
+        verbose: 是否输出详细信息
 
     Returns:
-        noisy_image: 加噪后的图像tensor，值范围在[0, 1]
+        noisy_image: 加噪后的图像tensor，值范围与输入相同（保持原始范围）
     """
     # 确保image_tensor在正确的设备上
     image_tensor = image_tensor.to(device)
 
-    # 计算噪声调度（线性调度，从beta_start到beta_end）
+    # 检测输入图像的值范围（用于确定是否需要转换）
+    if verbose and timestep == 0:
+        min_val = image_tensor.min().item()
+        max_val = image_tensor.max().item()
+        mean_val = image_tensor.mean().item()
+        print(f"  [图像范围检测] min={min_val:.4f}, max={max_val:.4f}, mean={mean_val:.4f}")
+
+    # 判断输入图像的值范围
+    # CLIPImageProcessor 标准化后的值通常在 [-2, 2] 左右
+    # 简单的 [0, 1] 归一化值在 [0, 1]
+    min_val = image_tensor.min().item()
+    max_val = image_tensor.max().item()
+
+    # 如果值范围在 [-3, 3] 左右，认为是标准化后的值（CLIPImageProcessor输出）
+    # 如果值范围在 [0, 1] 左右，认为是简单的归一化
+    is_normalized = (min_val >= -3.0 and max_val <= 3.0 and (min_val < 0 or max_val > 1))
+
+    if is_normalized:
+        # 输入是标准化后的值（CLIPImageProcessor输出），需要先转换到 [0, 1]
+        # 使用经验值：CLIP 标准化后的值大约在 [-2, 2]，我们将其映射到 [0, 1]
+        # 更安全的方法：使用 min-max 归一化
+        # 但为了保持一致性，我们假设标准化后的值大约在 [-2.5, 2.5] 范围
+        # 将其线性映射到 [0, 1]：x_norm = (x + 2.5) / 5.0
+        # 或者更简单：假设值在 [-3, 3] 范围，映射到 [0, 1]
+        image_min = -3.0
+        image_max = 3.0
+        image_range = image_max - image_min
+        image_tensor_01 = (image_tensor - image_min) / image_range  # 转换到 [0, 1]
+
+        if verbose and timestep == 0:
+            print(f"  [图像转换] 检测到标准化后的值，转换到 [0, 1] 范围")
+    else:
+        # 输入已经是 [0, 1] 范围
+        image_tensor_01 = image_tensor
+        if verbose and timestep == 0:
+            print(f"  [图像转换] 检测到 [0, 1] 范围的值，无需转换")
+
+    # 计算噪声调度
+    # 对于较少的步数（如10步），需要调整beta_end以确保最后一步接近纯噪声
+    # 标准DDPM使用 beta_start=0.0001, beta_end=0.02 (对于1000步)
+    # 对于更少的步数，我们需要更大的beta_end来确保累积噪声足够大
+
+    # 目标：在最后一步时，alpha_cumprod 应该接近 0.01 左右（即图像几乎全是噪声）
+    # 使用更精确的方法：根据目标 alpha_cumprod 反推 beta_end
     beta_start = 0.0001
-    beta_end = 0.02
+    target_final_alpha_cumprod = 0.01  # 最后一步时，图像应该只有1%的原始信息，99%是噪声
+
+    # 对于线性调度，近似计算：如果所有步的alpha都相同，那么 alpha_cumprod = alpha^num_timesteps
+    # 因此：alpha ≈ (target_final_alpha_cumprod)^(1/num_timesteps)
+    # beta = 1 - alpha
+    if num_timesteps <= 10:
+        # 对于10步或更少，使用较大的beta_end确保最后一步接近纯噪声
+        # 计算：如果最后一步 alpha_cumprod = 0.01，那么平均 alpha ≈ 0.01^(1/10) ≈ 0.63
+        # 所以 beta_end ≈ 1 - 0.63 = 0.37，但考虑到线性调度，我们使用稍小的值
+        beta_end = 0.4
+    elif num_timesteps <= 50:
+        # 对于50步：alpha ≈ 0.01^(1/50) ≈ 0.91，beta_end ≈ 0.09
+        beta_end = 0.12
+    elif num_timesteps <= 100:
+        # 对于100步：alpha ≈ 0.01^(1/100) ≈ 0.95，beta_end ≈ 0.05
+        beta_end = 0.06
+    else:
+        # 对于1000步，使用标准值（标准DDPM的beta_end=0.02）
+        beta_end = 0.02
+
     betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
 
+    # 验证：最后一步的 alpha_cumprod 应该足够小
+    if verbose and timestep == 0:  # 只在第一次调用时打印
+        final_alpha_cumprod = alphas_cumprod[-1].item()
+        print(f"  [噪声调度] num_timesteps={num_timesteps}, beta_end={beta_end:.4f}, "
+              f"final_alpha_cumprod={final_alpha_cumprod:.6f} "
+              f"(目标: <0.01，当前: {'✓' if final_alpha_cumprod < 0.01 else '✗'})")
+
     # 获取当前时间步的alpha_cumprod
+    # 注意：timestep 从 0 开始，所以最后一步是 num_timesteps - 1
     alpha_cumprod_t = alphas_cumprod[timestep]
 
     # 生成随机噪声（与图像形状相同）
+    # 为了确保可重复性，可以使用固定种子，但这里使用随机噪声
     noise = torch.randn_like(image_tensor, device=device)
 
     # 计算加噪后的图像
     # x_t = sqrt(alpha_cumprod_t) * x_0 + sqrt(1 - alpha_cumprod_t) * noise
+    # 当 alpha_cumprod_t 接近 0 时，图像接近纯噪声
     sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod_t)
     sqrt_one_minus_alpha_cumprod = torch.sqrt(1.0 - alpha_cumprod_t)
 
-    # LLaVA的image_processor输出值范围通常是[0, 1]，需要归一化到[-1, 1]进行扩散
-    # 然后加噪后再转换回[0, 1]
-    image_normalized = image_tensor * 2.0 - 1.0  # [0, 1] -> [-1, 1]
+    # 步骤1：将图像从 [0, 1] 归一化到 [-1, 1] 进行扩散
+    # 这是DDPM的标准做法，在归一化后的空间中进行扩散
+    image_normalized = image_tensor_01 * 2.0 - 1.0  # [0, 1] -> [-1, 1]
 
+    # 步骤2：在归一化后的图像上添加高斯噪声
+    # 当 timestep 接近 num_timesteps-1 时，sqrt_alpha_cumprod 接近 0，sqrt_one_minus_alpha_cumprod 接近 1
+    # 这意味着图像几乎完全是噪声
     noisy_image = sqrt_alpha_cumprod * image_normalized + sqrt_one_minus_alpha_cumprod * noise
 
     # 将值限制在[-1, 1]范围内
     noisy_image = torch.clamp(noisy_image, -1.0, 1.0)
 
-    # 转换回[0, 1]范围（LLaVA期望的输入范围）
-    noisy_image = (noisy_image + 1.0) / 2.0
+    # 步骤3：转换回 [0, 1] 范围
+    noisy_image_01 = (noisy_image + 1.0) / 2.0
+
+    # 步骤4：如果输入是标准化后的值，需要转换回原始范围
+    if is_normalized:
+        # 转换回标准化后的值范围
+        noisy_image = noisy_image_01 * image_range + image_min
+    else:
+        # 保持 [0, 1] 范围
+        noisy_image = noisy_image_01
 
     return noisy_image
 
@@ -140,24 +272,27 @@ def extract_attention_from_output(output_dict, image_token_start=35, num_image_t
         num_heads: 每层的head数（默认32）
 
     Returns:
-        ratio: att_visual / att_all 的比值，如果提取失败返回None
+        tuple: (total_ratio, layer_ratios)
+            - total_ratio: 所有层的 att_visual / att_all 的比值（如果提取失败返回None）
+            - layer_ratios: 每层的 att_visual / att_all 的比值列表 [32]，如果提取失败返回None
     """
     if not hasattr(output_dict, 'attentions') or output_dict.attentions is None:
-        return None
+        return None, None
 
     # 获取最后一个生成步骤的attention（因为只生成一个token）
     if len(output_dict.attentions) == 0:
-        return None
+        return None, None
 
     # 最后一个步骤的attention（所有层的attention）
     last_step_attentions = output_dict.attentions[-1]
 
     if last_step_attentions is None or len(last_step_attentions) == 0:
-        return None
+        return None, None
 
     # 收集所有层的att_visual和att_all
     total_att_visual = 0.0
     total_att_all = 0.0
+    layer_ratios = np.zeros(num_total_layers)  # [32]
 
     for layer_idx in range(min(num_total_layers, len(last_step_attentions))):
         layer_attn = last_step_attentions[layer_idx]
@@ -209,18 +344,22 @@ def extract_attention_from_output(output_dict, image_token_start=35, num_image_t
         total_att_visual += att_visual
         total_att_all += att_all
 
-    # 计算比值
+        # 计算该层的比值
+        if att_all > 0:
+            layer_ratios[layer_idx] = att_visual / att_all
+
+    # 计算总比值
     if total_att_all > 0:
-        ratio = total_att_visual / total_att_all
-        return float(ratio)
+        total_ratio = total_att_visual / total_att_all
+        return float(total_ratio), layer_ratios
     else:
-        return None
+        return None, None
 
 
 def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                                 num_diffusion_steps=1000, image_token_start=35, num_image_tokens=576,
                                 num_total_layers=32, num_heads=32, max_new_tokens=15, temperature=0,
-                                output_dir=None, question_id=None, verbose=False):
+                                output_dir=None, question_id=None, verbose=False, target_layers=None):
     """
     对图像进行DDPM前向扩散，分析每一步的attention信息
 
@@ -242,9 +381,10 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
         output_dir: 输出目录
         question_id: 问题ID（用于保存文件）
         verbose: 是否输出详细信息
+        target_layers: 目标层列表（可选，用于生成每层折线图）
 
     Returns:
-        ratios: 每一步的att_visual/att_all比值列表
+        ratios: 每一步的att_visual/att_all比值列表（所有层的总和）
     """
     if verbose:
         print(f"\n  [扩散分析] 开始分析 {num_diffusion_steps} 步扩散过程...")
@@ -254,10 +394,7 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
     original_image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
     original_image_tensor = original_image_tensor.to(device)
 
-    # 准备输入
-    from llava.mm_utils import tokenizer_image_token
-    from llava.constants import IMAGE_TOKEN_INDEX
-
+    # 准备输入（使用文件顶部已导入的模块，不重复导入）
     if model.config.mm_use_im_start_end:
         qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + prompt
     else:
@@ -271,20 +408,37 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
     input_ids = tokenizer_image_token(full_prompt, tokenizer, IMAGE_TOKEN_INDEX,
                                      return_tensors='pt').unsqueeze(0).to(device)
 
-    from llava.mm_utils import KeywordsStoppingCriteria
     stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
     keywords = [stop_str]
     stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
 
     # 存储每一步的比值
-    ratios = []
+    ratios = []  # 所有层的总和
+    layer_ratios_per_step = []  # 每层每步的比值 [num_diffusion_steps, num_total_layers]
+
+    # 保存原始图像（用于对比）
+    if output_dir:
+        # 将原始图像tensor转换为PIL Image并保存
+        original_image_pil = _tensor_to_pil_image(original_image_tensor)
+        original_image_path = os.path.join(output_dir, "original_image.png")
+        original_image_pil.save(original_image_path)
+        if verbose:
+            print(f"  ✓ 原始图像已保存: {os.path.basename(original_image_path)}")
 
     # 对每一步进行扩散和推理
     for step in tqdm(range(num_diffusion_steps), desc="扩散步骤", disable=not verbose):
         # 对图像加噪
         noisy_image_tensor = add_gaussian_noise_ddpm(
-            original_image_tensor, step, num_timesteps=num_diffusion_steps, device=device
+            original_image_tensor, step, num_timesteps=num_diffusion_steps, device=device, verbose=verbose
         )
+
+        # 保存加噪后的图像（每隔一定步数保存，避免文件过多）
+        if output_dir and (step == 0 or step == num_diffusion_steps - 1 or (step + 1) % max(1, num_diffusion_steps // 10) == 0):
+            noisy_image_pil = _tensor_to_pil_image(noisy_image_tensor)
+            noisy_image_path = os.path.join(output_dir, f"noisy_image_step_{step:04d}.png")
+            noisy_image_pil.save(noisy_image_path)
+            if verbose and step < 5:  # 只对前几步输出详细信息
+                print(f"  ✓ 加噪图像已保存 (step {step}): {os.path.basename(noisy_image_path)}")
 
         # 准备生成参数
         generate_kwargs = {
@@ -308,36 +462,72 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
                 output_dict = model.generate(**generate_kwargs)
 
         # 提取attention信息
-        ratio = extract_attention_from_output(
+        total_ratio, layer_ratios = extract_attention_from_output(
             output_dict, image_token_start, num_image_tokens, num_total_layers, num_heads
         )
 
-        if ratio is not None:
-            ratios.append(ratio)
+        if total_ratio is not None:
+            ratios.append(total_ratio)
         else:
             ratios.append(0.0)  # 如果提取失败，使用0.0
+
+        if layer_ratios is not None:
+            layer_ratios_per_step.append(layer_ratios.copy())
+        else:
+            layer_ratios_per_step.append(np.zeros(num_total_layers))
 
     # 绘制图表
     if output_dir and len(ratios) > 0:
         os.makedirs(output_dir, exist_ok=True)
 
-        # 创建图表
-        fig, ax = plt.subplots(figsize=(12, 6))
-        steps = np.arange(1, len(ratios) + 1)
-        ax.plot(steps, ratios, 'b-', linewidth=1.5, alpha=0.7)
-        ax.set_xlabel('Diffusion Step', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Attention Ratio (att_visual / att_all)', fontsize=14, fontweight='bold')
-        ax.set_title(f'Attention Ratio vs Diffusion Step ({num_diffusion_steps} steps)', fontsize=16, fontweight='bold')
-        ax.grid(True, alpha=0.3)
+        # 创建图表 - 学术论文风格
+        plt.rcParams.update({
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'DejaVu Serif'],
+            'font.size': 12,
+            'axes.labelsize': 12,
+            'axes.titlesize': 0,  # 移除标题
+            'xtick.labelsize': 11,
+            'ytick.labelsize': 11,
+            'legend.fontsize': 10,
+            'figure.titlesize': 0,
+            'axes.linewidth': 1.0,
+            'grid.linewidth': 0.5,
+            'lines.linewidth': 2.0,
+            'lines.markersize': 5,
+        })
 
-        # 保存图表
+        fig, ax = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸，适合论文
+        steps = np.arange(1, len(ratios) + 1)
+
+        # 使用更专业的配色（深蓝色，适合学术论文）
+        ax.plot(steps, ratios, color='#1f77b4', linewidth=2.0, alpha=0.9)
+
+        # 设置标签（更简洁）
+        ax.set_xlabel('Diffusion Step', fontsize=12)
+        ax.set_ylabel('Attention Ratio', fontsize=12)
+
+        # 网格样式（更subtle）
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+
+        # 移除顶部和右侧边框（更简洁）
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.0)
+        ax.spines['bottom'].set_linewidth(1.0)
+
+        # 设置刻度样式
+        ax.tick_params(direction='in', length=4, width=0.8)
+
+        # 保存图表（更高DPI，适合论文）
         if question_id is not None:
             filename = f"diffusion_attention_ratio_q{question_id}.png"
         else:
             filename = "diffusion_attention_ratio.png"
 
         output_file = os.path.join(output_dir, filename)
-        plt.savefig(output_file, dpi=200, bbox_inches='tight')
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
         plt.close()
 
         if verbose:
@@ -345,6 +535,73 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             print(f"    平均比值: {np.mean(ratios):.4f}")
             print(f"    最小比值: {np.min(ratios):.4f}")
             print(f"    最大比值: {np.max(ratios):.4f}")
+
+    # 为每个目标层生成折线图（显示该层在不同扩散step的比值变化）
+    if target_layers is not None and len(target_layers) > 0 and len(layer_ratios_per_step) > 0:
+        layer_ratios_array = np.array(layer_ratios_per_step)  # [num_diffusion_steps, num_total_layers]
+
+        if verbose:
+            print(f"\n  [生成每层折线图] 为 {len(target_layers)} 个目标层生成折线图...")
+
+        for layer_idx in target_layers:
+            if layer_idx >= num_total_layers:
+                continue
+
+            # 提取该层在所有扩散步的比值
+            layer_ratios = layer_ratios_array[:, layer_idx]  # [num_diffusion_steps]
+
+            # 创建折线图 - 学术论文风格
+            plt.rcParams.update({
+                'font.family': 'serif',
+                'font.serif': ['Times New Roman', 'DejaVu Serif'],
+                'font.size': 12,
+                'axes.labelsize': 12,
+                'axes.titlesize': 0,  # 移除标题
+                'xtick.labelsize': 11,
+                'ytick.labelsize': 11,
+                'legend.fontsize': 10,
+                'figure.titlesize': 0,
+                'axes.linewidth': 1.0,
+                'grid.linewidth': 0.5,
+                'lines.linewidth': 2.0,
+                'lines.markersize': 5,
+            })
+
+            fig_layer, ax_layer = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸
+            steps = np.arange(1, num_diffusion_steps + 1)  # 从1开始编号
+
+            # 绘制折线图 - 使用更专业的配色
+            ax_layer.plot(steps, layer_ratios, color='#1f77b4', linewidth=2.0, alpha=0.9, marker='o', markersize=4, markevery=max(1, num_diffusion_steps//20))
+
+            # 设置标签（更简洁）
+            ax_layer.set_xlabel('Diffusion Step', fontsize=12)
+            ax_layer.set_ylabel('Attention Ratio', fontsize=12)
+
+            # 网格样式（更subtle）
+            ax_layer.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            ax_layer.set_xlim(0.5, num_diffusion_steps + 0.5)
+
+            # 移除顶部和右侧边框（更简洁）
+            ax_layer.spines['top'].set_visible(False)
+            ax_layer.spines['right'].set_visible(False)
+            ax_layer.spines['left'].set_linewidth(1.0)
+            ax_layer.spines['bottom'].set_linewidth(1.0)
+
+            # 设置刻度样式
+            ax_layer.tick_params(direction='in', length=4, width=0.8)
+
+            plt.tight_layout()
+
+            # 保存该层的折线图（更高DPI，适合论文）
+            if question_id is not None:
+                layer_fig_file = os.path.join(output_dir, f"diffusion_attention_ratio_q{question_id}_layer_{layer_idx}.png")
+            else:
+                layer_fig_file = os.path.join(output_dir, f"diffusion_attention_ratio_layer_{layer_idx}.png")
+            plt.savefig(layer_fig_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+            plt.close()
+
+            if verbose:
+                print(f"    ✓ Layer {layer_idx} 折线图已保存: {os.path.basename(layer_fig_file)}")
 
     return ratios
 
@@ -976,6 +1233,62 @@ def eval_model(args):
     else:
         print(f"✓ 加载了 {len(questions)} 个问题，将评测全部")
 
+    # 如果启用了扩散分析，先快速评估所有 case，过滤出回答 "Yes" 的 case
+    if hasattr(args, 'enable_diffusion_analysis') and args.enable_diffusion_analysis:
+        print(f"\n[预评估] 扩散分析已启用，先快速评估所有 case 以过滤出回答 'Yes' 的 case...")
+        yes_questions = []
+        yes_question_ids = set()
+
+        # 准备 Deco 参数（用于预评估）
+        early_exit_layers = None
+        if args.use_deco:
+            early_exit_layers = [i for i in range(args.start_layer, args.end_layer)]
+
+        for sample_idx, line in enumerate(tqdm(questions, desc="预评估进度")):
+            idx = line["question_id"]
+            image_file = line["image"]
+            qs = line["text"]
+
+            # 准备输入
+            input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
+                model, tokenizer, image_processor, image_file, qs, conv_mode, device, verbose=False
+            )
+
+            # 生成回答
+            outputs, _, _ = generate_response(
+                model, tokenizer, input_ids, image_tensor, stopping_criteria,
+                args.temperature, args.top_p, args.max_new_tokens, device,
+                use_deco=args.use_deco,
+                alpha=args.alpha,
+                threshold_top_p=args.threshold_top_p,
+                threshold_top_k=args.threshold_top_k,
+                early_exit_layers=early_exit_layers,
+                num_beams=1,
+                verbose=False
+            )
+
+            # 移除停止字符串
+            if outputs and outputs.endswith(stop_str):
+                outputs = outputs[:-len(stop_str)]
+            outputs = outputs.strip()
+
+            # 转换为 Yes/No
+            answer = recorder(outputs)
+
+            # 只保留回答 "Yes" 的 case
+            if answer == "Yes":
+                yes_questions.append(line)
+                yes_question_ids.add(idx)
+
+        print(f"✓ 预评估完成: 共 {len(questions)} 个 case，其中 {len(yes_questions)} 个回答 'Yes'")
+        print(f"  将只对这 {len(yes_questions)} 个 'Yes' case 进行后续处理（包括扩散分析）")
+
+        # 更新 questions 列表，只保留回答 "Yes" 的 case
+        questions = yes_questions
+        if len(questions) == 0:
+            print("⚠️  警告: 没有找到回答 'Yes' 的 case，将跳过所有处理")
+            return
+
     # 准备输出文件
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file) if os.path.dirname(answers_file) else ".", exist_ok=True)
@@ -1021,76 +1334,6 @@ def eval_model(args):
             print("=" * 80)
             print(f"问题: {qs}")
             print(f"图像: {image_file}")
-
-        # 如果启用了扩散分析，先进行扩散分析
-        if hasattr(args, 'enable_diffusion_analysis') and args.enable_diffusion_analysis:
-            if verbose:
-                print("\n" + "-" * 80)
-                print("[扩散分析] 开始扩散过程分析...")
-                print("-" * 80)
-
-            # 创建输出目录
-            diffusion_output_dir = os.path.join(os.path.dirname(answers_file), "diffusion_analysis")
-            os.makedirs(diffusion_output_dir, exist_ok=True)
-
-            # 进行扩散分析
-            ratios = analyze_diffusion_attention(
-                model=model,
-                tokenizer=tokenizer,
-                image_processor=image_processor,
-                image_file=image_file,
-                prompt=qs,
-                conv_mode=conv_mode,
-                device=device,
-                num_diffusion_steps=getattr(args, 'num_diffusion_steps', 1000),
-                image_token_start=35,
-                num_image_tokens=576,
-                num_total_layers=32,
-                num_heads=32,
-                max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature,
-                output_dir=diffusion_output_dir,
-                question_id=idx,
-                verbose=verbose
-            )
-
-            if verbose:
-                print(f"  ✓ 扩散分析完成，共 {len(ratios)} 步")
-
-        # 如果启用了扩散分析，先进行扩散分析
-        if hasattr(args, 'enable_diffusion_analysis') and args.enable_diffusion_analysis:
-            if verbose:
-                print("\n" + "-" * 80)
-                print("[扩散分析] 开始扩散过程分析...")
-                print("-" * 80)
-
-            # 创建输出目录
-            diffusion_output_dir = os.path.join(os.path.dirname(answers_file), "diffusion_analysis")
-            os.makedirs(diffusion_output_dir, exist_ok=True)
-
-            # 进行扩散分析
-            ratios = analyze_diffusion_attention(
-                model=model,
-                tokenizer=tokenizer,
-                image_processor=image_processor,
-                image_file=image_file,
-                prompt=qs,
-                conv_mode=conv_mode,
-                device=device,
-                num_diffusion_steps=getattr(args, 'num_diffusion_steps', 1000),
-                image_token_start=35,
-                num_image_tokens=576,
-                num_total_layers=32,
-                num_heads=32,
-                max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature,
-                output_dir=diffusion_output_dir,
-                question_id=idx,
-                verbose=verbose
-            )
-
-            if verbose:
-                print(f"  ✓ 扩散分析完成，共 {len(ratios)} 步")
 
         # 准备输入
         if verbose:
@@ -1139,6 +1382,50 @@ def eval_model(args):
             print(f"    - 转换后答案: '{answer}'")
             print("=" * 80)
 
+        # 如果启用了扩散分析，进行扩散分析（此时所有 case 都应该是 "Yes"）
+        if hasattr(args, 'enable_diffusion_analysis') and args.enable_diffusion_analysis:
+            if answer == "Yes":
+                if verbose:
+                    print("\n" + "-" * 80)
+                    print("[扩散分析] 开始扩散过程分析...")
+                    print("-" * 80)
+                else:
+                    print(f"  [扩散分析] Question ID {idx}: 开始扩散分析...")
+
+                # 创建输出目录（为每个case创建单独的子文件夹）
+                diffusion_analysis_base_dir = os.path.join(os.path.dirname(answers_file), "diffusion_analysis")
+                os.makedirs(diffusion_analysis_base_dir, exist_ok=True)
+                diffusion_output_dir = os.path.join(diffusion_analysis_base_dir, f"q{idx}")
+                os.makedirs(diffusion_output_dir, exist_ok=True)
+
+                # 进行扩散分析
+                ratios = analyze_diffusion_attention(
+                    model=model,
+                    tokenizer=tokenizer,
+                    image_processor=image_processor,
+                    image_file=image_file,
+                    prompt=qs,
+                    conv_mode=conv_mode,
+                    device=device,
+                    num_diffusion_steps=getattr(args, 'num_diffusion_steps', 1000),
+                    image_token_start=35,
+                    num_image_tokens=576,
+                    num_total_layers=32,
+                    num_heads=32,
+                    max_new_tokens=args.max_new_tokens,
+                    temperature=args.temperature,
+                    output_dir=diffusion_output_dir,
+                    question_id=idx,
+                    verbose=verbose,
+                    target_layers=getattr(args, 'target_layers', None)
+                )
+
+                if verbose:
+                    print(f"  ✓ 扩散分析完成，共 {len(ratios)} 步")
+            else:
+                # 这种情况不应该发生，因为已经在预评估阶段过滤掉了
+                print(f"  ⚠️  警告: Question ID {idx} 的答案为 '{answer}'，但应该在预评估阶段已被过滤")
+
         # 保存结果
         ans_file.write(json.dumps({
             "question_id": idx,
@@ -1179,7 +1466,7 @@ def main():
         "coco_baseline_dir": str(project_root / "pope_coco"),
         "coco_root": "/home/liying/Documents/dataset/coco",
         "split": ["adversarial", "popular", "random"],  # 默认评估 adversarial split
-        "use_deco": True,
+        "use_deco": False,
         "alpha": 0.8,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
@@ -1188,10 +1475,11 @@ def main():
         "temperature": 0,
         "top_p": None,
         "max_new_tokens": 15,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 1,
+        "num_samples": 10,
         "seed": 42,
+        "target_layers": [0, 5, 7, 9, 11, 13, 15, 17, 21, 25, 29, 31],
         "enable_diffusion_analysis": True,
-        "num_diffusion_steps": 1000
+        "num_diffusion_steps": 40
     }
 
     # 解析参数（所有参数都有默认值）
@@ -1253,13 +1541,26 @@ def main():
     parser.add_argument("--seed", type=int, default=default_config["seed"], help="随机种子")
 
     # 扩散分析参数
-    parser.add_argument("--enable-diffusion-analysis", type=bool, default=True,
+    parser.add_argument("--enable-diffusion-analysis", type=bool, default=default_config["enable_diffusion_analysis"],
                        help="启用DDPM前向扩散分析（默认：True）")
-    parser.add_argument("--num-diffusion-steps", type=int, default=1000,
+    parser.add_argument("--num-diffusion-steps", type=int, default=default_config["num_diffusion_steps"],
                        help="扩散步数（默认：1000）")
+    parser.add_argument("--target-layers", type=str, default=None,
+                       help="目标层列表，逗号分隔（例如: 0,3,5,7,9,11,13,15,17,21,23,25,29,31）。如果不指定，将使用默认值")
 
     args = parser.parse_args()
     set_seed(args.seed)
+
+    # 解析 target_layers 参数
+    if args.target_layers is None:
+        # 使用默认值
+        args.target_layers = default_config.get("target_layers", [0, 3, 5, 7, 9, 11, 13, 15, 17, 21, 23, 25, 29, 31])
+    else:
+        # 解析逗号分隔的字符串
+        try:
+            args.target_layers = [int(x.strip()) for x in args.target_layers.split(',') if x.strip()]
+        except ValueError:
+            raise ValueError(f"无效的 target_layers 值: {args.target_layers}。应该是逗号分隔的整数列表（例如: 0,3,5,7）")
 
     # 解析 split 参数（支持单个值、逗号分隔的多个值，或列表）
     if isinstance(args.split, list):
