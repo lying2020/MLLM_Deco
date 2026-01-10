@@ -1827,6 +1827,69 @@ def _process_attention_tensor(layer_attn):
     return last_row_attention
 
 
+def _extract_last_row_attention_sum(layer_attn):
+    """
+    提取attention tensor最后一行的attention值（对所有head求和，而不是平均）
+
+    Args:
+        layer_attn: attention tensor，形状可能是 [batch, num_heads, seq_len, seq_len] 等
+
+    Returns:
+        numpy array: 最后一行的attention值（对所有head求和后的一维数组），如果失败返回None
+    """
+    if isinstance(layer_attn, tuple):
+        layer_attn = layer_attn[0]
+
+    if not isinstance(layer_attn, torch.Tensor):
+        return None
+
+    layer_attn_np = layer_attn.cpu().numpy()
+
+    # 处理不同形状的attention tensor
+    if len(layer_attn_np.shape) == 4:
+        # [batch, num_heads, seq_len, seq_len]
+        batch_size, num_heads, seq_len, _ = layer_attn_np.shape
+        if seq_len == 1:
+            # query_len == 1，取第一个batch，最后一个query位置，对所有head求和
+            last_row_attention = np.sum(layer_attn_np[0, :, 0, :], axis=0)  # [seq_len]
+        else:
+            # 取第一个batch，最后一个query位置，对所有head求和
+            last_row_attention = np.sum(layer_attn_np[0, :, -1, :], axis=0)  # [seq_len]
+    elif len(layer_attn_np.shape) == 3:
+        # [num_heads, seq_len, seq_len] 或 [batch, seq_len, seq_len]
+        if layer_attn_np.shape[0] > 10:  # 可能是 [num_heads, seq_len, seq_len]
+            num_heads, seq_len, _ = layer_attn_np.shape
+            if seq_len == 1:
+                last_row_attention = np.sum(layer_attn_np[:, 0, :], axis=0)  # [seq_len]
+            else:
+                last_row_attention = np.sum(layer_attn_np[:, -1, :], axis=0)  # [seq_len]
+        else:
+            # 可能是 [batch, seq_len, seq_len]，没有head维度
+            batch_size, seq_len, _ = layer_attn_np.shape
+            if seq_len == 1:
+                last_row_attention = layer_attn_np[0, 0, :]  # [seq_len]
+            else:
+                last_row_attention = layer_attn_np[0, -1, :]  # [seq_len]
+    elif len(layer_attn_np.shape) == 2:
+        # [seq_len, seq_len] 或 [num_heads, seq_len]
+        if layer_attn_np.shape[0] > 10:  # 可能是 [num_heads, seq_len]
+            # 对所有head求和
+            last_row_attention = np.sum(layer_attn_np, axis=0)  # [seq_len]
+        else:
+            # [seq_len, seq_len]
+            seq_len = layer_attn_np.shape[0]
+            if seq_len == 1:
+                last_row_attention = layer_attn_np[0, :]  # [seq_len]
+            else:
+                last_row_attention = layer_attn_np[-1, :]  # [seq_len]
+    elif len(layer_attn_np.shape) == 1:
+        last_row_attention = layer_attn_np
+    else:
+        return None
+
+    return last_row_attention
+
+
 def _extract_head_layer_attention_data(layer_attn, image_token_start, num_image_tokens, num_heads=32):
     """
     提取head-layer attention数据（32×32 heatmap）
@@ -2998,6 +3061,311 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             print(f"    概率值范围: [{all_valid_probabilities.min():.4f}, {all_valid_probabilities.max():.4f}]")
 
 
+def _extract_step_attention_statistics(all_attentions, image_token_start, num_image_tokens, num_total_layers=32):
+    """
+    提取所有推理步的attention统计信息
+
+    Args:
+        all_attentions: 所有生成步骤的attention（tuple，每个元素对应一个步骤）
+        image_token_start: 图像token的起始位置
+        num_image_tokens: 图像token的数量（通常是576）
+        num_total_layers: 总层数（默认32）
+
+    Returns:
+        dict: 包含以下键的字典
+            - step_att_visual: [n, 32] 数组，每个推理步每层的att_visual
+            - step_att_all: [n, 32] 数组，每个推理步每层的att_all
+            - step_ratio: [n] 数组，每个推理步的 (所有32层att_visual求和) / (所有32层att_all求和)
+            - step_att_visual_sum: [n] 数组，每个推理步的所有32层att_visual求和
+            - step_att_all_sum: [n] 数组，每个推理步的所有32层att_all求和
+    """
+    if all_attentions is None or len(all_attentions) == 0:
+        return None
+
+    n_steps = len(all_attentions)
+    step_att_visual = np.zeros((n_steps, num_total_layers))  # [n, 32]
+    step_att_all = np.zeros((n_steps, num_total_layers))  # [n, 32]
+
+    actual_num_image_tokens = num_image_tokens if num_image_tokens > 0 else 576
+
+    for step_idx, step_attentions in enumerate(all_attentions):
+        if step_attentions is None:
+            continue
+
+        # 遍历所有32层
+        for layer_idx in range(num_total_layers):
+            if layer_idx >= len(step_attentions):
+                continue
+
+            layer_attn = step_attentions[layer_idx]
+            if layer_attn is None:
+                continue
+
+            # 提取最后一行的attention（对所有head求和）
+            last_row_attention = _extract_last_row_attention_sum(layer_attn)
+            if last_row_attention is None:
+                continue
+
+            # 计算att_all：整行所有attention值的和
+            att_all = np.sum(last_row_attention)
+            step_att_all[step_idx, layer_idx] = att_all
+
+            # 计算att_visual：576个visual attention值的和
+            seq_len = len(last_row_attention)
+            image_token_end_actual = min(image_token_start + actual_num_image_tokens, seq_len)
+            valid_image_positions = np.arange(image_token_start, image_token_end_actual)
+
+            if len(valid_image_positions) > 0:
+                image_attention = last_row_attention[valid_image_positions]
+                att_visual = np.sum(image_attention)
+                step_att_visual[step_idx, layer_idx] = att_visual
+
+    # 计算每个推理步的统计信息
+    step_att_visual_sum = np.sum(step_att_visual, axis=1)  # [n]
+    step_att_all_sum = np.sum(step_att_all, axis=1)  # [n]
+
+    # 计算比率（避免除零）
+    step_ratio = np.zeros(n_steps)
+    for i in range(n_steps):
+        if step_att_all_sum[i] > 0:
+            step_ratio[i] = step_att_visual_sum[i] / step_att_all_sum[i]
+
+    return {
+        'step_att_visual': step_att_visual,  # [n, 32]
+        'step_att_all': step_att_all,  # [n, 32]
+        'step_ratio': step_ratio,  # [n]
+        'step_att_visual_sum': step_att_visual_sum,  # [n]
+        'step_att_all_sum': step_att_all_sum,  # [n]
+        'n_steps': n_steps
+    }
+
+
+def _visualize_step_attention_statistics(all_attentions, image_token_start, num_image_tokens,
+                                        num_total_layers, output_dir, tokenizer=None, output_ids=None):
+    """
+    可视化推理步attention统计信息
+
+    生成6个图：
+    1. 图1（单独）：n个点，每个点 = (所有32层att_visual求和) / (所有32层att_all求和)
+    2. 图1-6（2×3子图）：
+       - 图1：n个点，每个点 = (所有32层att_visual求和) / (所有32层att_all求和)
+       - 图2：n个点，每个点 = 所有32层att_visual求和
+       - 图3：n个点，每个点 = 所有32层att_all求和
+       - 图4：n*32个点，每个点 = 一个推理步的一个transformer层的 att_visual / att_all
+       - 图5：n*32个点，每个点 = 一个推理步的一个transformer层的att_visual
+       - 图6：n*32个点，每个点 = 一个推理步的一个transformer层的att_all
+
+    Args:
+        all_attentions: 所有生成步骤的attention
+        image_token_start: 图像token的起始位置
+        num_image_tokens: 图像token的数量
+        num_total_layers: 总层数
+        output_dir: 输出目录
+        tokenizer: tokenizer对象（可选，用于解码token词汇）
+        output_ids: 输出序列的token IDs（可选，用于解码token词汇）
+    """
+    print(f"\n  [生成推理步Attention统计] 提取并可视化attention统计信息...")
+
+    # 提取统计信息
+    stats = _extract_step_attention_statistics(
+        all_attentions, image_token_start, num_image_tokens, num_total_layers
+    )
+
+    if stats is None:
+        print(f"  ⚠️  无法提取attention统计信息，跳过可视化")
+        return
+
+    n_steps = stats['n_steps']
+
+    # 如果token数量少于5个，跳过生成图表和JSON文件
+    if n_steps < 5:
+        print(f"  ⚠️  推理步数 ({n_steps}) 少于5个，跳过生成 step_attention 图表和JSON文件")
+        return
+
+    step_ratio = stats['step_ratio']
+    step_att_visual_sum = stats['step_att_visual_sum']
+    step_att_all_sum = stats['step_att_all_sum']
+    step_att_visual = stats['step_att_visual']  # [n, 32]
+    step_att_all = stats['step_att_all']  # [n, 32]
+
+    # 图1：单独绘制比率图
+    fig1, ax1 = plt.subplots(figsize=(12, 6))
+    steps = np.arange(1, n_steps + 1)  # 从1开始编号
+    ax1.plot(steps, step_ratio, 'o-', linewidth=2, markersize=6, color='#2E86AB')
+    ax1.set_xlabel('Generation Step', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Visual Attention Ratio\n(Σ att_visual / Σ att_all)', fontsize=14, fontweight='bold')
+    ax1.set_title('Visual Attention Ratio per Generation Step', fontsize=16, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim(0.5, n_steps + 0.5)
+
+    # 找到比率最高的推理步并标注对应的token词汇
+    max_ratio_idx = np.argmax(step_ratio)
+    max_ratio_step = max_ratio_idx + 1  # 转换为从1开始的步数
+    max_ratio_value = step_ratio[max_ratio_idx]
+
+    # 标注最高比值的点
+    ax1.plot(max_ratio_step, max_ratio_value, 'ro', markersize=10, label='Max Ratio')
+
+    # 如果提供了tokenizer和output_ids，解码对应的token词汇
+    token_text = None
+    if tokenizer is not None and output_ids is not None:
+        try:
+            # output_ids中不包含input信息，直接使用max_ratio_idx索引
+            if 0 <= max_ratio_idx < output_ids.shape[1]:
+                token_id = output_ids[0, max_ratio_idx].item()
+                token_text = tokenizer.decode([token_id], skip_special_tokens=True).strip()
+                # 清理token文本，移除特殊字符
+                token_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
+                if not token_text:
+                    token_text = None
+        except Exception as e:
+            print(f"  ⚠️  解码token词汇失败: {e}")
+            token_text = None
+
+    # 在最高点处添加标注
+    if token_text:
+        # 添加文本标注，显示token词汇
+        ax1.annotate(f'Max: {token_text}\n(Ratio: {max_ratio_value:.4f})',
+                    xy=(max_ratio_step, max_ratio_value),
+                    xytext=(10, 10), textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
+                    fontsize=11, fontweight='bold')
+    else:
+        # 如果没有token词汇，只标注比率值
+        ax1.annotate(f'Max Ratio: {max_ratio_value:.4f}',
+                    xy=(max_ratio_step, max_ratio_value),
+                    xytext=(10, 10), textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
+                    fontsize=11, fontweight='bold')
+
+    # 保存图1
+    fig1_file = os.path.join(output_dir, "step_attention_ratio.png")
+    plt.savefig(fig1_file, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ 图1 (Attention Ratio) 已保存: {os.path.basename(fig1_file)}")
+    if token_text:
+        print(f"    最高比率对应的token词汇: '{token_text}' (Step {max_ratio_step}, Ratio: {max_ratio_value:.4f})")
+
+    # 计算每层每步的比率（att_visual / att_all）
+    step_att_ratio_per_layer = np.zeros_like(step_att_visual)  # [n, 32]
+    for step_idx in range(n_steps):
+        for layer_idx in range(num_total_layers):
+            if step_att_all[step_idx, layer_idx] > 0:
+                step_att_ratio_per_layer[step_idx, layer_idx] = step_att_visual[step_idx, layer_idx] / step_att_all[step_idx, layer_idx]
+
+    # 图1-6：2×3子图
+    fig2, axes = plt.subplots(2, 3, figsize=(24, 12))
+
+    # 图1：比率图（在子图中）
+    ax1_sub = axes[0, 0]
+    ax1_sub.plot(steps, step_ratio, 'o-', linewidth=2, markersize=6, color='#2E86AB')
+    ax1_sub.set_xlabel('Generation Step', fontsize=12, fontweight='bold')
+    ax1_sub.set_ylabel('Visual Attention Ratio\n(Σ att_visual / Σ att_all)', fontsize=12, fontweight='bold')
+    ax1_sub.set_title('Visual Attention Ratio per Step', fontsize=14, fontweight='bold')
+    ax1_sub.grid(True, alpha=0.3)
+    ax1_sub.set_xlim(0.5, n_steps + 0.5)
+
+    # 图2：att_visual求和
+    ax2 = axes[0, 1]
+    ax2.plot(steps, step_att_visual_sum, 'o-', linewidth=2, markersize=6, color='#A23B72')
+    ax2.set_xlabel('Generation Step', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Sum of Visual Attention\n(Σ att_visual across all layers)', fontsize=12, fontweight='bold')
+    ax2.set_title('Sum of Visual Attention per Step', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim(0.5, n_steps + 0.5)
+
+    # 图3：att_all求和
+    ax3 = axes[0, 2]
+    ax3.plot(steps, step_att_all_sum, 'o-', linewidth=2, markersize=6, color='#F18F01')
+    ax3.set_xlabel('Generation Step', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('Sum of All Attention\n(Σ att_all across all layers)', fontsize=12, fontweight='bold')
+    ax3.set_title('Sum of All Attention per Step', fontsize=14, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim(0.5, n_steps + 0.5)
+
+    # 图4：每个推理步每层的比率（att_visual / att_all）（n*32个点）- 柱状图
+    ax4 = axes[1, 0]
+    # 将数据展平为一维数组：按行展平，即每个推理步的32层数据连续排列
+    ratio_flat = step_att_ratio_per_layer.flatten()  # [n*32]
+    x_positions = np.arange(len(ratio_flat))  # x轴位置从0开始
+    ax4.bar(x_positions, ratio_flat, width=0.8, color='#2E86AB', alpha=0.7)
+    ax4.set_xlabel('Step × Layer Index', fontsize=12, fontweight='bold')
+    ax4.set_ylabel('Ratio (att_visual / att_all)', fontsize=12, fontweight='bold')
+    ax4.set_title('Visual Attention Ratio per Step and Layer\n(att_visual / att_all)', fontsize=14, fontweight='bold')
+    # 设置x轴刻度：只标注32的整数倍（0, 32, 64, ...）
+    max_x = len(ratio_flat) - 1
+    tick_positions = np.arange(0, max_x + 1, 32)
+    ax4.set_xticks(tick_positions)
+    ax4.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
+    ax4.grid(True, alpha=0.3, axis='y')
+
+    # 图5：每个推理步每层的att_visual（n*32个点）- 柱状图
+    ax5 = axes[1, 1]
+    # 将数据展平为一维数组
+    visual_flat = step_att_visual.flatten()  # [n*32]
+    x_positions = np.arange(len(visual_flat))  # x轴位置从0开始
+    ax5.bar(x_positions, visual_flat, width=0.8, color='#A23B72', alpha=0.7)
+    ax5.set_xlabel('Step × Layer Index', fontsize=12, fontweight='bold')
+    ax5.set_ylabel('att_visual', fontsize=12, fontweight='bold')
+    ax5.set_title('Visual Attention per Step and Layer\n(att_visual)', fontsize=14, fontweight='bold')
+    # 设置x轴刻度：只标注32的整数倍（0, 32, 64, ...）
+    max_x = len(visual_flat) - 1
+    tick_positions = np.arange(0, max_x + 1, 32)
+    ax5.set_xticks(tick_positions)
+    ax5.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
+    ax5.grid(True, alpha=0.3, axis='y')
+
+    # 图6：每个推理步每层的att_all（n*32个点）- 柱状图
+    ax6 = axes[1, 2]
+    # 将数据展平为一维数组
+    all_flat = step_att_all.flatten()  # [n*32]
+    x_positions = np.arange(len(all_flat))  # x轴位置从0开始
+    ax6.bar(x_positions, all_flat, width=0.8, color='#F18F01', alpha=0.7)
+    ax6.set_xlabel('Step × Layer Index', fontsize=12, fontweight='bold')
+    ax6.set_ylabel('att_all', fontsize=12, fontweight='bold')
+    ax6.set_title('All Attention per Step and Layer\n(att_all)', fontsize=14, fontweight='bold')
+    # 设置x轴刻度：只标注32的整数倍（0, 32, 64, ...）
+    max_x = len(all_flat) - 1
+    tick_positions = np.arange(0, max_x + 1, 32)
+    ax6.set_xticks(tick_positions)
+    ax6.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
+    ax6.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+
+    # 保存图1-6
+    fig2_file = os.path.join(output_dir, "step_attention_statistics.png")
+    plt.savefig(fig2_file, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ 图1-6 (Attention Statistics) 已保存: {os.path.basename(fig2_file)}")
+
+    # 保存统计数据到JSON文件
+    json_data = {
+        'n_steps': int(n_steps),
+        'num_total_layers': int(num_total_layers),
+        'step_ratio': step_ratio.tolist(),
+        'step_att_visual_sum': step_att_visual_sum.tolist(),
+        'step_att_all_sum': step_att_all_sum.tolist(),
+        'step_att_visual': step_att_visual.tolist(),  # [n, 32]
+        'step_att_all': step_att_all.tolist(),  # [n, 32]
+        'step_att_ratio_per_layer': step_att_ratio_per_layer.tolist()  # [n, 32] 每层每步的比率
+    }
+
+    json_file = os.path.join(output_dir, "step_attention_statistics.json")
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(json_data, f, indent=2, ensure_ascii=False)
+    print(f"  ✓ 统计数据已保存到JSON: {os.path.basename(json_file)}")
+
+    # 打印统计摘要
+    print(f"\n  [统计摘要]")
+    print(f"    总推理步数: {n_steps}")
+    print(f"    平均Visual Attention比率: {np.mean(step_ratio):.4f}")
+    print(f"    平均Visual Attention总和: {np.mean(step_att_visual_sum):.4f}")
+    print(f"    平均All Attention总和: {np.mean(step_att_all_sum):.4f}")
+
+
 def extract_object_attention_maps(model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                                   output_ids, input_token_len, all_attentions, object_tokens_info,
                                   image_tensor, output_dir, target_layers=None, all_hidden_states=None, outputs_text=None):
@@ -3103,6 +3471,12 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
 
     # 生成32×32 head-layer heatmap
     _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers, num_heads=32)
+
+    # 生成推理步attention统计可视化
+    _visualize_step_attention_statistics(
+        all_attentions, image_token_start, num_image_tokens, num_total_layers, output_dir,
+        tokenizer=tokenizer, output_ids=output_ids
+    )
 
 
 def compare_deco_vs_vanilla(deco_results, vanilla_results, deco_captions_file, vanilla_captions_file,
