@@ -126,15 +126,15 @@ def add_gaussian_noise_ddpm(image_tensor, timestep, num_timesteps=1000, device='
     噪声累积方式：
     - 使用DDPM的标准公式：x_t = sqrt(alpha_cumprod_t) * x_0 + sqrt(1 - alpha_cumprod_t) * noise
     - 这个公式允许从原始图像 x_0 直接计算到任意时间步 t 的噪声图像 x_t
-    - 当 timestep 接近 num_timesteps-1 时，alpha_cumprod_t 应该接近 0，使得图像接近纯噪声
-    - 为了确保最后一步是纯噪声，我们调整 beta_end 使其在最后一步时 alpha_cumprod 足够小
+    - 始终使用标准的1000步DDPM噪声调度
+    - 如果 num_timesteps != 1000，则从1000步中等间隔采样对应的时间步
 
     Args:
         image_tensor: 原始图像tensor，形状为 [C, H, W]
             - 如果是 CLIPImageProcessor 输出，值范围大约在 [-2, 2]（标准化后的值）
             - 如果是简单的归一化，值范围在 [0, 1]
         timestep: 当前时间步（0到num_timesteps-1）
-        num_timesteps: 总时间步数（默认1000）
+        num_timesteps: 总时间步数（默认1000，如果指定其他值，将从1000步中等间隔采样）
         device: 设备
         verbose: 是否输出详细信息
 
@@ -182,47 +182,48 @@ def add_gaussian_noise_ddpm(image_tensor, timestep, num_timesteps=1000, device='
             print(f"  [图像转换] 检测到 [0, 1] 范围的值，无需转换")
 
     # 计算噪声调度
-    # 对于较少的步数（如10步），需要调整beta_end以确保最后一步接近纯噪声
-    # 标准DDPM使用 beta_start=0.0001, beta_end=0.02 (对于1000步)
-    # 对于更少的步数，我们需要更大的beta_end来确保累积噪声足够大
-
-    # 目标：在最后一步时，alpha_cumprod 应该接近 0.01 左右（即图像几乎全是噪声）
-    # 使用更精确的方法：根据目标 alpha_cumprod 反推 beta_end
+    # 始终使用标准的1000步DDPM噪声调度
+    standard_timesteps = 1000
     beta_start = 0.0001
-    target_final_alpha_cumprod = 0.01  # 最后一步时，图像应该只有1%的原始信息，99%是噪声
+    beta_end = 0.02  # 标准DDPM的beta_end
 
-    # 对于线性调度，近似计算：如果所有步的alpha都相同，那么 alpha_cumprod = alpha^num_timesteps
-    # 因此：alpha ≈ (target_final_alpha_cumprod)^(1/num_timesteps)
-    # beta = 1 - alpha
-    if num_timesteps <= 10:
-        # 对于10步或更少，使用较大的beta_end确保最后一步接近纯噪声
-        # 计算：如果最后一步 alpha_cumprod = 0.01，那么平均 alpha ≈ 0.01^(1/10) ≈ 0.63
-        # 所以 beta_end ≈ 1 - 0.63 = 0.37，但考虑到线性调度，我们使用稍小的值
-        beta_end = 0.4
-    elif num_timesteps <= 50:
-        # 对于50步：alpha ≈ 0.01^(1/50) ≈ 0.91，beta_end ≈ 0.09
-        beta_end = 0.12
-    elif num_timesteps <= 100:
-        # 对于100步：alpha ≈ 0.01^(1/100) ≈ 0.95，beta_end ≈ 0.05
-        beta_end = 0.06
-    else:
-        # 对于1000步，使用标准值（标准DDPM的beta_end=0.02）
-        beta_end = 0.02
-
-    betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
+    # 计算标准的1000步噪声调度
+    betas = torch.linspace(beta_start, beta_end, standard_timesteps, device=device)
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+    # 如果 num_timesteps != 1000，从1000步中等间隔采样
+    if num_timesteps != standard_timesteps:
+        # 计算等间隔的时间步索引
+        # 例如：num_timesteps=10，则从1000步中取：0, 111, 222, 333, ..., 999
+        # 使用 linspace 生成等间隔的索引，然后四舍五入到最近的整数
+        if num_timesteps == 1:
+            # 如果只有1步，直接使用最后一步（最接近纯噪声）
+            actual_timestep = standard_timesteps - 1
+        else:
+            # 计算等间隔的索引
+            # timestep 从 0 到 num_timesteps-1，映射到 0 到 standard_timesteps-1
+            actual_timestep = int(timestep * (standard_timesteps - 1) / (num_timesteps - 1))
+            actual_timestep = min(actual_timestep, standard_timesteps - 1)  # 确保不超过范围
+
+        if verbose and timestep == 0:
+            print(f"  [噪声调度] 使用标准1000步调度，等间隔采样 {num_timesteps} 步")
+            print(f"    - 当前 timestep={timestep} (在 {num_timesteps} 步中) -> 映射到标准步 {actual_timestep} (在1000步中)")
+    else:
+        # num_timesteps == 1000，直接使用
+        actual_timestep = timestep
+        if verbose and timestep == 0:
+            print(f"  [噪声调度] 使用标准1000步调度")
 
     # 验证：最后一步的 alpha_cumprod 应该足够小
     if verbose and timestep == 0:  # 只在第一次调用时打印
         final_alpha_cumprod = alphas_cumprod[-1].item()
-        print(f"  [噪声调度] num_timesteps={num_timesteps}, beta_end={beta_end:.4f}, "
+        print(f"  [噪声调度] 标准1000步调度，beta_end={beta_end:.4f}, "
               f"final_alpha_cumprod={final_alpha_cumprod:.6f} "
               f"(目标: <0.01，当前: {'✓' if final_alpha_cumprod < 0.01 else '✗'})")
 
-    # 获取当前时间步的alpha_cumprod
-    # 注意：timestep 从 0 开始，所以最后一步是 num_timesteps - 1
-    alpha_cumprod_t = alphas_cumprod[timestep]
+    # 获取当前时间步的alpha_cumprod（使用映射后的实际时间步）
+    alpha_cumprod_t = alphas_cumprod[actual_timestep]
 
     # 生成随机噪声（与图像形状相同）
     # 为了确保可重复性，可以使用固定种子，但这里使用随机噪声
@@ -498,7 +499,16 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
         })
 
         fig, ax = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸，适合论文
-        steps = np.arange(1, len(ratios) + 1)
+
+        # 计算每个采样点对应的标准1000步中的位置（0-1000）
+        standard_timesteps = 1000
+        if num_diffusion_steps == 1:
+            # 如果只有1步，使用最后一步（999）
+            steps = np.array([standard_timesteps - 1])
+        else:
+            # 等间隔采样：从0到999
+            steps = np.array([int(i * (standard_timesteps - 1) / (num_diffusion_steps - 1))
+                             for i in range(num_diffusion_steps)])
 
         # 使用更专业的配色（深蓝色，适合学术论文）
         # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
@@ -508,6 +518,10 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
         label_fontsize = int(12 * 1.2)  # 14.4 -> 14
         ax.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
         ax.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
+
+        # 设置 x 轴范围和刻度：0-1000，间隔100
+        ax.set_xlim(0, 1000)
+        ax.set_xticks(np.arange(0, 1001, 100))  # 0, 100, 200, ..., 1000
 
         # 网格样式（更subtle）
         ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
@@ -577,7 +591,16 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             })
 
             fig_layer, ax_layer = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸
-            steps = np.arange(1, num_diffusion_steps + 1)  # 从1开始编号
+
+            # 计算每个采样点对应的标准1000步中的位置（0-1000）
+            standard_timesteps = 1000
+            if num_diffusion_steps == 1:
+                # 如果只有1步，使用最后一步（999）
+                steps = np.array([standard_timesteps - 1])
+            else:
+                # 等间隔采样：从0到999
+                steps = np.array([int(i * (standard_timesteps - 1) / (num_diffusion_steps - 1))
+                                 for i in range(num_diffusion_steps)])
 
             # 绘制折线图 - 使用更专业的配色
             # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
@@ -588,9 +611,12 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             ax_layer.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
             ax_layer.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
 
+            # 设置 x 轴范围和刻度：0-1000，间隔100
+            ax_layer.set_xlim(0, 1000)
+            ax_layer.set_xticks(np.arange(0, 1001, 100))  # 0, 100, 200, ..., 1000
+
             # 网格样式（更subtle）
             ax_layer.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            ax_layer.set_xlim(0.5, num_diffusion_steps + 0.5)
 
             # 显示所有边框，使用浅蓝色
             light_blue = '#ADD8E6'
@@ -1493,11 +1519,11 @@ def main():
         "temperature": 0,
         "top_p": None,
         "max_new_tokens": 15,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 10,
+        "num_samples": 50,
         "seed": 42,
         "target_layers": [0, 5, 7, 9, 11, 13, 15, 17, 21, 25, 29, 31],
         "enable_diffusion_analysis": True,
-        "num_diffusion_steps": 40
+        "num_diffusion_steps": 11
     }
 
     # 解析参数（所有参数都有默认值）
