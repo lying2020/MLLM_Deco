@@ -501,23 +501,32 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
         steps = np.arange(1, len(ratios) + 1)
 
         # 使用更专业的配色（深蓝色，适合学术论文）
-        ax.plot(steps, ratios, color='#1f77b4', linewidth=2.0, alpha=0.9)
+        # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
+        ax.plot(steps, ratios, color='#1f77b4', linewidth=2.4, alpha=0.9)
 
-        # 设置标签（更简洁）
-        ax.set_xlabel('Diffusion Step', fontsize=12)
-        ax.set_ylabel('Attention Ratio', fontsize=12)
+        # 设置标签（更简洁，加粗并放大1.2倍）
+        label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+        ax.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
+        ax.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
 
         # 网格样式（更subtle）
         ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
 
-        # 移除顶部和右侧边框（更简洁）
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['left'].set_linewidth(1.0)
-        ax.spines['bottom'].set_linewidth(1.0)
+        # 显示所有边框，使用浅蓝色
+        light_blue = '#ADD8E6'
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color(light_blue)
+            spine.set_linewidth(1.0)
 
-        # 设置刻度样式
-        ax.tick_params(direction='in', length=4, width=0.8)
+        # 设置刻度样式（加粗并放大1.2倍）
+        tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+        ax.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+        # 设置刻度标签加粗
+        for label in ax.get_xticklabels():
+            label.set_fontweight('bold')
+        for label in ax.get_yticklabels():
+            label.set_fontweight('bold')
 
         # 保存图表（更高DPI，适合论文）
         if question_id is not None:
@@ -571,24 +580,33 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             steps = np.arange(1, num_diffusion_steps + 1)  # 从1开始编号
 
             # 绘制折线图 - 使用更专业的配色
-            ax_layer.plot(steps, layer_ratios, color='#1f77b4', linewidth=2.0, alpha=0.9, marker='o', markersize=4, markevery=max(1, num_diffusion_steps//20))
+            # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
+            ax_layer.plot(steps, layer_ratios, color='#1f77b4', linewidth=2.4, alpha=0.9, marker='o', markersize=4, markevery=max(1, num_diffusion_steps//20))
 
-            # 设置标签（更简洁）
-            ax_layer.set_xlabel('Diffusion Step', fontsize=12)
-            ax_layer.set_ylabel('Attention Ratio', fontsize=12)
+            # 设置标签（更简洁，加粗并放大1.2倍）
+            label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+            ax_layer.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
+            ax_layer.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
 
             # 网格样式（更subtle）
             ax_layer.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax_layer.set_xlim(0.5, num_diffusion_steps + 0.5)
 
-            # 移除顶部和右侧边框（更简洁）
-            ax_layer.spines['top'].set_visible(False)
-            ax_layer.spines['right'].set_visible(False)
-            ax_layer.spines['left'].set_linewidth(1.0)
-            ax_layer.spines['bottom'].set_linewidth(1.0)
+            # 显示所有边框，使用浅蓝色
+            light_blue = '#ADD8E6'
+            for spine in ax_layer.spines.values():
+                spine.set_visible(True)
+                spine.set_color(light_blue)
+                spine.set_linewidth(1.0)
 
-            # 设置刻度样式
-            ax_layer.tick_params(direction='in', length=4, width=0.8)
+            # 设置刻度样式（加粗并放大1.2倍）
+            tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+            ax_layer.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+            # 设置刻度标签加粗
+            for label in ax_layer.get_xticklabels():
+                label.set_fontweight('bold')
+            for label in ax_layer.get_yticklabels():
+                label.set_fontweight('bold')
 
             plt.tight_layout()
 

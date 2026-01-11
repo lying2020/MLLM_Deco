@@ -1407,12 +1407,12 @@ def visualize_full_attention_matrix(layer_attn_np, layer_idx, step_idx, token_te
     if image_token_start is not None and num_image_tokens is not None:
         ax.legend(loc='upper right', fontsize=10)
 
-    # 添加统计信息文本
-    stats_text = f'Min: {full_attn_matrix.min():.4f}, Max: {full_attn_matrix.max():.4f}, Mean: {full_attn_matrix.mean():.4f}'
-    if is_causal:
-        stats_text += f'\nUpper Triangle Mean: {upper_mean:.6f} (masked)'
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
-            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # # 添加统计信息文本
+    # stats_text = f'Min: {full_attn_matrix.min():.4f}, Max: {full_attn_matrix.max():.4f}, Mean: {full_attn_matrix.mean():.4f}'
+    # if is_causal:
+    #     stats_text += f'\nUpper Triangle Mean: {upper_mean:.6f} (masked)'
+    # ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
+    #         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
 
@@ -2423,11 +2423,11 @@ def _visualize_word_layer_attention_ratio(word, word_info, all_attentions, image
             ax.text(x, ratio, f'{ratio:.3f}', ha='center', va='bottom', fontsize=8, rotation=90)
 
     # 添加统计信息
-    stats_text = f'Mean: {np.mean(avg_layer_ratios):.4f}, Max: {np.max(avg_layer_ratios):.4f}, Min: {np.min(avg_layer_ratios):.4f}'
-    if len(layer_ratios_array) > 1:
-        stats_text += f'\n(Averaged over {len(layer_ratios_array)} steps)'
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
-            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # stats_text = f'Mean: {np.mean(avg_layer_ratios):.4f}, Max: {np.max(avg_layer_ratios):.4f}, Min: {np.min(avg_layer_ratios):.4f}'
+    # if len(layer_ratios_array) > 1:
+    #     stats_text += f'\n(Averaged over {len(layer_ratios_array)} steps)'
+    # ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+    #         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
 
@@ -3463,7 +3463,7 @@ def _extract_step_attention_statistics(all_attentions, image_token_start, num_im
 
 def _visualize_step_attention_statistics(all_attentions, image_token_start, num_image_tokens,
                                         num_total_layers, output_dir, tokenizer=None, output_ids=None,
-                                        object_tokens_info=None, selected_layers=None):
+                                        object_tokens_info=None, selected_layers=None, hallucinated_words=None):
     """
     可视化推理步attention统计信息
 
@@ -3482,6 +3482,7 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
         output_ids: 输出序列的token IDs（可选，用于解码token词汇）
         object_tokens_info: 物体token信息字典（可选，用于标注物体token对应的推理步）
         selected_layers: 目标层列表（可选，用于生成每层折线图）
+        hallucinated_words: 幻视词汇列表，格式为 [(word, node_word), ...]（可选，用于过滤非幻视词汇）
     """
     print(f"\n  [生成推理步Attention统计] 提取并可视化attention统计信息...")
 
@@ -3507,15 +3508,53 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     step_att_visual = stats['step_att_visual']  # [n, 32]
     step_att_all = stats['step_att_all']  # [n, 32]
 
-    # 图1：单独绘制比率图
-    fig1, ax1 = plt.subplots(figsize=(12, 6))
+    # 图1：单独绘制比率图 - 学术论文风格
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'DejaVu Serif'],
+        'font.size': 12,
+        'axes.labelsize': 12,
+        'axes.titlesize': 0,  # 移除标题
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 10,
+        'figure.titlesize': 0,
+        'axes.linewidth': 1.0,
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 2.0,
+        'lines.markersize': 5,
+    })
+
+    fig1, ax1 = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸，适合论文
     steps = np.arange(1, n_steps + 1)  # 从1开始编号
-    ax1.plot(steps, step_ratio, 'o-', linewidth=2, markersize=6, color='#2E86AB')
-    ax1.set_xlabel('Generation Step', fontsize=14, fontweight='bold')
-    ax1.set_ylabel('Visual Attention Ratio\n(Σ att_visual / Σ att_all)', fontsize=14, fontweight='bold')
-    ax1.set_title('Visual Attention Ratio per Generation Step', fontsize=16, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
+
+    # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
+    ax1.plot(steps, step_ratio, 'o-', linewidth=2.4, markersize=6, color='#1f77b4', alpha=0.9)
+
+    # 设置标签（加粗并放大1.2倍）
+    label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+    ax1.set_xlabel('Generation Step', fontsize=label_fontsize, fontweight='bold')
+    ax1.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
+
+    # 网格样式（更subtle）
+    ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
     ax1.set_xlim(0.5, n_steps + 0.5)
+
+    # 显示所有边框，使用浅蓝色
+    light_blue = '#ADD8E6'
+    for spine in ax1.spines.values():
+        spine.set_visible(True)
+        spine.set_color(light_blue)
+        spine.set_linewidth(1.0)
+
+    # 设置刻度样式（加粗并放大1.2倍）
+    tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+    ax1.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+    # 设置刻度标签加粗
+    for label in ax1.get_xticklabels():
+        label.set_fontweight('bold')
+    for label in ax1.get_yticklabels():
+        label.set_fontweight('bold')
 
     # 找到比率最高的推理步并标注对应的token词汇
     max_ratio_idx = np.argmax(step_ratio)
@@ -3541,23 +3580,23 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
             print(f"  ⚠️  解码token词汇失败: {e}")
             token_text = None
 
-    # 在最高点处添加标注
-    if token_text:
-        # 添加文本标注，显示token词汇和比率值
-        ax1.annotate(f'{token_text}\n(Ratio: {max_ratio_value:.4f})',
-                    xy=(max_ratio_step, max_ratio_value),
-                    xytext=(10, 10), textcoords='offset points',
-                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
-                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
-                    fontsize=11, fontweight='bold')
-    else:
-        # 如果没有token词汇，只标注比率值
-        ax1.annotate(f'Ratio: {max_ratio_value:.4f}',
-                    xy=(max_ratio_step, max_ratio_value),
-                    xytext=(10, 10), textcoords='offset points',
-                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
-                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
-                    fontsize=11, fontweight='bold')
+    # # 在最高点处添加标注
+    # if token_text:
+    #     # 添加文本标注，显示token词汇和比率值
+    #     ax1.annotate(f'{token_text}\n(Ratio: {max_ratio_value:.4f})',
+    #                 xy=(max_ratio_step, max_ratio_value),
+    #                 xytext=(10, 10), textcoords='offset points',
+    #                 bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+    #                 arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
+    #                 fontsize=11, fontweight='bold')
+    # else:
+    #     # 如果没有token词汇，只标注比率值
+    #     ax1.annotate(f'Ratio: {max_ratio_value:.4f}',
+    #                 xy=(max_ratio_step, max_ratio_value),
+    #                 xytext=(10, 10), textcoords='offset points',
+    #                 bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
+    #                 arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'),
+    #                 fontsize=11, fontweight='bold')
 
     # 标注所有物理词汇对应的推理步
     if object_tokens_info:
@@ -3645,9 +3684,10 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
             # 添加图例
             ax1.legend(loc='best', fontsize=10)
 
-    # 保存图1
+    # 保存图1（更高DPI，适合论文）
     fig1_file = os.path.join(output_dir, "step_attention_ratio.png")
-    plt.savefig(fig1_file, dpi=200, bbox_inches='tight')
+    plt.tight_layout()
+    plt.savefig(fig1_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
     print(f"  ✓ 图1 (Attention Ratio) 已保存: {os.path.basename(fig1_file)}")
     if token_text:
@@ -3711,15 +3751,34 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
             if step_att_all[step_idx, layer_idx] > 0:
                 step_att_ratio_per_layer[step_idx, layer_idx] = step_att_visual[step_idx, layer_idx] / step_att_all[step_idx, layer_idx]
 
-    # 图4：每个推理步每层的比率（att_visual / att_all）（n*32个点）- 柱状图（单独保存）
-    fig4, ax4 = plt.subplots(figsize=(16, 6))
+    # 图4：每个推理步每层的比率（att_visual / att_all）（n*32个点）- 柱状图（单独保存）- 学术论文风格
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'DejaVu Serif'],
+        'font.size': 12,
+        'axes.labelsize': 12,
+        'axes.titlesize': 0,  # 移除标题
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 10,
+        'figure.titlesize': 0,
+        'axes.linewidth': 1.0,
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 2.0,
+        'lines.markersize': 5,
+    })
+
+    fig4, ax4 = plt.subplots(figsize=(12, 4.0))  # 更紧凑的尺寸
     # 将数据展平为一维数组：按行展平，即每个推理步的32层数据连续排列
     ratio_flat = step_att_ratio_per_layer.flatten()  # [n*32]
     x_positions = np.arange(len(ratio_flat))  # x轴位置从0开始
-    ax4.bar(x_positions, ratio_flat, width=0.8, color='#2E86AB', alpha=0.7)
-    ax4.set_xlabel('Step × Layer Index', fontsize=14, fontweight='bold')
-    ax4.set_ylabel('Ratio (att_visual / att_all)', fontsize=14, fontweight='bold')
-    ax4.set_title('Visual Attention Ratio per Step and Layer\n(att_visual / att_all)', fontsize=16, fontweight='bold')
+    ax4.bar(x_positions, ratio_flat, width=0.8, color='#1f77b4', alpha=0.7)
+
+    # 设置标签（加粗并放大1.2倍）
+    label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+    ax4.set_xlabel('Step × Layer Index', fontsize=label_fontsize, fontweight='bold')
+    ax4.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
+
     # 设置x轴刻度：根据数据量动态调整，最多显示15个刻度
     max_x = len(ratio_flat) - 1
     max_ticks = 15  # 最多显示15个刻度
@@ -3733,14 +3792,32 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
         tick_interval = ((tick_interval // 32) + 1) * 32
         tick_positions = np.arange(0, max_x + 1, tick_interval)
     ax4.set_xticks(tick_positions)
-    ax4.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=10)
-    ax4.grid(True, alpha=0.3, axis='y')
+
+    # 刻度标签加粗并放大1.2倍
+    tick_fontsize = int(10 * 1.2)  # 12
+    ax4.set_xticklabels([str(int(x)) for x in tick_positions], fontsize=tick_fontsize, fontweight='bold')
+
+    # 网格样式（更subtle）
+    ax4.grid(True, alpha=0.3, axis='y', linestyle='--', linewidth=0.5)
+
+    # 显示所有边框，使用浅蓝色
+    light_blue = '#ADD8E6'
+    for spine in ax4.spines.values():
+        spine.set_visible(True)
+        spine.set_color(light_blue)
+        spine.set_linewidth(1.0)
+
+    # 设置刻度样式（加粗并放大1.2倍）
+    ax4.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+    # Y轴刻度标签加粗
+    for label in ax4.get_yticklabels():
+        label.set_fontweight('bold')
 
     plt.tight_layout()
 
-    # 保存图4
+    # 保存图4（更高DPI，适合论文）
     fig4_file = os.path.join(output_dir, "step_attention_ratio_per_layer.png")
-    plt.savefig(fig4_file, dpi=200, bbox_inches='tight')
+    plt.savefig(fig4_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
     print(f"  ✓ 图4 (Attention Ratio per Step and Layer) 已保存: {os.path.basename(fig4_file)}")
 
@@ -3759,39 +3836,127 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
         # 计算剩余所有层的ratio之和
         step_ratio_sum_excluding_minmax[step_idx] = np.sum(remaining_ratios)
 
-    # 生成剔除最大最小值后的ratio和折线图
-    fig_excluding, ax_excluding = plt.subplots(figsize=(12, 6))
+    # 生成剔除最大最小值后的ratio和折线图 - 学术论文风格
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'DejaVu Serif'],
+        'font.size': 12,
+        'axes.labelsize': 12,
+        'axes.titlesize': 0,  # 移除标题
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 10,
+        'figure.titlesize': 0,
+        'axes.linewidth': 1.0,
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 2.0,
+        'lines.markersize': 5,
+    })
+
+    fig_excluding, ax_excluding = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸
     steps = np.arange(1, n_steps + 1)  # 从1开始编号
 
-    # 绘制折线图
-    ax_excluding.plot(steps, step_ratio_sum_excluding_minmax, 'o-', linewidth=2, markersize=6,
-                     color='#8B4513', alpha=0.8)
-    ax_excluding.set_xlabel('Generation Step', fontsize=14, fontweight='bold')
-    ax_excluding.set_ylabel('Sum of Ratios (Excluding Min/Max Layers)', fontsize=14, fontweight='bold')
-    ax_excluding.set_title('Sum of Visual Attention Ratios per Step\n(Excluding Min and Max Layer Ratios)',
-                          fontsize=16, fontweight='bold')
-    ax_excluding.grid(True, alpha=0.3)
+    # 绘制折线图（折线加粗到1.2倍：2.0 * 1.2 = 2.4）
+    ax_excluding.plot(steps, step_ratio_sum_excluding_minmax, 'o-', linewidth=2.4, markersize=6,
+                     color='#1f77b4', alpha=0.9)
+
+    # 设置标签（加粗并放大1.2倍）
+    label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+    ax_excluding.set_xlabel('Generation Step', fontsize=label_fontsize, fontweight='bold')
+    ax_excluding.set_ylabel('Sum of Ratios', fontsize=label_fontsize, fontweight='bold')
+
+    # 网格样式（更subtle）
+    ax_excluding.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
     ax_excluding.set_xlim(0.5, n_steps + 0.5)
+
+    # 显示所有边框，使用浅蓝色
+    light_blue = '#ADD8E6'
+    for spine in ax_excluding.spines.values():
+        spine.set_visible(True)
+        spine.set_color(light_blue)
+        spine.set_linewidth(1.0)
+
+    # 设置刻度样式（加粗并放大1.2倍）
+    tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+    ax_excluding.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+    # 设置刻度标签加粗
+    for label in ax_excluding.get_xticklabels():
+        label.set_fontweight('bold')
+    for label in ax_excluding.get_yticklabels():
+        label.set_fontweight('bold')
 
     # 添加统计信息
     mean_sum = np.mean(step_ratio_sum_excluding_minmax)
     max_sum = np.max(step_ratio_sum_excluding_minmax)
     min_sum = np.min(step_ratio_sum_excluding_minmax)
-    stats_text = f'Mean: {mean_sum:.4f}, Max: {max_sum:.4f}, Min: {min_sum:.4f}'
-    ax_excluding.text(0.02, 0.98, stats_text, transform=ax_excluding.transAxes, fontsize=10,
-                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # stats_text = f'Mean: {mean_sum:.4f}, Max: {max_sum:.4f}, Min: {min_sum:.4f}'
+    # ax_excluding.text(0.02, 0.98, stats_text, transform=ax_excluding.transAxes, fontsize=10,
+    #                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
 
-    # 保存该图
+    # 保存该图（更高DPI，适合论文）
     excluding_fig_file = os.path.join(output_dir, "step_attention_ratio_sum_excluding_minmax.png")
-    plt.savefig(excluding_fig_file, dpi=200, bbox_inches='tight')
+    plt.savefig(excluding_fig_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
     print(f"  ✓ 剔除最大最小值后的Ratio和折线图已保存: {os.path.basename(excluding_fig_file)}")
 
     # 为每个目标层生成折线图（显示该层在不同推理step的比值变化）
     if selected_layers is not None and len(selected_layers) > 0:
         print(f"\n  [生成每层折线图] 为 {len(selected_layers)} 个目标层生成折线图...")
+
+        # 收集物体token信息（用于标注，只标注非幻视词汇）
+        object_token_steps = set()
+        object_token_words = {}  # {step: [word1, word2, ...]}
+        if object_tokens_info:
+            # 构建幻视词汇的node_word集合（用于过滤）
+            hallucinated_node_words = set()
+            if hallucinated_words:
+                for word, node_word in hallucinated_words:
+                    hallucinated_node_words.add(node_word)
+
+            # 调试信息：打印收集到的物体词汇信息
+            print(f"  [调试] 收集物体词汇信息用于标注:")
+            print(f"    - object_tokens_info 中有 {len(object_tokens_info)} 个物体词汇")
+            print(f"    - 幻视词汇数量: {len(hallucinated_node_words)}")
+            if hallucinated_node_words:
+                print(f"    - 幻视词汇: {list(hallucinated_node_words)[:5]}...")  # 只显示前5个
+
+            # 收集所有物体token的位置（只收集非幻视词汇）
+            non_hallucinated_count = 0
+            for object_word, obj_info in object_tokens_info.items():
+                node_word = obj_info.get('node_word', '')
+                # 只处理非幻视词汇（如果hallucinated_words为None，则标注所有词汇）
+                is_hallucinated = node_word and node_word in hallucinated_node_words
+                if not is_hallucinated:
+                    non_hallucinated_count += 1
+                    token_positions = obj_info.get('token_positions', [])
+                    token_groups = obj_info.get('token_groups', [])
+
+                    # 从token_groups或token_positions中提取推理步
+                    if token_groups:
+                        for group_start, group_end in token_groups:
+                            for step_idx in range(group_start, group_end + 1):
+                                if 0 <= step_idx < n_steps:
+                                    object_token_steps.add(step_idx)
+                                    if step_idx not in object_token_words:
+                                        object_token_words[step_idx] = []
+                                    object_token_words[step_idx].append(object_word)
+                    elif token_positions:
+                        for step_idx in token_positions:
+                            if 0 <= step_idx < n_steps:
+                                object_token_steps.add(step_idx)
+                                if step_idx not in object_token_words:
+                                    object_token_words[step_idx] = []
+                                object_token_words[step_idx].append(object_word)
+
+            print(f"    - 非幻视词汇数量: {non_hallucinated_count}")
+            print(f"    - 收集到的物体token步数: {len(object_token_steps)}")
+            if object_token_steps:
+                print(f"    - 物体token步数示例: {sorted(list(object_token_steps))[:10]}")  # 只显示前10个
+        else:
+            print(f"  [调试] object_tokens_info 为空，无法标注物体词汇")
+
         for layer_idx in selected_layers:
             if layer_idx >= num_total_layers:
                 continue
@@ -3799,32 +3964,116 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
             # 提取该层在所有推理步的比值
             layer_ratios = step_att_ratio_per_layer[:, layer_idx]  # [n]
 
-            # 创建折线图
-            fig_layer, ax_layer = plt.subplots(figsize=(12, 6))
+            # 创建折线图 - 学术论文风格
+            plt.rcParams.update({
+                'font.family': 'serif',
+                'font.serif': ['Times New Roman', 'DejaVu Serif'],
+                'font.size': 12,
+                'axes.labelsize': 12,
+                'axes.titlesize': 0,  # 移除标题
+                'xtick.labelsize': 11,
+                'ytick.labelsize': 11,
+                'legend.fontsize': 10,
+                'figure.titlesize': 0,
+                'axes.linewidth': 1.0,
+                'grid.linewidth': 0.5,
+                'lines.linewidth': 2.0,
+                'lines.markersize': 5,
+            })
+
+            fig_layer, ax_layer = plt.subplots(figsize=(9.0, 5.0))  # 更紧凑的尺寸
             steps = np.arange(1, n_steps + 1)  # 从1开始编号
 
-            # 绘制折线图
-            ax_layer.plot(steps, layer_ratios, 'o-', linewidth=2, markersize=6, color='#2E86AB', alpha=0.8)
-            ax_layer.set_xlabel('Generation Step', fontsize=14, fontweight='bold')
-            ax_layer.set_ylabel('Ratio (att_visual / att_all)', fontsize=14, fontweight='bold')
-            ax_layer.set_title(f'Visual Attention Ratio per Step - Layer {layer_idx}\n(att_visual / att_all)',
-                             fontsize=16, fontweight='bold')
-            ax_layer.grid(True, alpha=0.3)
+            # 绘制折线图（折线加粗到1.2倍：2.0 * 1.2 = 2.4）
+            ax_layer.plot(steps, layer_ratios, 'o-', linewidth=2.4, markersize=6, color='#1f77b4', alpha=0.9)
+
+            # 设置标签（加粗并放大1.2倍）
+            label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+            ax_layer.set_xlabel('Generation Step', fontsize=label_fontsize, fontweight='bold')
+            ax_layer.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
+
+            # 网格样式（更subtle）
+            ax_layer.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax_layer.set_xlim(0.5, n_steps + 0.5)
 
-            # 添加统计信息
-            mean_ratio = np.mean(layer_ratios)
-            max_ratio = np.max(layer_ratios)
-            min_ratio = np.min(layer_ratios)
-            stats_text = f'Mean: {mean_ratio:.4f}, Max: {max_ratio:.4f}, Min: {min_ratio:.4f}'
-            ax_layer.text(0.02, 0.98, stats_text, transform=ax_layer.transAxes, fontsize=10,
-                         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            # 显示所有边框，使用浅蓝色
+            light_blue = '#ADD8E6'
+            for spine in ax_layer.spines.values():
+                spine.set_visible(True)
+                spine.set_color(light_blue)
+                spine.set_linewidth(1.0)
+
+            # 设置刻度样式（加粗并放大1.2倍）
+            tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+            ax_layer.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+            # 设置刻度标签加粗
+            for label in ax_layer.get_xticklabels():
+                label.set_fontweight('bold')
+            for label in ax_layer.get_yticklabels():
+                label.set_fontweight('bold')
+
+            # 标注所有非幻视物理词汇对应的推理步（类似 step_attention_ratio.png 中的标注）
+            if object_token_steps:
+                object_steps_list = sorted(list(object_token_steps))
+                object_steps_plot = [s + 1 for s in object_steps_list]  # 转换为从1开始的步数
+                object_ratios_plot = [layer_ratios[s] for s in object_steps_list]
+
+                # 用绿色标注物体token的点
+                ax_layer.plot(object_steps_plot, object_ratios_plot, 'go', markersize=10, alpha=0.8,
+                            label='Object Tokens', zorder=5)
+
+                # 为每个物体token点添加词汇标注
+                for i, step_idx in enumerate(object_steps_list):
+                    step_num = step_idx + 1
+                    ratio_val = layer_ratios[step_idx]
+                    words = object_token_words.get(step_idx, [])
+
+                    # 去重并排序，确保一致性
+                    unique_words = sorted(list(set(words)))
+
+                    # 构建标注文本
+                    if len(unique_words) == 1:
+                        word_text = unique_words[0]
+                    elif len(unique_words) <= 3:
+                        word_text = ', '.join(unique_words)
+                    else:
+                        # 如果词汇太多，只显示前3个
+                        word_text = ', '.join(unique_words[:3]) + f' (+{len(unique_words)-3})'
+
+                    # 限制文本长度，避免过长
+                    if len(word_text) > 30:
+                        word_text = word_text[:27] + '...'
+
+                    # 计算偏移角度，避免标注重叠
+                    angle_idx = i % 8  # 8个方向
+                    angles = [45, 90, 135, 180, 225, 270, 315, 0]  # 8个角度（度）
+                    angle = angles[angle_idx]
+
+                    # 根据角度计算偏移距离
+                    offset_distance = 20 + (i % 3) * 5  # 基础偏移20，根据索引增加
+                    angle_rad = np.radians(angle)
+                    offset_x = offset_distance * np.cos(angle_rad)
+                    offset_y = offset_distance * np.sin(angle_rad)
+
+                    # 添加标注，使用箭头指向点
+                    ax_layer.annotate(word_text,
+                                    xy=(step_num, ratio_val),
+                                    xytext=(offset_x, offset_y), textcoords='offset points',
+                                    fontsize=9, alpha=0.9, fontweight='bold',
+                                    bbox=dict(boxstyle='round,pad=0.4', facecolor='lightgreen',
+                                            alpha=0.8, edgecolor='green', linewidth=1.5),
+                                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.2',
+                                                  color='green', alpha=0.6, lw=1.5),
+                                    ha='center', va='center')
+
+                # 添加图例
+                ax_layer.legend(loc='best', fontsize=10)
 
             plt.tight_layout()
 
-            # 保存该层的折线图
+            # 保存该层的折线图（更高DPI，适合论文）
             layer_fig_file = os.path.join(output_dir, f"step_attention_ratio_layer_{layer_idx}.png")
-            plt.savefig(layer_fig_file, dpi=200, bbox_inches='tight')
+            plt.savefig(layer_fig_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
             print(f"    ✓ Layer {layer_idx} 折线图已保存: {os.path.basename(layer_fig_file)}")
@@ -3857,7 +4106,7 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
 
 def extract_object_attention_maps(model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                                   output_ids, input_token_len, all_attentions, object_tokens_info,
-                                  image_tensor, output_dir, target_layers=None, all_hidden_states=None, outputs_text=None):
+                                  image_tensor, output_dir, target_layers=None, all_hidden_states=None, outputs_text=None, hallucinated_words=None):
     """
     提取名词/物体token的attention map
 
@@ -3967,7 +4216,7 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     _visualize_step_attention_statistics(
         all_attentions, image_token_start, num_image_tokens, num_total_layers, output_dir,
         tokenizer=tokenizer, output_ids=output_ids, object_tokens_info=object_tokens_info,
-        selected_layers=selected_layers
+        selected_layers=selected_layers, hallucinated_words=hallucinated_words
     )
 
 
@@ -4626,11 +4875,14 @@ def eval_model(args):
 
                 # 提取物体attention map
                 target_layers = getattr(args, 'target_layers', 'even')
+                # 获取幻视词汇列表（从chair_info中提取）
+                hallucinated_words = chair_info.get('mscoco_hallucinated_words', []) if chair_info else []
                 extract_object_attention_maps(
                     model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                     output_ids, input_token_len, all_attentions, object_tokens_info,
                     image_tensor, image_output_dir, target_layers=target_layers,
-                    all_hidden_states=all_hidden_states, outputs_text=outputs
+                    all_hidden_states=all_hidden_states, outputs_text=outputs,
+                    hallucinated_words=hallucinated_words
                 )
 
                 if verbose:
@@ -4843,7 +5095,7 @@ def main():
         "single_image_id": None,  # 13348,  # 6153,  # 6153
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
-        "target_layers": [0, 3, 5, 7, 9, 11, 13, 15, 17, 21, 23, 25, 29, 31]  # 默认只处理偶数层（减少输出）
+        "target_layers": [0, 3, 31]  # 默认只处理偶数层（减少输出）
     }
 
     # 解析参数(所有参数都有默认值)
