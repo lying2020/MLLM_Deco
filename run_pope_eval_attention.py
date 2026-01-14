@@ -37,6 +37,7 @@ from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, Keyw
 
 from project import llava_v15_7b_path
 from eval_tool.eval_pope import evaluate_pope
+from tests.heatmap_concentration_analyzer import HeatmapConcentrationAnalyzer
 
 from PIL import Image
 import re
@@ -45,7 +46,49 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 使用非交互式后端
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 from torchvision import transforms
+
+
+def set_yticks_with_fixed_labels(ax, label_values=[0.2, 0.3, 0.4, 0.5]):
+    """
+    设置y轴刻度，将固定的标签值映射到实际的y轴范围内
+
+    Args:
+        ax: matplotlib axes对象
+        label_values: 要显示的标签值列表（默认[0.2, 0.3, 0.4, 0.5]）
+    """
+    # 获取实际的y轴范围（需要先绘制数据才能获取）
+    ymin, ymax = ax.get_ylim()
+
+    # 在y轴范围内均匀选择位置（对应label_values的数量）
+    num_labels = len(label_values)
+    if num_labels > 1:
+        # 在范围内均匀分布位置
+        tick_positions = np.linspace(ymin, ymax, num_labels)
+    else:
+        tick_positions = np.array([(ymin + ymax) / 2])
+
+    # 设置刻度位置
+    ax.set_yticks(tick_positions)
+
+    # 创建格式化函数，将实际位置映射到标签值
+    # 使用闭包保存tick_positions和label_values的对应关系
+    tick_positions_array = np.array(tick_positions)
+    label_values_array = np.array(label_values)
+
+    def format_func(value, pos):
+        # 找到最接近的刻度位置
+        if len(tick_positions_array) > 0:
+            idx = np.argmin(np.abs(tick_positions_array - value))
+            # 如果距离足够近（在容差范围内），返回对应的标签值
+            if abs(tick_positions_array[idx] - value) < 1e-6 and idx < len(label_values_array):
+                return f'{label_values_array[idx]:.1f}'
+        # 如果不在刻度位置上，返回空字符串（不显示）
+        return ''
+
+    # 应用格式化器
+    ax.yaxis.set_major_formatter(FuncFormatter(format_func))
 
 
 def recorder(out):
@@ -261,7 +304,7 @@ def add_gaussian_noise_ddpm(image_tensor, timestep, num_timesteps=1000, device='
     return noisy_image
 
 
-def extract_attention_from_output(output_dict, image_token_start=35, num_image_tokens=576, num_total_layers=32, num_heads=32):
+def extract_attention_from_output(output_dict, image_token_start=35, num_image_tokens=576, num_total_layers=32, num_heads=32, return_visual_attentions=False, return_head_ratios=False):
     """
     从模型输出中提取attention信息，计算att_visual/att_all
 
@@ -271,29 +314,51 @@ def extract_attention_from_output(output_dict, image_token_start=35, num_image_t
         num_image_tokens: 图像token数量（默认576）
         num_total_layers: 总层数（默认32）
         num_heads: 每层的head数（默认32）
+        return_visual_attentions: 是否返回每层的576个视觉attention值（用于生成heatmap）
+        return_head_ratios: 是否返回每个head的聚集度值 [32, 32]（用于生成32*32 heatmap）
+            - 如果启用，将使用576个attention值reshape成24*24后计算聚集度，而不是简单的att_visual/att_all比值
 
     Returns:
-        tuple: (total_ratio, layer_ratios)
+        tuple: (total_ratio, layer_ratios, layer_visual_attentions, head_ratios)
             - total_ratio: 所有层的 att_visual / att_all 的比值（如果提取失败返回None）
             - layer_ratios: 每层的 att_visual / att_all 的比值列表 [32]，如果提取失败返回None
+            - layer_visual_attentions: 每层的576个视觉attention值列表 [32, 576]，如果return_visual_attentions=False或提取失败返回None
+            - head_ratios: 每个head的聚集度值 [32, 32]（如果return_head_ratios=True），如果提取失败返回None
     """
+    # 创建聚集度分析器（用于计算每个head的聚集度）
+    concentration_analyzer = HeatmapConcentrationAnalyzer(top_percentile=5)
+
+    # 处理返回值
+    if return_head_ratios:
+        default_return = (None, None, None, None) if return_visual_attentions else (None, None, None)
+    elif return_visual_attentions:
+        default_return = (None, None, None)
+    else:
+        default_return = (None, None)
+
     if not hasattr(output_dict, 'attentions') or output_dict.attentions is None:
-        return None, None
+        return default_return
 
     # 获取最后一个生成步骤的attention（因为只生成一个token）
     if len(output_dict.attentions) == 0:
-        return None, None
+        return default_return
 
     # 最后一个步骤的attention（所有层的attention）
     last_step_attentions = output_dict.attentions[-1]
 
     if last_step_attentions is None or len(last_step_attentions) == 0:
-        return None, None
+        return default_return
 
     # 收集所有层的att_visual和att_all
     total_att_visual = 0.0
     total_att_all = 0.0
     layer_ratios = np.zeros(num_total_layers)  # [32]
+    layer_visual_attentions = None
+    if return_visual_attentions:
+        layer_visual_attentions = np.zeros((num_total_layers, num_image_tokens))  # [32, 576]
+    head_ratios = None
+    if return_head_ratios:
+        head_ratios = np.zeros((num_total_layers, num_heads))  # [32, 32]
 
     for layer_idx in range(min(num_total_layers, len(last_step_attentions))):
         layer_attn = last_step_attentions[layer_idx]
@@ -309,22 +374,30 @@ def extract_attention_from_output(output_dict, image_token_start=35, num_image_t
 
         layer_attn_np = layer_attn.cpu().numpy()
 
-        # 提取最后一行的attention（对所有head求和）
+        # 提取最后一行的attention
         # 处理不同形状的attention tensor
         if len(layer_attn_np.shape) == 4:
             # [batch, num_heads, seq_len, seq_len]
             batch_size, num_heads_actual, seq_len, _ = layer_attn_np.shape
             if seq_len == 1:
-                last_row_attention = np.sum(layer_attn_np[0, :, 0, :], axis=0)  # [seq_len]
+                # 提取每个head的最后一行的attention [num_heads, seq_len]
+                last_row_attention_per_head = layer_attn_np[0, :, 0, :]  # [num_heads, seq_len]
+                last_row_attention = np.sum(last_row_attention_per_head, axis=0)  # [seq_len]
             else:
-                last_row_attention = np.sum(layer_attn_np[0, :, -1, :], axis=0)  # [seq_len]
+                # 提取每个head的最后一行的attention [num_heads, seq_len]
+                last_row_attention_per_head = layer_attn_np[0, :, -1, :]  # [num_heads, seq_len]
+                last_row_attention = np.sum(last_row_attention_per_head, axis=0)  # [seq_len]
         elif len(layer_attn_np.shape) == 3:
             # [num_heads, seq_len, seq_len]
             num_heads_actual, seq_len, _ = layer_attn_np.shape
             if seq_len == 1:
-                last_row_attention = np.sum(layer_attn_np[:, 0, :], axis=0)  # [seq_len]
+                # 提取每个head的最后一行的attention [num_heads, seq_len]
+                last_row_attention_per_head = layer_attn_np[:, 0, :]  # [num_heads, seq_len]
+                last_row_attention = np.sum(last_row_attention_per_head, axis=0)  # [seq_len]
             else:
-                last_row_attention = np.sum(layer_attn_np[:, -1, :], axis=0)  # [seq_len]
+                # 提取每个head的最后一行的attention [num_heads, seq_len]
+                last_row_attention_per_head = layer_attn_np[:, -1, :]  # [num_heads, seq_len]
+                last_row_attention = np.sum(last_row_attention_per_head, axis=0)  # [seq_len]
         else:
             continue
 
@@ -339,8 +412,55 @@ def extract_attention_from_output(output_dict, image_token_start=35, num_image_t
         if len(valid_image_positions) > 0:
             image_attention = last_row_attention[valid_image_positions]
             att_visual = np.sum(image_attention)
+
+            # 如果要求返回每个head的聚集度值，计算每个head的576个attention值的聚集度
+            if return_head_ratios:
+                # 对每个head计算聚集度（将576个值reshape成24*24后计算）
+                for head_idx in range(min(num_heads, last_row_attention_per_head.shape[0])):
+                    head_attention = last_row_attention_per_head[head_idx, :]  # [seq_len]
+
+                    if len(valid_image_positions) > 0:
+                        head_image_attention = head_attention[valid_image_positions]  # [576]
+
+                        # 确保有576个值（如果不足，用0填充；如果超过，只取前576个）
+                        if len(head_image_attention) < num_image_tokens:
+                            padded_attention = np.zeros(num_image_tokens)
+                            padded_attention[:len(head_image_attention)] = head_image_attention
+                            head_image_attention = padded_attention
+                        elif len(head_image_attention) > num_image_tokens:
+                            head_image_attention = head_image_attention[:num_image_tokens]
+
+                        # 将576个值reshape成24*24的heatmap
+                        heatmap_24x24 = head_image_attention.reshape(24, 24)
+
+                        # 计算聚集度
+                        concentration_result = concentration_analyzer.calculate_concentration_index(
+                            heatmap_24x24,
+                            visualize=False,
+                            top_k=6
+                        )
+                        head_concentration = concentration_result.get('concentration_index', 0.0)
+                        head_ratios[layer_idx, head_idx] = head_concentration
+                    else:
+                        head_ratios[layer_idx, head_idx] = 0.0
+
+            # 如果要求返回视觉attention值，保存576个值
+            if return_visual_attentions:
+                # 确保长度匹配（可能不足576个）
+                actual_num_tokens = len(image_attention)
+                if actual_num_tokens == num_image_tokens:
+                    layer_visual_attentions[layer_idx] = image_attention
+                elif actual_num_tokens < num_image_tokens:
+                    # 如果不足576个，用0填充
+                    layer_visual_attentions[layer_idx, :actual_num_tokens] = image_attention
+                    layer_visual_attentions[layer_idx, actual_num_tokens:] = 0.0
+                else:
+                    # 如果超过576个，只取前576个
+                    layer_visual_attentions[layer_idx] = image_attention[:num_image_tokens]
         else:
             att_visual = 0.0
+            if return_visual_attentions:
+                layer_visual_attentions[layer_idx] = np.zeros(num_image_tokens)
 
         total_att_visual += att_visual
         total_att_all += att_all
@@ -352,9 +472,25 @@ def extract_attention_from_output(output_dict, image_token_start=35, num_image_t
     # 计算总比值
     if total_att_all > 0:
         total_ratio = total_att_visual / total_att_all
-        return float(total_ratio), layer_ratios
+        if return_head_ratios:
+            if return_visual_attentions:
+                return float(total_ratio), layer_ratios, layer_visual_attentions, head_ratios
+            else:
+                return float(total_ratio), layer_ratios, head_ratios
+        elif return_visual_attentions:
+            return float(total_ratio), layer_ratios, layer_visual_attentions
+        else:
+            return float(total_ratio), layer_ratios
     else:
-        return None, None
+        if return_head_ratios:
+            if return_visual_attentions:
+                return None, None, None, None
+            else:
+                return None, None, None
+        elif return_visual_attentions:
+            return None, None, None
+        else:
+            return None, None
 
 
 def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
@@ -413,9 +549,30 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
     keywords = [stop_str]
     stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
 
+    # 计算采样点：如果 num_diffusion_steps != 1000，在 0-1000 上均匀采样
+    standard_timesteps = 1000
+    if num_diffusion_steps == 1:
+        # 如果只有1步，使用最后一步（1000）
+        sampled_steps = [standard_timesteps]
+    elif num_diffusion_steps == standard_timesteps:
+        # 如果等于1000，直接使用 0-999
+        sampled_steps = list(range(standard_timesteps))
+    else:
+        # 等间隔采样：从0到1000（包含1000）
+        # 例如：num_diffusion_steps=11，则采样 [0, 100, 200, ..., 900, 1000]
+        sampled_steps = [int(i * standard_timesteps / (num_diffusion_steps - 1))
+                         for i in range(num_diffusion_steps)]
+        # 确保最后一个值是1000
+        sampled_steps[-1] = standard_timesteps
+
+    if verbose:
+        print(f"  [采样策略] 将在 0-1000 上均匀采样 {num_diffusion_steps} 个点: {sampled_steps[:5]}...{sampled_steps[-5:]}")
+
     # 存储每一步的比值
     ratios = []  # 所有层的总和
     layer_ratios_per_step = []  # 每层每步的比值 [num_diffusion_steps, num_total_layers]
+    layer_visual_attentions_per_step = []  # 每层每步的576个视觉attention值 [num_diffusion_steps, num_total_layers, 576]
+    head_ratios_per_step = []  # 每步每个head的聚集度值 [num_diffusion_steps, num_total_layers, num_heads]
 
     # 保存原始图像（用于对比）
     if output_dir:
@@ -427,19 +584,23 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             print(f"  ✓ 原始图像已保存: {os.path.basename(original_image_path)}")
 
     # 对每一步进行扩散和推理
-    for step in tqdm(range(num_diffusion_steps), desc="扩散步骤", disable=not verbose):
-        # 对图像加噪
+    for step_idx, actual_timestep in enumerate(tqdm(sampled_steps, desc="扩散步骤", disable=not verbose)):
+        # 对图像加噪：使用实际的timestep（0-1000范围）
+        # add_gaussian_noise_ddpm 期望的 timestep 是 0 到 num_timesteps-1（即 0-999）
+        # 所以需要将 actual_timestep（0-1000）映射到 0-999
+        timestep_for_noise = min(actual_timestep, standard_timesteps - 1)
+        # 始终传入 num_timesteps=1000，因为函数内部使用标准的1000步调度
         noisy_image_tensor = add_gaussian_noise_ddpm(
-            original_image_tensor, step, num_timesteps=num_diffusion_steps, device=device, verbose=verbose
+            original_image_tensor, timestep_for_noise, num_timesteps=standard_timesteps, device=device, verbose=verbose and step_idx == 0
         )
 
         # 保存加噪后的图像（每隔一定步数保存，避免文件过多）
-        if output_dir and (step == 0 or step == num_diffusion_steps - 1 or (step + 1) % max(1, num_diffusion_steps // 10) == 0):
+        if output_dir and (step_idx == 0 or step_idx == len(sampled_steps) - 1 or (step_idx + 1) % max(1, len(sampled_steps) // 10) == 0):
             noisy_image_pil = _tensor_to_pil_image(noisy_image_tensor)
-            noisy_image_path = os.path.join(output_dir, f"noisy_image_step_{step:04d}.png")
+            noisy_image_path = os.path.join(output_dir, f"noisy_image_step_{actual_timestep:04d}.png")
             noisy_image_pil.save(noisy_image_path)
-            if verbose and step < 5:  # 只对前几步输出详细信息
-                print(f"  ✓ 加噪图像已保存 (step {step}): {os.path.basename(noisy_image_path)}")
+            if verbose and step_idx < 5:  # 只对前几步输出详细信息
+                print(f"  ✓ 加噪图像已保存 (step {actual_timestep}): {os.path.basename(noisy_image_path)}")
 
         # 准备生成参数
         generate_kwargs = {
@@ -462,10 +623,34 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             with torch.no_grad():
                 output_dict = model.generate(**generate_kwargs)
 
-        # 提取attention信息
-        total_ratio, layer_ratios = extract_attention_from_output(
-            output_dict, image_token_start, num_image_tokens, num_total_layers, num_heads
-        )
+        # 提取attention信息（如果需要生成heatmap，也提取视觉attention值和head聚集度值）
+        need_visual_attentions = target_layers is not None and len(target_layers) > 0
+        need_head_ratios = True  # 总是提取head聚集度值，用于生成32*32 heatmap（基于24*24 attention map的聚集度）
+
+        if need_visual_attentions and need_head_ratios:
+            total_ratio, layer_ratios, layer_visual_attentions, head_ratios = extract_attention_from_output(
+                output_dict, image_token_start, num_image_tokens, num_total_layers, num_heads,
+                return_visual_attentions=True, return_head_ratios=True
+            )
+        elif need_visual_attentions:
+            total_ratio, layer_ratios, layer_visual_attentions = extract_attention_from_output(
+                output_dict, image_token_start, num_image_tokens, num_total_layers, num_heads,
+                return_visual_attentions=True, return_head_ratios=False
+            )
+            head_ratios = None
+        elif need_head_ratios:
+            total_ratio, layer_ratios, head_ratios = extract_attention_from_output(
+                output_dict, image_token_start, num_image_tokens, num_total_layers, num_heads,
+                return_visual_attentions=False, return_head_ratios=True
+            )
+            layer_visual_attentions = None
+        else:
+            total_ratio, layer_ratios = extract_attention_from_output(
+                output_dict, image_token_start, num_image_tokens, num_total_layers, num_heads,
+                return_visual_attentions=False, return_head_ratios=False
+            )
+            layer_visual_attentions = None
+            head_ratios = None
 
         if total_ratio is not None:
             ratios.append(total_ratio)
@@ -476,6 +661,16 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
             layer_ratios_per_step.append(layer_ratios.copy())
         else:
             layer_ratios_per_step.append(np.zeros(num_total_layers))
+
+        if layer_visual_attentions is not None:
+            layer_visual_attentions_per_step.append(layer_visual_attentions.copy())
+        else:
+            layer_visual_attentions_per_step.append(np.zeros((num_total_layers, num_image_tokens)))
+
+        if head_ratios is not None:
+            head_ratios_per_step.append(head_ratios.copy())
+        else:
+            head_ratios_per_step.append(np.zeros((num_total_layers, num_heads)))
 
     # 绘制图表
     if output_dir and len(ratios) > 0:
@@ -500,15 +695,8 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
 
         fig, ax = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸，适合论文
 
-        # 计算每个采样点对应的标准1000步中的位置（0-1000）
-        standard_timesteps = 1000
-        if num_diffusion_steps == 1:
-            # 如果只有1步，使用最后一步（999）
-            steps = np.array([standard_timesteps - 1])
-        else:
-            # 等间隔采样：从0到999
-            steps = np.array([int(i * (standard_timesteps - 1) / (num_diffusion_steps - 1))
-                             for i in range(num_diffusion_steps)])
+        # 使用实际采样的步骤（0-1000范围）
+        steps = np.array(sampled_steps)
 
         # 使用更专业的配色（深蓝色，适合学术论文）
         # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
@@ -519,9 +707,12 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
         ax.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
         ax.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
 
-        # 设置 x 轴范围和刻度：0-1000，间隔100
+        # 设置 x 轴范围和刻度：0-1000，间隔200
         ax.set_xlim(0, 1000)
-        ax.set_xticks(np.arange(0, 1001, 100))  # 0, 100, 200, ..., 1000
+        ax.set_xticks(np.arange(0, 1001, 200))  # 0, 200, 400, 600, 800, 1000
+
+        # 设置 y 轴刻度标签：将 0.2, 0.3, 0.4, 0.5 映射到实际的y轴范围
+        set_yticks_with_fixed_labels(ax, [0.2, 0.3, 0.4, 0.5])
 
         # 网格样式（更subtle）
         ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
@@ -592,28 +783,24 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
 
             fig_layer, ax_layer = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸
 
-            # 计算每个采样点对应的标准1000步中的位置（0-1000）
-            standard_timesteps = 1000
-            if num_diffusion_steps == 1:
-                # 如果只有1步，使用最后一步（999）
-                steps = np.array([standard_timesteps - 1])
-            else:
-                # 等间隔采样：从0到999
-                steps = np.array([int(i * (standard_timesteps - 1) / (num_diffusion_steps - 1))
-                                 for i in range(num_diffusion_steps)])
+            # 使用实际采样的步骤（0-1000范围）
+            steps = np.array(sampled_steps)
 
             # 绘制折线图 - 使用更专业的配色
             # 折线加粗到1.2倍：2.0 * 1.2 = 2.4
-            ax_layer.plot(steps, layer_ratios, color='#1f77b4', linewidth=2.4, alpha=0.9, marker='o', markersize=4, markevery=max(1, num_diffusion_steps//20))
+            ax_layer.plot(steps, layer_ratios, color='#1f77b4', linewidth=2.4, alpha=0.9, marker='o', markersize=4, markevery=max(1, len(sampled_steps)//20))
 
             # 设置标签（更简洁，加粗并放大1.2倍）
             label_fontsize = int(12 * 1.2)  # 14.4 -> 14
             ax_layer.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
             ax_layer.set_ylabel('Attention Ratio', fontsize=label_fontsize, fontweight='bold')
 
-            # 设置 x 轴范围和刻度：0-1000，间隔100
+            # 设置 x 轴范围和刻度：0-1000，间隔200
             ax_layer.set_xlim(0, 1000)
-            ax_layer.set_xticks(np.arange(0, 1001, 100))  # 0, 100, 200, ..., 1000
+            ax_layer.set_xticks(np.arange(0, 1001, 200))  # 0, 200, 400, 600, 800, 1000
+
+            # 设置 y 轴刻度标签：将 0.2, 0.3, 0.4, 0.5 映射到实际的y轴范围
+            set_yticks_with_fixed_labels(ax_layer, [0.2, 0.3, 0.4, 0.5])
 
             # 网格样式（更subtle）
             ax_layer.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
@@ -646,6 +833,385 @@ def analyze_diffusion_attention(model, tokenizer, image_processor, image_file, p
 
             if verbose:
                 print(f"    ✓ Layer {layer_idx} 折线图已保存: {os.path.basename(layer_fig_file)}")
+
+    # 为每个目标层生成heatmap（显示576个视觉attention的分布）
+    # 在每个diffusion step创建子文件夹，为每个layer生成24*24的heatmap
+    if target_layers is not None and len(target_layers) > 0 and len(layer_visual_attentions_per_step) > 0:
+        layer_visual_attentions_array = np.array(layer_visual_attentions_per_step)  # [num_diffusion_steps, num_total_layers, 576]
+
+        if verbose:
+            print(f"\n  [生成每层heatmap] 为 {len(target_layers)} 个目标层生成heatmap...")
+
+        # 计算所有层的全局最小值和最大值（用于统一的colorbar scale）
+        all_visual_attentions = []
+        for layer_idx in target_layers:
+            if layer_idx < num_total_layers:
+                layer_visual_att = layer_visual_attentions_array[:, layer_idx, :]  # [num_diffusion_steps, 576]
+                all_visual_attentions.append(layer_visual_att.flatten())
+
+        if len(all_visual_attentions) > 0:
+            all_values = np.concatenate(all_visual_attentions)
+            vmin = np.min(all_values)
+            vmax = np.max(all_values)
+
+            # 如果所有值都相同，设置一个小的范围
+            if vmin == vmax:
+                vmin = vmin - 0.01 if vmin > 0 else 0
+                vmax = vmax + 0.01
+
+            if verbose:
+                print(f"  [Colorbar范围] 全局范围: [{vmin:.6f}, {vmax:.6f}]")
+
+            # 为每个diffusion step创建子文件夹并生成heatmap
+            for step_idx, actual_timestep in enumerate(sampled_steps):
+                # 为当前diffusion step创建子文件夹
+                step_output_dir = os.path.join(output_dir, f"step_{actual_timestep:04d}")
+                os.makedirs(step_output_dir, exist_ok=True)
+
+                # 为每个target layer生成24*24的heatmap
+                for layer_idx in target_layers:
+                    if layer_idx >= num_total_layers:
+                        continue
+
+                    # 提取该层在当前扩散步的576个视觉attention值
+                    visual_att_1d = layer_visual_attentions_array[step_idx, layer_idx, :]  # [576]
+
+                    # 将576个值reshape成24*24
+                    visual_att_2d = visual_att_1d.reshape(24, 24)  # [24, 24]
+
+                    # 创建heatmap - 学术论文风格
+                    plt.rcParams.update({
+                        'font.family': 'serif',
+                        'font.serif': ['Times New Roman', 'DejaVu Serif'],
+                        'font.size': 12,
+                        'axes.labelsize': 12,
+                        'axes.titlesize': 0,  # 移除标题
+                        'xtick.labelsize': 11,
+                        'ytick.labelsize': 11,
+                        'legend.fontsize': 10,
+                        'figure.titlesize': 0,
+                        'axes.linewidth': 1.0,
+                    })
+
+                    # 创建图形，左侧是heatmap，右侧是colorbar
+                    fig_heatmap, ax_heatmap = plt.subplots(figsize=(5.5, 5.0))
+
+                    # 绘制heatmap（24*24）
+                    im = ax_heatmap.imshow(visual_att_2d, aspect='equal', cmap='viridis',
+                                          vmin=vmin, vmax=vmax, interpolation='nearest')
+
+                    # 设置标签
+                    label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+                    ax_heatmap.set_xlabel('Spatial X', fontsize=label_fontsize, fontweight='bold')
+                    ax_heatmap.set_ylabel('Spatial Y', fontsize=label_fontsize, fontweight='bold')
+
+                    # 设置x轴和y轴刻度：0-23
+                    ax_heatmap.set_xlim(-0.5, 23.5)
+                    ax_heatmap.set_ylim(23.5, -0.5)  # 反转y轴，使得(0,0)在左上角
+
+                    # 设置刻度：每隔几个位置标注一次，避免过于密集
+                    tick_interval = 4  # 每4个位置标注一次
+                    x_tick_positions = np.arange(0, 24, tick_interval)
+                    y_tick_positions = np.arange(0, 24, tick_interval)
+                    ax_heatmap.set_xticks(x_tick_positions)
+                    ax_heatmap.set_yticks(y_tick_positions)
+                    ax_heatmap.set_xticklabels([str(pos) for pos in x_tick_positions])
+                    ax_heatmap.set_yticklabels([str(pos) for pos in y_tick_positions])
+
+                    # 添加colorbar
+                    cbar = plt.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
+                    cbar.set_label('Attention Value', fontsize=label_fontsize, fontweight='bold')
+                    cbar.ax.tick_params(labelsize=int(11 * 1.2))
+
+                    # 设置刻度标签加粗
+                    for label in ax_heatmap.get_xticklabels():
+                        label.set_fontweight('bold')
+                    for label in ax_heatmap.get_yticklabels():
+                        label.set_fontweight('bold')
+
+                    plt.tight_layout()
+
+                    # 保存heatmap（更高DPI，适合论文）
+                    heatmap_file = os.path.join(step_output_dir, f"layer_{layer_idx}_heatmap.png")
+                    plt.savefig(heatmap_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+                    plt.close()
+
+                if verbose and step_idx < 3:  # 只对前几步输出详细信息
+                    print(f"    ✓ Step {actual_timestep}: 已为 {len(target_layers)} 个layer生成heatmap，保存在 {os.path.basename(step_output_dir)}/")
+
+    # 为每个diffusion step生成32*32的head ratios heatmap
+    if len(head_ratios_per_step) > 0:
+        head_ratios_array = np.array(head_ratios_per_step)  # [num_diffusion_steps, num_total_layers, num_heads]
+
+        if verbose:
+            print(f"\n  [生成head ratios heatmap] 为每个diffusion step生成32*32 heatmap...")
+
+        # 计算所有step的全局最小值和最大值（用于统一的colorbar scale）
+        all_head_ratios = head_ratios_array.flatten()
+        vmin = np.min(all_head_ratios)
+        vmax = np.max(all_head_ratios)
+
+        # 如果所有值都相同，设置一个小的范围
+        if vmin == vmax:
+            vmin = vmin - 0.01 if vmin > 0 else 0
+            vmax = vmax + 0.01
+
+        if verbose:
+            print(f"  [Colorbar范围] 全局范围: [{vmin:.6f}, {vmax:.6f}]")
+
+        # 为每个diffusion step生成32*32的heatmap
+        for step_idx, actual_timestep in enumerate(sampled_steps):
+            # 为当前diffusion step创建子文件夹（如果还没有创建）
+            step_output_dir = os.path.join(output_dir, f"step_{actual_timestep:04d}")
+            os.makedirs(step_output_dir, exist_ok=True)
+
+            # 提取当前step的head ratios [num_total_layers, num_heads]
+            head_ratios_2d = head_ratios_array[step_idx, :, :]  # [32, 32]
+
+            # 创建heatmap - 学术论文风格
+            plt.rcParams.update({
+                'font.family': 'serif',
+                'font.serif': ['Times New Roman', 'DejaVu Serif'],
+                'font.size': 12,
+                'axes.labelsize': 12,
+                'axes.titlesize': 0,  # 移除标题
+                'xtick.labelsize': 11,
+                'ytick.labelsize': 11,
+                'legend.fontsize': 10,
+                'figure.titlesize': 0,
+                'axes.linewidth': 1.0,
+            })
+
+            # 创建图形，左侧是heatmap，右侧是colorbar
+            fig_heatmap, ax_heatmap = plt.subplots(figsize=(6.5, 5.5))
+
+            # 绘制heatmap（32*32）
+            im = ax_heatmap.imshow(head_ratios_2d, aspect='equal', cmap='viridis',
+                                  vmin=vmin, vmax=vmax, interpolation='nearest')
+
+            # 设置标签
+            label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+            ax_heatmap.set_xlabel('Head Index', fontsize=label_fontsize, fontweight='bold')
+            ax_heatmap.set_ylabel('Layer Index', fontsize=label_fontsize, fontweight='bold')
+
+            # 设置x轴和y轴刻度：0-31
+            ax_heatmap.set_xlim(-0.5, num_heads - 0.5)
+            ax_heatmap.set_ylim(num_total_layers - 0.5, -0.5)  # 反转y轴，使得layer 0在顶部
+
+            # 设置刻度：每隔几个位置标注一次，避免过于密集
+            tick_interval = 4  # 每4个位置标注一次
+            x_tick_positions = np.arange(0, num_heads, tick_interval)
+            y_tick_positions = np.arange(0, num_total_layers, tick_interval)
+            ax_heatmap.set_xticks(x_tick_positions)
+            ax_heatmap.set_yticks(y_tick_positions)
+            ax_heatmap.set_xticklabels([str(pos) for pos in x_tick_positions])
+            ax_heatmap.set_yticklabels([str(pos) for pos in y_tick_positions])
+
+            # 添加colorbar
+            cbar = plt.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
+            cbar.set_label('Concentration Index', fontsize=label_fontsize, fontweight='bold')
+            cbar.ax.tick_params(labelsize=int(11 * 1.2))
+
+            # 设置刻度标签加粗
+            for label in ax_heatmap.get_xticklabels():
+                label.set_fontweight('bold')
+            for label in ax_heatmap.get_yticklabels():
+                label.set_fontweight('bold')
+
+            plt.tight_layout()
+
+            # 保存heatmap（更高DPI，适合论文）
+            head_heatmap_file = os.path.join(step_output_dir, "head_ratios_heatmap_32x32.png")
+            plt.savefig(head_heatmap_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+            plt.close()
+
+            if verbose and step_idx < 3:  # 只对前几步输出详细信息
+                print(f"    ✓ Step {actual_timestep}: 32*32 head ratios heatmap已保存: {os.path.basename(head_heatmap_file)}")
+
+            # 为当前step生成1024个head的视觉attention比例分布柱状图
+            # 提取当前step的所有head ratios [32, 32] -> 展平为 [1024]
+            step_head_ratios_flat = head_ratios_array[step_idx, :, :].flatten()
+
+            # 定义比例区间：0-1.0范围，以0.05为区间长度
+            bin_edges = np.arange(0, 1.05, 0.05)  # [0.0, 0.05, 0.10, ..., 1.0]
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2  # 每个区间的中心点
+
+            # 计算每个区间的head数量
+            hist_counts, _ = np.histogram(step_head_ratios_flat, bins=bin_edges)
+
+            # 计算占比（该区间的head数量 / 总head数量）
+            total_heads = len(step_head_ratios_flat)  # 应该是 32 * 32 = 1024
+            hist_ratios = hist_counts / total_heads
+
+            # 创建柱状图 - 学术论文风格
+            plt.rcParams.update({
+                'font.family': 'serif',
+                'font.serif': ['Times New Roman', 'DejaVu Serif'],
+                'font.size': 12,
+                'axes.labelsize': 12,
+                'axes.titlesize': 0,  # 移除标题
+                'xtick.labelsize': 11,
+                'ytick.labelsize': 11,
+                'legend.fontsize': 10,
+                'figure.titlesize': 0,
+                'axes.linewidth': 1.0,
+                'grid.linewidth': 0.5,
+            })
+
+            fig, ax = plt.subplots(figsize=(8.0, 4.5))
+
+            # 绘制柱状图
+            bar_width = 0.04  # 柱状图宽度
+            bars = ax.bar(bin_centers, hist_ratios, width=bar_width, color='#1f77b4', alpha=0.8, edgecolor='black', linewidth=0.5)
+
+            # 设置标签
+            label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+            ax.set_xlabel('Concentration Index', fontsize=label_fontsize, fontweight='bold')
+            ax.set_ylabel('Head Ratio', fontsize=label_fontsize, fontweight='bold')
+
+            # 设置x轴范围和刻度
+            ax.set_xlim(-0.025, 1.025)  # 稍微扩展范围以便显示所有柱状图
+            ax.set_xticks(np.arange(0, 1.05, 0.1))  # 每0.1标注一次
+
+            # 设置y轴范围：0-1（因为占比在0-1之间）
+            ax.set_ylim(0, max(hist_ratios) * 1.1 if max(hist_ratios) > 0 else 0.1)
+            # 设置 y 轴刻度标签：将 0.2, 0.3, 0.4, 0.5 映射到实际的y轴范围
+            set_yticks_with_fixed_labels(ax, [0.2, 0.3, 0.4, 0.5])
+
+            # 网格样式（更subtle）
+            ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5, axis='y')
+
+            # 显示所有边框，使用浅蓝色
+            light_blue = '#ADD8E6'
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_color(light_blue)
+                spine.set_linewidth(1.0)
+
+            # 设置刻度样式（加粗并放大1.2倍）
+            tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+            ax.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+            # 设置刻度标签加粗
+            for label in ax.get_xticklabels():
+                label.set_fontweight('bold')
+            for label in ax.get_yticklabels():
+                label.set_fontweight('bold')
+
+            plt.tight_layout()
+
+            # 保存柱状图（更高DPI，适合论文）
+            histogram_file = os.path.join(step_output_dir, "head_ratios_histogram.png")
+            plt.savefig(histogram_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+            plt.close()
+
+            if verbose and step_idx < 3:  # 只对前几步输出详细信息
+                print(f"    ✓ Step {actual_timestep}: Head比例分布柱状图已保存: {os.path.basename(histogram_file)}")
+
+        # 计算所有diffusion step的1024个head的平均值，并计算每个step超过平均值的head占比
+        if len(head_ratios_per_step) > 0 and output_dir:
+            if verbose:
+                print(f"\n  [计算head占比统计] 计算每个diffusion step超过平均值的head占比...")
+
+            # 将所有step的head ratios展平，计算全局平均值
+            all_head_ratios_flat = head_ratios_array.flatten()  # [num_diffusion_steps * 32 * 32]
+            global_mean = np.mean(all_head_ratios_flat)
+
+            if verbose:
+                print(f"  [全局平均值] 所有 {len(all_head_ratios_flat)} 个head在所有diffusion step的平均值: {global_mean:.6f}")
+
+            # 计算每个step超过平均值的head数量占比
+            step_above_mean_ratios = []
+            for step_idx, actual_timestep in enumerate(sampled_steps):
+                # 提取当前step的所有head ratios [32, 32] -> 展平为 [1024]
+                step_head_ratios_flat = head_ratios_array[step_idx, :, :].flatten()
+
+                # 计算超过平均值的head数量
+                above_mean_count = np.sum(step_head_ratios_flat > global_mean)
+                total_heads = len(step_head_ratios_flat)  # 应该是 32 * 32 = 1024
+                above_mean_ratio = above_mean_count / total_heads
+
+                step_above_mean_ratios.append(above_mean_ratio)
+
+                if verbose and step_idx < 3:  # 只对前几步输出详细信息
+                    print(f"    Step {actual_timestep}: {above_mean_count}/{total_heads} 个head超过平均值，占比: {above_mean_ratio:.4f}")
+
+            # 绘制折线图
+            if len(step_above_mean_ratios) > 0:
+                # 创建图表 - 学术论文风格
+                plt.rcParams.update({
+                    'font.family': 'serif',
+                    'font.serif': ['Times New Roman', 'DejaVu Serif'],
+                    'font.size': 12,
+                    'axes.labelsize': 12,
+                    'axes.titlesize': 0,  # 移除标题
+                    'xtick.labelsize': 11,
+                    'ytick.labelsize': 11,
+                    'legend.fontsize': 10,
+                    'figure.titlesize': 0,
+                    'axes.linewidth': 1.0,
+                    'grid.linewidth': 0.5,
+                    'lines.linewidth': 2.4,
+                    'lines.markersize': 5,
+                })
+
+                fig, ax = plt.subplots(figsize=(5.5, 4.0))  # 更紧凑的尺寸，适合论文
+
+                # 使用实际采样的步骤（0-1000范围）
+                steps = np.array(sampled_steps)
+                step_above_mean_ratios = np.array(step_above_mean_ratios)
+
+                # 使用更专业的配色（深蓝色，适合学术论文）
+                ax.plot(steps, step_above_mean_ratios, color='#1f77b4', linewidth=2.4, alpha=0.9, marker='o', markersize=4, markevery=max(1, len(sampled_steps)//20))
+
+                # 设置标签（更简洁，加粗并放大1.2倍）
+                label_fontsize = int(12 * 1.2)  # 14.4 -> 14
+                ax.set_xlabel('Diffusion Step', fontsize=label_fontsize, fontweight='bold')
+                ax.set_ylabel('Ratio of Heads Above Mean', fontsize=label_fontsize, fontweight='bold')
+
+                # 设置 x 轴范围和刻度：0-1000，间隔200
+                ax.set_xlim(0, 1000)
+                ax.set_xticks(np.arange(0, 1001, 200))  # 0, 200, 400, 600, 800, 1000
+
+                # 设置 y 轴范围：0-1（因为占比在0-1之间）
+                ax.set_ylim(0, 1)
+                # 设置 y 轴刻度标签：将 0.2, 0.3, 0.4, 0.5 映射到实际的y轴范围
+                set_yticks_with_fixed_labels(ax, [0.2, 0.3, 0.4, 0.5])
+
+                # 网格样式（更subtle）
+                ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+
+                # 显示所有边框，使用浅蓝色
+                light_blue = '#ADD8E6'
+                for spine in ax.spines.values():
+                    spine.set_visible(True)
+                    spine.set_color(light_blue)
+                    spine.set_linewidth(1.0)
+
+                # 设置刻度样式（加粗并放大1.2倍）
+                tick_fontsize = int(11 * 1.2)  # 13.2 -> 13
+                ax.tick_params(direction='in', length=4, width=0.8, labelsize=tick_fontsize)
+                # 设置刻度标签加粗
+                for label in ax.get_xticklabels():
+                    label.set_fontweight('bold')
+                for label in ax.get_yticklabels():
+                    label.set_fontweight('bold')
+
+                # 保存图表（更高DPI，适合论文）
+                if question_id is not None:
+                    filename = f"head_above_mean_ratio_q{question_id}.png"
+                else:
+                    filename = "head_above_mean_ratio.png"
+
+                output_file = os.path.join(output_dir, filename)
+                plt.tight_layout()
+                plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+                plt.close()
+
+                if verbose:
+                    print(f"  ✓ Head占比统计折线图已保存: {os.path.basename(output_file)}")
+                    print(f"    平均占比: {np.mean(step_above_mean_ratios):.4f}")
+                    print(f"    最小占比: {np.min(step_above_mean_ratios):.4f}")
+                    print(f"    最大占比: {np.max(step_above_mean_ratios):.4f}")
 
     return ratios
 
@@ -1277,11 +1843,14 @@ def eval_model(args):
     else:
         print(f"✓ 加载了 {len(questions)} 个问题，将评测全部")
 
-    # 如果启用了扩散分析，先快速评估所有 case，过滤出回答 "Yes" 的 case
+    # 如果启用了扩散分析，先快速评估所有 case，记录每个 case 的答案（用于后续文件夹命名）
+    # 注意：不再过滤样本，保留所有样本（包括 Yes 和 No），以便分析有幻视和无幻视的情况
     if hasattr(args, 'enable_diffusion_analysis') and args.enable_diffusion_analysis:
-        print(f"\n[预评估] 扩散分析已启用，先快速评估所有 case 以过滤出回答 'Yes' 的 case...")
-        yes_questions = []
-        yes_question_ids = set()
+        print(f"\n[预评估] 扩散分析已启用，先快速评估所有 case 以记录答案（用于文件夹命名）...")
+        print(f"  注意：将保留所有样本（包括 Yes 和 No），以便分析有幻视和无幻视的情况")
+
+        # 存储每个问题的答案（用于后续文件夹命名）
+        question_answers = {}  # {question_id: "Yes" or "No"}
 
         # 准备 Deco 参数（用于预评估）
         early_exit_layers = None
@@ -1318,20 +1887,18 @@ def eval_model(args):
 
             # 转换为 Yes/No
             answer = recorder(outputs)
+            question_answers[idx] = answer
 
-            # 只保留回答 "Yes" 的 case
-            if answer == "Yes":
-                yes_questions.append(line)
-                yes_question_ids.add(idx)
+        # 统计答案分布
+        yes_count = sum(1 for ans in question_answers.values() if ans == "Yes")
+        no_count = sum(1 for ans in question_answers.values() if ans == "No")
+        print(f"✓ 预评估完成: 共 {len(questions)} 个 case")
+        print(f"  - 回答 'Yes': {yes_count} 个")
+        print(f"  - 回答 'No': {no_count} 个")
+        print(f"  将对所有 {len(questions)} 个 case 进行后续处理（包括扩散分析）")
 
-        print(f"✓ 预评估完成: 共 {len(questions)} 个 case，其中 {len(yes_questions)} 个回答 'Yes'")
-        print(f"  将只对这 {len(yes_questions)} 个 'Yes' case 进行后续处理（包括扩散分析）")
-
-        # 更新 questions 列表，只保留回答 "Yes" 的 case
-        questions = yes_questions
-        if len(questions) == 0:
-            print("⚠️  警告: 没有找到回答 'Yes' 的 case，将跳过所有处理")
-            return
+        # 将答案信息存储到 args 中，供后续使用
+        args._question_answers = question_answers
 
     # 准备输出文件
     answers_file = os.path.expanduser(args.answers_file)
@@ -1426,49 +1993,47 @@ def eval_model(args):
             print(f"    - 转换后答案: '{answer}'")
             print("=" * 80)
 
-        # 如果启用了扩散分析，进行扩散分析（此时所有 case 都应该是 "Yes"）
+        # 如果启用了扩散分析，进行扩散分析
         if hasattr(args, 'enable_diffusion_analysis') and args.enable_diffusion_analysis:
-            if answer == "Yes":
-                if verbose:
-                    print("\n" + "-" * 80)
-                    print("[扩散分析] 开始扩散过程分析...")
-                    print("-" * 80)
-                else:
-                    print(f"  [扩散分析] Question ID {idx}: 开始扩散分析...")
-
-                # 创建输出目录（为每个case创建单独的子文件夹）
-                diffusion_analysis_base_dir = os.path.join(os.path.dirname(answers_file), "diffusion_analysis")
-                os.makedirs(diffusion_analysis_base_dir, exist_ok=True)
-                diffusion_output_dir = os.path.join(diffusion_analysis_base_dir, f"q{idx}")
-                os.makedirs(diffusion_output_dir, exist_ok=True)
-
-                # 进行扩散分析
-                ratios = analyze_diffusion_attention(
-                    model=model,
-                    tokenizer=tokenizer,
-                    image_processor=image_processor,
-                    image_file=image_file,
-                    prompt=qs,
-                    conv_mode=conv_mode,
-                    device=device,
-                    num_diffusion_steps=getattr(args, 'num_diffusion_steps', 1000),
-                    image_token_start=35,
-                    num_image_tokens=576,
-                    num_total_layers=32,
-                    num_heads=32,
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature,
-                    output_dir=diffusion_output_dir,
-                    question_id=idx,
-                    verbose=verbose,
-                    target_layers=getattr(args, 'target_layers', None)
-                )
-
-                if verbose:
-                    print(f"  ✓ 扩散分析完成，共 {len(ratios)} 步")
+            if verbose:
+                print("\n" + "-" * 80)
+                print("[扩散分析] 开始扩散过程分析...")
+                print("-" * 80)
             else:
-                # 这种情况不应该发生，因为已经在预评估阶段过滤掉了
-                print(f"  ⚠️  警告: Question ID {idx} 的答案为 '{answer}'，但应该在预评估阶段已被过滤")
+                print(f"  [扩散分析] Question ID {idx}: 开始扩散分析...")
+
+            # 创建输出目录（为每个case创建单独的子文件夹，根据答案是Yes/No命名）
+            diffusion_analysis_base_dir = os.path.join(os.path.dirname(answers_file), "diffusion_analysis")
+            os.makedirs(diffusion_analysis_base_dir, exist_ok=True)
+            # 根据答案命名文件夹：q_*_yes 或 q_*_no
+            answer_suffix = "yes" if answer == "Yes" else "no"
+            diffusion_output_dir = os.path.join(diffusion_analysis_base_dir, f"q{idx}_{answer_suffix}")
+            os.makedirs(diffusion_output_dir, exist_ok=True)
+
+            # 进行扩散分析
+            ratios = analyze_diffusion_attention(
+                model=model,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                image_file=image_file,
+                prompt=qs,
+                conv_mode=conv_mode,
+                device=device,
+                num_diffusion_steps=getattr(args, 'num_diffusion_steps', 1000),
+                image_token_start=35,
+                num_image_tokens=576,
+                num_total_layers=32,
+                num_heads=32,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                output_dir=diffusion_output_dir,
+                question_id=idx,
+                verbose=verbose,
+                target_layers=getattr(args, 'target_layers', None)
+            )
+
+            if verbose:
+                print(f"  ✓ 扩散分析完成，共 {len(ratios)} 步")
 
         # 保存结果
         ans_file.write(json.dumps({
@@ -1519,7 +2084,7 @@ def main():
         "temperature": 0,
         "top_p": None,
         "max_new_tokens": 15,  # POPE 只需要 Yes/No，但给一些缓冲
-        "num_samples": 50,
+        "num_samples": 20,
         "seed": 42,
         "target_layers": [0, 5, 7, 9, 11, 13, 15, 17, 21, 25, 29, 31],
         "enable_diffusion_analysis": True,

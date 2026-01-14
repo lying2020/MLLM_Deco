@@ -59,316 +59,13 @@ matplotlib.use('Agg')  # 使用非交互式后端，不显示图片窗口
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from test_llava_v15_7b_attention import visualize_step_attention_map, plot_attention_pixel_grid, load_image
+from tests.heatmap_concentration_analyzer import HeatmapConcentrationAnalyzer
 
 import numpy as np
-from scipy.ndimage import label, convolve
+from scipy.ndimage import label, gaussian_filter
+from scipy.signal import convolve2d
 from skimage.measure import regionprops
 import matplotlib.pyplot as plt
-
-class HeatmapConcentrationAnalyzer:
-    """
-    Heatmap集中度分析器
-    支持输入：24×24数组、576一维数组、或图像文件路径
-    """
-
-    def __init__(self, top_percentile=10, weights=None):
-        """
-        初始化分析器
-
-        参数:
-        - top_percentile: 高像素点的百分比阈值 (默认10%)
-        - weights: 各指标的权重 [紧凑度, 大小系数, 连通性系数] (默认[0.5, 0.3, 0.2])
-        """
-        self.top_percentile = top_percentile
-
-        if weights is None:
-            self.weights = [0.5, 0.3, 0.2]  # 紧凑度, 大小系数, 连通性系数
-        else:
-            self.weights = weights
-
-    def preprocess_heatmap(self, heatmap_input):
-        """
-        预处理heatmap输入，统一转换为24×24的numpy数组
-
-        支持输入类型:
-        1. 24×24的numpy数组
-        2. 576个元素的一维数组/列表
-        3. 24×24的二维列表
-        """
-        # 转换为numpy数组
-        data = np.array(heatmap_input)
-
-        # 检查并重塑形状
-        if data.size == 576 and data.shape != (24, 24):
-            # 如果是576个元素的一维数组
-            if data.ndim == 1:
-                data = data.reshape(24, 24)
-            elif data.ndim == 2 and (data.shape[0] == 24 or data.shape[1] == 24):
-                # 可能是其他形状的24×24变形
-                data = data.reshape(24, 24)
-            else:
-                raise ValueError(f"输入形状 {data.shape} 无法转换为24×24")
-
-        elif data.shape != (24, 24):
-            raise ValueError(f"期望24×24的形状，但得到 {data.shape}")
-
-        return data
-
-    def visualize_heatmap(self, heatmap, binary_map=None, title="Heatmap"):
-        """
-        可视化heatmap和高像素点区域
-        """
-        fig, axes = plt.subplots(1, 3 if binary_map is not None else 1,
-                                figsize=(15, 5 if binary_map is not None else 5))
-
-        if binary_map is None:
-            ax = axes if isinstance(axes, plt.Axes) else axes[0]
-            im = ax.imshow(heatmap, cmap='hot', interpolation='nearest')
-            ax.set_title(title)
-            ax.axis('off')
-            plt.colorbar(im, ax=ax)
-        else:
-            # 显示原始heatmap
-            im1 = axes[0].imshow(heatmap, cmap='hot', interpolation='nearest')
-            axes[0].set_title(f'Original {title}')
-            axes[0].axis('off')
-            plt.colorbar(im1, ax=axes[0])
-
-            # 显示二值化图
-            axes[1].imshow(binary_map, cmap='gray', interpolation='nearest')
-            axes[1].set_title(f'Top {self.top_percentile}% Pixels')
-            axes[1].axis('off')
-
-            # 显示叠加图
-            overlay = np.zeros((*heatmap.shape, 3))
-            overlay[:,:,0] = heatmap / heatmap.max()  # 红色通道: heatmap
-            overlay[:,:,1] = binary_map  # 绿色通道: 高像素点区域
-            axes[2].imshow(overlay)
-            axes[2].set_title('Overlay: Heatmap + High Pixels')
-            axes[2].axis('off')
-
-        plt.tight_layout()
-        plt.show()
-
-    def extract_high_pixels(self, heatmap):
-        """
-        提取高像素点区域
-        """
-        # 计算阈值
-        threshold = np.percentile(heatmap, 100 - self.top_percentile)
-
-        # 创建二值化掩码
-        binary_map = (heatmap >= threshold).astype(np.uint8)
-
-        return binary_map, threshold
-
-    def calculate_concentration_index(self, heatmap_input, visualize=False, top_k=4):
-        """
-        计算heatmap的像素集中度指数（基于方案C：卷积+聚类中心+权重筛选）
-
-        参数:
-        - heatmap_input: 输入heatmap (多种格式)
-        - visualize: 是否可视化结果
-        - top_k: 选取的Top-K个参考点数量（默认4）
-
-        返回:
-        - dict: 包含各项指标和综合集中度
-        """
-        # 1. 预处理输入
-        heatmap = self.preprocess_heatmap(heatmap_input)
-
-        # 检查heatmap是否全为0或无效
-        if np.all(heatmap == 0) or np.all(np.isnan(heatmap)):
-            return {
-                'concentration_index': 0.0,
-                'spatial_compactness': 0.0,
-                'pixel_weight_ratio': 0.0,
-                'message': 'Empty or invalid heatmap'
-            }
-
-        # 2. 3×3卷积（全1核，stride=1，padding=0）→ 22×22
-        kernel = np.ones((3, 3))
-        convolved = convolve(heatmap, kernel, mode='valid')  # 得到22×22
-
-        # 检查卷积结果是否有效
-        if convolved.size == 0 or np.all(np.isnan(convolved)):
-            return {
-                'concentration_index': 0.0,
-                'spatial_compactness': 0.0,
-                'pixel_weight_ratio': 0.0,
-                'message': 'Convolution failed'
-            }
-
-        # 3. 选取Top-K个点（从22×22中）
-        flat_indices = np.argsort(convolved.flatten())[-top_k:]
-        top_k_flat_indices = flat_indices[::-1]  # 从高到低排序
-        top_k_positions_22x22 = np.unravel_index(top_k_flat_indices, convolved.shape)  # (row_indices, col_indices)
-
-        # 4. 映射回24×24坐标
-        # 卷积后的坐标(i, j)对应原始heatmap的(i, j)到(i+2, j+2)的3×3区域
-        # 我们使用区域中心点作为映射坐标：(i+1, j+1)
-        top_k_positions_24x24 = []
-        for i, j in zip(top_k_positions_22x22[0], top_k_positions_22x22[1]):
-            # 映射到原始坐标（确保在边界内）
-            orig_i = min(i + 1, heatmap.shape[0] - 1)
-            orig_j = min(j + 1, heatmap.shape[1] - 1)
-            top_k_positions_24x24.append((orig_i, orig_j))
-
-        # 5. 收集候选点集合（K个参考点+每个点的8邻域，不去重）
-        candidate_points = []
-        for ref_i, ref_j in top_k_positions_24x24:
-            # 添加参考点本身
-            candidate_points.append((ref_i, ref_j))
-            # 添加8邻域
-            for di in [-1, 0, 1]:
-                for dj in [-1, 0, 1]:
-                    if di == 0 and dj == 0:
-                        continue  # 跳过参考点本身
-                    ni, nj = ref_i + di, ref_j + dj
-                    # 检查边界
-                    if 0 <= ni < heatmap.shape[0] and 0 <= nj < heatmap.shape[1]:
-                        candidate_points.append((ni, nj))
-
-        if len(candidate_points) == 0:
-            return {
-                'concentration_index': 0.0,
-                'spatial_compactness': 0.0,
-                'pixel_weight_ratio': 0.0,
-                'message': 'No candidate points found'
-            }
-
-        # 6. 计算所有候选点到K个参考点的距离方差，选方差最小的作为聚类中心
-        def euclidean_distance(p1, p2):
-            """计算两点之间的欧氏距离"""
-            return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-
-        min_variance = float('inf')
-        cluster_center = None
-
-        for ref_point in top_k_positions_24x24:
-            # 计算所有候选点到该参考点的距离
-            distances = [euclidean_distance(cand_point, ref_point) for cand_point in candidate_points]
-            distance_variance = np.var(distances)
-
-            if distance_variance < min_variance:
-                min_variance = distance_variance
-                cluster_center = ref_point
-
-        if cluster_center is None:
-            cluster_center = top_k_positions_24x24[0]  # 默认使用第一个参考点
-
-        # 7. 计算候选点到聚类中心的权重距离（logit*距离），剔除最远的10%
-        weighted_distances = []
-        for cand_point in candidate_points:
-            distance = euclidean_distance(cand_point, cluster_center)
-            logit_value = heatmap[cand_point[0], cand_point[1]]
-            # 处理NaN和负值
-            if np.isnan(logit_value) or logit_value < 0:
-                logit_value = 0.0
-            weighted_distance = logit_value * distance
-            weighted_distances.append((cand_point, weighted_distance))
-
-        # 按权重距离排序
-        weighted_distances.sort(key=lambda x: x[1], reverse=True)
-
-        # 剔除最远的10%
-        remove_count = max(1, int(len(weighted_distances) * 0.1))
-        filtered_candidate_points = [point for point, _ in weighted_distances[:-remove_count]]
-
-        if len(filtered_candidate_points) == 0:
-            return {
-                'concentration_index': 0.0,
-                'spatial_compactness': 0.0,
-                'pixel_weight_ratio': 0.0,
-                'message': 'No points after filtering'
-            }
-
-        # 8. 计算两个指标
-        # 8.1 空间指标：候选点的空间分布紧凑度
-        if len(filtered_candidate_points) == 1:
-            spatial_compactness = 1.0  # 单点，完全紧凑
-        else:
-            # 计算候选点的边界框
-            y_coords = [p[0] for p in filtered_candidate_points]
-            x_coords = [p[1] for p in filtered_candidate_points]
-            min_x, max_x = min(x_coords), max(x_coords)
-            min_y, max_y = min(y_coords), max(y_coords)
-            bounding_box_width = max_x - min_x + 1
-            bounding_box_height = max_y - min_y + 1
-            bounding_box_area = bounding_box_width * bounding_box_height
-
-            # 计算到质心的平均距离
-            centroid_y = np.mean(y_coords)
-            centroid_x = np.mean(x_coords)
-            distances_to_centroid = [euclidean_distance(p, (centroid_y, centroid_x))
-                                    for p in filtered_candidate_points]
-            mean_distance = np.mean(distances_to_centroid)
-
-            # 计算距离的标准差（衡量分散程度）
-            distance_std = np.std(distances_to_centroid) if len(distances_to_centroid) > 1 else 0.0
-
-            # 紧凑度计算：
-            # 1. 密度：点数/边界框面积（点数越多、边界框越小，密度越高）
-            if bounding_box_area > 0:
-                density = len(filtered_candidate_points) / bounding_box_area
-            else:
-                density = 1.0
-
-            # 2. 距离因子：平均距离越小，紧凑度越高
-            # 使用归一化：假设最大可能距离为对角线长度
-            max_possible_distance = np.sqrt(heatmap.shape[0]**2 + heatmap.shape[1]**2)
-            normalized_mean_distance = mean_distance / max_possible_distance if max_possible_distance > 0 else 0.0
-            distance_factor = 1.0 / (1.0 + normalized_mean_distance)
-
-            # 3. 分散因子：标准差越小，越集中
-            normalized_std = distance_std / max_possible_distance if max_possible_distance > 0 else 0.0
-            dispersion_factor = 1.0 / (1.0 + normalized_std)
-
-            # 综合紧凑度：密度 × 距离因子 × 分散因子
-            # 归一化：理论上限需要根据实际情况调整，这里先简单归一化
-            spatial_compactness = density * distance_factor * dispersion_factor
-            # 归一化到[0, 1]（理论上限约为1.0，但实际可能超过，所以需要clamp）
-            spatial_compactness = min(1.0, spatial_compactness)
-
-        # 8.2 像素权重指标：候选点的总像素值占整张图的像素值比例
-        candidate_pixel_sum = sum(heatmap[p[0], p[1]] for p in filtered_candidate_points
-                                  if not np.isnan(heatmap[p[0], p[1]]))
-        total_pixel_sum = np.nansum(heatmap)
-
-        if total_pixel_sum > 0:
-            pixel_weight_ratio = candidate_pixel_sum / total_pixel_sum
-        else:
-            pixel_weight_ratio = 0.0
-
-        # 9. 计算综合集中度指数（两个指标相加）
-        # 由于两个指标都在[0, 1]范围内，可以直接相加，然后归一化
-        concentration_index = spatial_compactness + pixel_weight_ratio
-        # 归一化到[0, 1]（因为两个指标相加最大为2）
-        concentration_index = concentration_index / 2.0
-
-        # 10. 收集结果
-        result = {
-            'concentration_index': float(concentration_index),
-            'spatial_compactness': float(spatial_compactness),
-            'pixel_weight_ratio': float(pixel_weight_ratio),
-            'cluster_center': cluster_center,
-            'filtered_candidate_count': len(filtered_candidate_points),
-            'total_candidate_count': len(candidate_points),
-            'top_k_positions': top_k_positions_24x24,
-            'heatmap_shape': heatmap.shape
-        }
-
-        # 11. 可视化（如果启用）
-        if visualize:
-            # 创建二值化图显示候选点
-            binary_map = np.zeros_like(heatmap)
-            for point in filtered_candidate_points:
-                binary_map[point[0], point[1]] = 1
-            title = f"Concentration Index: {concentration_index:.3f}"
-            self.visualize_heatmap(heatmap, binary_map, title)
-
-        return result
-
 
 # 使用示例函数
 def analyze_heatmap_concentration(heatmap_input, top_percentile=5, visualize=False, top_k=4):
@@ -391,19 +88,23 @@ def load_test_cases_from_json(json_file: str, coco_root: str):
     """
     从 JSON 文件加载测试 case 信息
 
+    支持两种 JSON 格式：
+    1. 对象数组格式：每个对象包含 question_id, image, text, label (可选)
+    2. 字符串数组格式：每个字符串是图像文件名
+
     Args:
-        json_file: JSON 文件路径，包含 case 列表，每个 case 包含 question_id, image, text
+        json_file: JSON 文件路径
         coco_root: COCO 数据集根目录(包含 val2014 子目录)
 
     Returns:
-        List[Dict]: 包含 question_id, image_id, image_path, prompt 的字典列表
+        List[Dict]: 包含 question_id, image_id, image_path, prompt, label 的字典列表
     """
     json_file = os.path.expanduser(json_file)
     if not os.path.exists(json_file):
         raise FileNotFoundError(f"JSON 文件不存在: {json_file}")
 
     with open(json_file, 'r', encoding='utf-8') as f:
-        cases = json.load(f)
+        data = json.load(f)
 
     coco_root = Path(coco_root)
     val2014_dir = coco_root / "val2014"
@@ -411,16 +112,61 @@ def load_test_cases_from_json(json_file: str, coco_root: str):
     if not val2014_dir.exists():
         raise FileNotFoundError(f"COCO val2014 目录不存在: {val2014_dir}")
 
+    # 默认值
+    DEFAULT_TEXT = "Please help me describe the image in detail."
+    DEFAULT_LABEL = "Yes"
+
+    # 判断 JSON 格式：如果是字符串数组，转换为对象数组格式
+    if isinstance(data, list) and len(data) > 0:
+        if isinstance(data[0], str):
+            # 格式2：字符串数组，每个字符串是图像文件名
+            cases = []
+            for idx, image_filename in enumerate(data):
+                cases.append({
+                    'question_id': idx,  # 从0开始累加
+                    'image': image_filename,
+                    'text': DEFAULT_TEXT,  # 使用默认文本
+                    'label': DEFAULT_LABEL  # 使用默认标签
+                })
+        else:
+            # 格式1：对象数组
+            cases = data
+    else:
+        raise ValueError(f"不支持的 JSON 格式: 期望数组格式")
+
     test_cases = []
+    question_id_counter = 0  # 用于累加编号（当缺少 question_id 时）
 
     for case in cases:
-        question_id = case.get('question_id')
-        image_filename = case.get('image')
-        prompt_text = case.get('text')
+        # 处理 case：可能是字典或字符串
+        if isinstance(case, str):
+            # 如果是字符串，转换为字典格式
+            case = {
+                'question_id': question_id_counter,
+                'image': case,
+                'text': DEFAULT_TEXT,
+                'label': DEFAULT_LABEL
+            }
+            question_id_counter += 1
 
-        if question_id is None or not image_filename or not prompt_text:
-            print(f"⚠️  警告: 跳过无效的 case: {case}")
+        # 获取字段，如果缺失则使用默认值
+        question_id = case.get('question_id')
+        if question_id is None:
+            question_id = question_id_counter
+            question_id_counter += 1
+
+        image_filename = case.get('image')
+        if not image_filename:
+            print(f"⚠️  警告: 跳过无效的 case（缺少 image）: {case}")
             continue
+
+        prompt_text = case.get('text')
+        if not prompt_text:
+            prompt_text = DEFAULT_TEXT
+
+        label = case.get('label')
+        if not label:
+            label = DEFAULT_LABEL
 
         # 从图像文件名提取 image_id
         # 格式: "COCO_val2014_000000065883.jpg" 或 "val2014/COCO_val2014_000000065883.jpg"
@@ -433,11 +179,7 @@ def load_test_cases_from_json(json_file: str, coco_root: str):
         # 提取最后的数字部分作为 image_id
         parts = image_filename.split('_')
         if len(parts) > 0:
-            try:
-                image_id = int(parts[-1])
-            except ValueError:
-                print(f"⚠️  警告: 无法从文件名提取 image_id: {image_filename}")
-                continue
+            image_id = int(parts[-1])
         else:
             print(f"⚠️  警告: 无法解析图像文件名: {image_filename}")
             continue
@@ -453,7 +195,8 @@ def load_test_cases_from_json(json_file: str, coco_root: str):
             'question_id': question_id,
             'image_id': image_id,
             'image_path': str(image_path),
-            'prompt': prompt_text
+            'prompt': prompt_text,
+            'label': label
         })
 
     # 按 question_id 排序
@@ -1732,26 +1475,23 @@ def _get_image_token_info(model, tokenizer, prompt, image_tensor, device):
     with torch.no_grad():
         vision_tower = model.get_vision_tower()
         if vision_tower is not None:
-            try:
-                image_features = vision_tower(image_tensor.unsqueeze(0).half().to(device))
-                if hasattr(image_features, 'last_hidden_state'):
-                    vision_hidden = image_features.last_hidden_state
-                elif isinstance(image_features, tuple):
-                    vision_hidden = image_features[0]
-                elif isinstance(image_features, torch.Tensor):
-                    vision_hidden = image_features
-                else:
-                    vision_hidden = None
+            image_features = vision_tower(image_tensor.unsqueeze(0).half().to(device))
+            if hasattr(image_features, 'last_hidden_state'):
+                vision_hidden = image_features.last_hidden_state
+            elif isinstance(image_features, tuple):
+                vision_hidden = image_features[0]
+            elif isinstance(image_features, torch.Tensor):
+                vision_hidden = image_features
+            else:
+                vision_hidden = None
 
-                if vision_hidden is not None and hasattr(model, 'mm_projector'):
-                    vision_hidden = model.mm_projector(vision_hidden)
+            if vision_hidden is not None and hasattr(model, 'mm_projector'):
+                vision_hidden = model.mm_projector(vision_hidden)
 
-                if vision_hidden is not None:
-                    num_image_tokens = vision_hidden.shape[1]
-                    print(f"Vision Hidden State Shape: {vision_hidden.shape}")
-                    print(f"图像 token 数量: {num_image_tokens}")
-            except Exception as e:
-                print(f"⚠️  提取 vision hidden state 时出错: {e}")
+            if vision_hidden is not None:
+                num_image_tokens = vision_hidden.shape[1]
+                print(f"Vision Hidden State Shape: {vision_hidden.shape}")
+                print(f"图像 token 数量: {num_image_tokens}")
 
     image_token_start = 35  # 跳过BOS token
     return image_token_start, num_image_tokens
@@ -2708,12 +2448,10 @@ def _calculate_head_concentrations(layer_head_data_list, num_heads=32):
         # Reshape成24×24
         head_24x24 = head_576_values.reshape(24, 24)
         # 计算集中度
-        try:
-            concentration_result = analyze_heatmap_concentration(head_24x24, top_percentile=3, visualize=False)
-            concentration_index = concentration_result.get('concentration_index', 0.0)
-        except Exception as e:
-            # 如果计算失败，使用原先的方案：对576个像素值求平均
-            concentration_index = np.mean(head_576_values)
+        concentration_result = analyze_heatmap_concentration(head_24x24, top_percentile=3, visualize=False)
+        concentration_index = concentration_result.get('concentration_index', 0.0)
+        # 如果计算失败，使用原先的方案：对576个像素值求平均
+        # concentration_index = np.mean(head_576_values)
         head_concentrations.append(concentration_index)
 
     # 转换为numpy数组 [num_heads]
@@ -3567,18 +3305,14 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     # 如果提供了tokenizer和output_ids，解码对应的token词汇
     token_text = None
     if tokenizer is not None and output_ids is not None:
-        try:
-            # output_ids中不包含input信息，直接使用max_ratio_idx索引
-            if 0 <= max_ratio_idx < output_ids.shape[1]:
-                token_id = output_ids[0, max_ratio_idx].item()
-                token_text = tokenizer.decode([token_id], skip_special_tokens=True).strip()
-                # 清理token文本，移除特殊字符
-                token_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
-                if not token_text:
-                    token_text = None
-        except Exception as e:
-            print(f"  ⚠️  解码token词汇失败: {e}")
-            token_text = None
+        # output_ids中不包含input信息，直接使用max_ratio_idx索引
+        if 0 <= max_ratio_idx < output_ids.shape[1]:
+            token_id = output_ids[0, max_ratio_idx].item()
+            token_text = tokenizer.decode([token_id], skip_special_tokens=True).strip()
+            # 清理token文本，移除特殊字符
+            token_text = token_text.replace('\n', ' ').replace('\r', ' ').strip()
+            if not token_text:
+                token_text = None
 
     # # 在最高点处添加标注
     # if token_text:
@@ -3702,18 +3436,14 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
             token_text_step = None
             token_id_step = None
 
-            try:
-                # output_ids中不包含input信息，直接使用step_idx索引
-                if 0 <= step_idx < output_ids.shape[1]:
-                    token_id_step = int(output_ids[0, step_idx].item())
-                    token_text_step = tokenizer.decode([token_id_step], skip_special_tokens=True).strip()
-                    # 清理token文本，移除特殊字符
-                    token_text_step = token_text_step.replace('\n', ' ').replace('\r', ' ').strip()
-                    if not token_text_step:
-                        token_text_step = None
-            except Exception as e:
-                # 静默处理解码错误，继续处理下一个步骤
-                token_text_step = None
+            # output_ids中不包含input信息，直接使用step_idx索引
+            if 0 <= step_idx < output_ids.shape[1]:
+                token_id_step = int(output_ids[0, step_idx].item())
+                token_text_step = tokenizer.decode([token_id_step], skip_special_tokens=True).strip()
+                # 清理token文本，移除特殊字符
+                token_text_step = token_text_step.replace('\n', ' ').replace('\r', ' ').strip()
+                if not token_text_step:
+                    token_text_step = None
 
             step_ratio_tokens.append({
                 'step': int(step_num),
@@ -3906,14 +3636,15 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
         print(f"\n  [生成每层折线图] 为 {len(selected_layers)} 个目标层生成折线图...")
 
         # 收集物体token信息（用于标注，只标注非幻视词汇）
+        # 构建幻视词汇的node_word集合（用于过滤）
+        hallucinated_node_words = set()
+        if hallucinated_words:
+            for word, node_word in hallucinated_words:
+                hallucinated_node_words.add(node_word)
+
         object_token_steps = set()
         object_token_words = {}  # {step: [word1, word2, ...]}
         if object_tokens_info:
-            # 构建幻视词汇的node_word集合（用于过滤）
-            hallucinated_node_words = set()
-            if hallucinated_words:
-                for word, node_word in hallucinated_words:
-                    hallucinated_node_words.add(node_word)
 
             # 调试信息：打印收集到的物体词汇信息
             print(f"  [调试] 收集物体词汇信息用于标注:")
@@ -4013,61 +3744,194 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
                 label.set_fontweight('bold')
 
             # 标注所有非幻视物理词汇对应的推理步（类似 step_attention_ratio.png 中的标注）
+            # 对于多个连续token组成的词汇，只标注一次，避免重复标注
             if object_token_steps:
                 object_steps_list = sorted(list(object_token_steps))
                 object_steps_plot = [s + 1 for s in object_steps_list]  # 转换为从1开始的步数
                 object_ratios_plot = [layer_ratios[s] for s in object_steps_list]
 
-                # 用绿色标注物体token的点
-                ax_layer.plot(object_steps_plot, object_ratios_plot, 'go', markersize=10, alpha=0.8,
-                            label='Object Tokens', zorder=5)
+                # # 用绿色标注物体token的点
+                # ax_layer.plot(object_steps_plot, object_ratios_plot, 'go', markersize=10, alpha=0.8,
+                #             label='Object Tokens', zorder=5)
 
-                # 为每个物体token点添加词汇标注
-                for i, step_idx in enumerate(object_steps_list):
+                # 构建词汇到token组的映射，用于识别连续token组
+                # word_to_groups: {word: [(group_start, group_end), ...]}
+                word_to_groups = {}
+                if object_tokens_info:
+                    for object_word, obj_info in object_tokens_info.items():
+                        node_word = obj_info.get('node_word', '')
+                        # 只处理非幻视词汇
+                        is_hallucinated = node_word and node_word in hallucinated_node_words
+                        if not is_hallucinated:
+                            token_groups = obj_info.get('token_groups', [])
+                            if token_groups:
+                                word_to_groups[object_word] = token_groups
+                            else:
+                                # 如果没有token_groups，使用token_positions（每个位置作为一个单独的组）
+                                token_positions = obj_info.get('token_positions', [])
+                                if token_positions:
+                                    # 将连续的positions合并为groups
+                                    groups = []
+                                    if len(token_positions) > 0:
+                                        sorted_positions = sorted(token_positions)
+                                        start = sorted_positions[0]
+                                        end = sorted_positions[0]
+                                        for pos in sorted_positions[1:]:
+                                            if pos == end + 1:
+                                                end = pos
+                                            else:
+                                                groups.append((start, end))
+                                                start = pos
+                                                end = pos
+                                        groups.append((start, end))
+                                    word_to_groups[object_word] = groups
+
+                # 收集需要标注的步骤和对应的词汇（每个连续组只标注一次）
+                annotations_to_add = []  # [(step_idx, word_text, ratio_val), ...]
+                annotated_groups = set()  # 记录已经标注过的组，避免重复
+
+                for object_word, groups in word_to_groups.items():
+                    for group_start, group_end in groups:
+                        # 检查这个组是否在有效范围内
+                        if group_start < 0 or group_end >= n_steps:
+                            continue
+
+                        # 计算组的中间位置（用于标注）
+                        group_mid = (group_start + group_end) // 2
+                        # 确保中间位置在有效范围内
+                        group_mid = max(group_start, min(group_mid, group_end))
+
+                        # 检查这个组是否已经被标注过（通过检查中间位置）
+                        group_key = (group_start, group_end, object_word)
+                        if group_key in annotated_groups:
+                            continue
+                        annotated_groups.add(group_key)
+
+                        # 获取中间位置的ratio值
+                        ratio_val = layer_ratios[group_mid]
+
+                        # 构建标注文本
+                        word_text = object_word
+                        if len(word_text) > 30:
+                            word_text = word_text[:27] + '...'
+
+                        annotations_to_add.append((group_mid, word_text, ratio_val))
+
+                # 对标注进行排序（按step_idx）
+                annotations_to_add.sort(key=lambda x: x[0])
+
+                # 智能标注布局算法：避免与折线和其他标注重叠
+                # 获取坐标轴范围，用于计算相对位置
+                xlim = ax_layer.get_xlim()
+                ylim = ax_layer.get_ylim()
+                x_range = xlim[1] - xlim[0]
+                y_range = ylim[1] - ylim[0]
+
+                # 存储已放置的标注位置（使用像素坐标，更简单）
+                # 每个标注记录：(step_idx, offset_x_pixels, offset_y_pixels)
+                placed_annotations_pixels = []
+
+                # 估算标注框的大小（像素）
+                # 假设每个字符约6像素宽，加上padding
+                est_text_width_pixels = len(word_text) * 6 + 20  # 字符数 * 6 + padding
+                est_text_height_pixels = 20  # 字体大小9，加上padding
+
+                # 为每个标注添加词汇标注
+                for i, (step_idx, word_text, ratio_val) in enumerate(annotations_to_add):
                     step_num = step_idx + 1
-                    ratio_val = layer_ratios[step_idx]
-                    words = object_token_words.get(step_idx, [])
 
-                    # 去重并排序，确保一致性
-                    unique_words = sorted(list(set(words)))
+                    # 检查当前位置附近的折线值，判断折线趋势
+                    nearby_indices = [max(0, step_idx - 1), step_idx, min(n_steps - 1, step_idx + 1)]
+                    nearby_ratios = [layer_ratios[idx] for idx in nearby_indices if 0 <= idx < n_steps]
 
-                    # 构建标注文本
-                    if len(unique_words) == 1:
-                        word_text = unique_words[0]
-                    elif len(unique_words) <= 3:
-                        word_text = ', '.join(unique_words)
+                    # 计算局部趋势：如果当前点比周围点高，优先向上标注；否则优先向下
+                    if len(nearby_ratios) > 1:
+                        current_ratio = ratio_val
+                        avg_surrounding = sum(nearby_ratios) / len(nearby_ratios)
+                        is_peak = current_ratio > avg_surrounding
                     else:
-                        # 如果词汇太多，只显示前3个
-                        word_text = ', '.join(unique_words[:3]) + f' (+{len(unique_words)-3})'
+                        is_peak = True  # 默认向上
 
-                    # 限制文本长度，避免过长
-                    if len(word_text) > 30:
-                        word_text = word_text[:27] + '...'
+                    # 根据趋势调整方向优先级：峰值向上标注，谷值向下标注
+                    if is_peak:
+                        # 峰值：优先向上标注（90度），避免与折线重叠
+                        preferred_angles = [90, 45, 135, 0, 180, 270, 315, 225]
+                    else:
+                        # 谷值：优先向下标注（270度），避免与折线重叠
+                        preferred_angles = [270, 225, 315, 0, 180, 90, 45, 135]
 
-                    # 计算偏移角度，避免标注重叠
-                    angle_idx = i % 8  # 8个方向
-                    angles = [45, 90, 135, 180, 225, 270, 315, 0]  # 8个角度（度）
-                    angle = angles[angle_idx]
+                    # 尝试不同的方向和距离，找到不重叠的位置
+                    best_offset_x, best_offset_y = None, None
 
-                    # 根据角度计算偏移距离
-                    offset_distance = 20 + (i % 3) * 5  # 基础偏移20，根据索引增加
-                    angle_rad = np.radians(angle)
-                    offset_x = offset_distance * np.cos(angle_rad)
-                    offset_y = offset_distance * np.sin(angle_rad)
+                    # 尝试不同的偏移距离（从小到大，找到最小可用距离）
+                    for base_distance in [30, 40, 50, 65, 80, 100, 120]:
+                        if best_offset_x is not None:
+                            break
+
+                        # 尝试不同的方向
+                        for angle in preferred_angles:
+                            angle_rad = np.radians(angle)
+                            candidate_offset_x = base_distance * np.cos(angle_rad)
+                            candidate_offset_y = base_distance * np.sin(angle_rad)
+
+                            # 检查是否与其他标注重叠（使用像素坐标）
+                            overlap = False
+
+                            # 计算候选标注的预期位置（像素坐标）
+                            # 使用matplotlib的transform来转换，但这里简化处理
+                            # 估算：假设标注框中心在 (step_num + offset_x转换, ratio_val + offset_y转换)
+
+                            # 简化重叠检测：检查是否与已放置的标注在相近的step位置
+                            # 如果两个标注的step_idx接近（< 3步），且方向相似，可能重叠
+                            for placed_step, placed_ox, placed_oy in placed_annotations_pixels:
+                                step_diff = abs(step_idx - placed_step)
+
+                                # 如果step_idx很接近，检查方向是否相似
+                                if step_diff < 3:
+                                    # 计算两个偏移向量的角度差
+                                    placed_angle = np.degrees(np.arctan2(placed_oy, placed_ox))
+                                    candidate_angle = angle
+                                    angle_diff = abs(candidate_angle - placed_angle)
+                                    if angle_diff > 180:
+                                        angle_diff = 360 - angle_diff
+
+                                    # 如果角度差小于45度，且距离相近，可能重叠
+                                    if angle_diff < 45:
+                                        # 计算两个标注的距离（像素）
+                                        dist = np.sqrt((candidate_offset_x - placed_ox)**2 +
+                                                      (candidate_offset_y - placed_oy)**2)
+                                        # 如果距离小于标注框大小，认为重叠
+                                        if dist < max(est_text_width_pixels, est_text_height_pixels) * 1.5:
+                                            overlap = True
+                                            break
+
+                            if not overlap:
+                                # 找到不重叠的位置
+                                best_offset_x = candidate_offset_x
+                                best_offset_y = candidate_offset_y
+                                break
+
+                    # 如果所有尝试都失败，使用默认位置（向上，较大距离）
+                    if best_offset_x is None:
+                        best_offset_x = 0
+                        best_offset_y = 60  # 向上60像素
 
                     # 添加标注，使用箭头指向点
-                    ax_layer.annotate(word_text,
-                                    xy=(step_num, ratio_val),
-                                    xytext=(offset_x, offset_y), textcoords='offset points',
-                                    fontsize=9, alpha=0.9, fontweight='bold',
-                                    bbox=dict(boxstyle='round,pad=0.4', facecolor='lightgreen',
-                                            alpha=0.8, edgecolor='green', linewidth=1.5),
-                                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.2',
-                                                  color='green', alpha=0.6, lw=1.5),
-                                    ha='center', va='center')
+                    # ax_layer.annotate(word_text,
+                    #                 xy=(step_num, ratio_val),
+                    #                 xytext=(best_offset_x, best_offset_y), textcoords='offset points',
+                    #                 fontsize=9, alpha=0.9, fontweight='bold',
+                    #                 bbox=dict(boxstyle='round,pad=0.4', facecolor='lightgreen',
+                    #                         alpha=0.8, edgecolor='green', linewidth=1.5),
+                    #                 arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.2',
+                    #                               color='green', alpha=0.6, lw=1.5),
+                    #                 ha='center', va='center')
+
+                    # 记录已放置的标注位置
+                    placed_annotations_pixels.append((step_idx, best_offset_x, best_offset_y))
 
                 # 添加图例
-                ax_layer.legend(loc='best', fontsize=10)
+                # ax_layer.legend(loc='best', fontsize=10)
 
             plt.tight_layout()
 
@@ -4141,11 +4005,8 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     import shutil
     image_filename = os.path.basename(image_file)
     copied_image_path = os.path.join(output_dir, image_filename)
-    try:
-        shutil.copy2(image_file, copied_image_path)
-        print(f"  ✓ 原图已拷贝到: {os.path.basename(copied_image_path)}")
-    except Exception as e:
-        print(f"  ⚠️  拷贝原图失败: {e}")
+    shutil.copy2(image_file, copied_image_path)
+    print(f"  ✓ 原图已拷贝到: {os.path.basename(copied_image_path)}")
 
     # 额外保存一张resize成正方形的原图
     if isinstance(image, np.ndarray):
@@ -4158,11 +4019,8 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     image_resized = image_pil.resize((display_size, display_size), Image.Resampling.LANCZOS)
     # 保存resize后的原图
     resized_image_path = os.path.join(output_dir, "original_image_resized_square.png")
-    try:
-        image_resized.save(resized_image_path)
-        print(f"  ✓ Resize成正方形的原图已保存: {os.path.basename(resized_image_path)}")
-    except Exception as e:
-        print(f"  ⚠️  保存resize后的原图失败: {e}")
+    image_resized.save(resized_image_path)
+    print(f"  ✓ Resize成正方形的原图已保存: {os.path.basename(resized_image_path)}")
 
     # 确定目标层
     selected_layers, num_total_layers = _determine_target_layers(model, target_layers)
@@ -4507,56 +4365,21 @@ def eval_model(args):
         if not os.path.exists(image_id_list_file):
             raise FileNotFoundError(f"文件不存在: {image_id_list_file}")
 
-        # 检测文件格式: 先尝试解析为 JSON
         with open(image_id_list_file, 'r', encoding='utf-8') as f:
             content = f.read().strip()
 
+        # 尝试解析为 JSON
         if content.startswith('[') and content.endswith(']'):
-            # JSON 数组格式
-            cases = json.loads(content)
-            # 检查是否为 case 格式（包含 question_id, image, text）
-            if cases and isinstance(cases[0], dict) and 'question_id' in cases[0] and 'image' in cases[0] and 'text' in cases[0]:
-                # 这是 case 格式的 JSON 文件
-                use_case_format = True
-                test_cases = load_test_cases_from_json(image_id_list_file, args.coco_root)
-                print(f"✓ 从 JSON 文件读取了 {len(test_cases)} 个测试 case")
-            else:
-                # 这是简单的图像文件名列表
-                image_names = cases
-                image_id_list = []
-                for name in image_names:
-                    if isinstance(name, str):
-                        # 从文件名提取 image_id
-                        # 格式: "COCO_val2014_000000001171.jpg" 或 "COCO_val2014_000000001171"
-                        if name.endswith('.jpg'):
-                            name = name[:-4]  # 移除 .jpg 后缀
-                        # 提取最后的数字部分
-                        parts = name.split('_')
-                        if len(parts) > 0:
-                            image_id = int(parts[-1])
-                            image_id_list.append(image_id)
-                    elif isinstance(name, int):
-                        # 直接是数字 ID
-                        image_id_list.append(name)
-                    else:
-                        print(f"⚠️  警告: 无法处理的数据类型: {type(name)}, 值: {name}")
-                print(f"✓ 从 JSON 文件读取了 {len(image_id_list)} 个图像 ID")
-
+            # JSON 数组格式，统一使用 load_test_cases_from_json 处理
+            # 该函数支持两种格式：
+            # 1. 对象数组格式（包含 question_id, image, text, label）
+            # 2. 字符串数组格式（图像文件名列表）
+            test_cases = load_test_cases_from_json(image_id_list_file, args.coco_root)
+            use_case_format = True
+            print(f"✓ 从 JSON 文件读取了 {len(test_cases)} 个测试 case")
         else:
-            # 文本文件格式(每行一个 ID)
-            with open(image_id_list_file, 'r', encoding='utf-8') as f:
-                image_id_list = []
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    # 尝试解析为整数
-                    try:
-                        image_id = int(line)
-                        image_id_list.append(image_id)
-                    except ValueError:
-                        print(f"⚠️  警告: 无法解析为整数: {line}")
-            print(f"✓ 从文本文件读取了 {len(image_id_list)} 个图像 ID")
+            # 不是 JSON 数组格式，作为文本文件处理
+            raise ValueError("Not JSON array format")
 
     # 如果指定了单个图像ID, 使用该ID
     if args.single_image_id is not None:
@@ -4766,32 +4589,23 @@ def eval_model(args):
             # 获取CHAIR评估信息（如果chair_evaluator可用）
             chair_info = {}
             if chair_evaluator is not None:
-                try:
-                    # 获取该图像的GT对象
-                    gt_objects = list(chair_evaluator.imid_to_objects.get(image_id, []))
+                # 获取该图像的GT对象
+                gt_objects = list(chair_evaluator.imid_to_objects.get(image_id, []))
 
-                    # 获取生成描述中的对象词汇
-                    words, node_words, idxs, raw_words = chair_evaluator.caption_to_words(outputs)
+                # 获取生成描述中的对象词汇
+                words, node_words, idxs, raw_words = chair_evaluator.caption_to_words(outputs)
 
-                    # 识别幻视词汇
-                    hallucinated_words = []
-                    for word, node_word, idx in zip(words, node_words, idxs):
-                        if node_word not in gt_objects:
-                            hallucinated_words.append((word, node_word))
+                # 识别幻视词汇
+                hallucinated_words = []
+                for word, node_word, idx in zip(words, node_words, idxs):
+                    if node_word not in gt_objects:
+                        hallucinated_words.append((word, node_word))
 
-                    chair_info = {
-                        'mscoco_gt_words': sorted(gt_objects),
-                        'mscoco_generated_words': list(node_words),
-                        'mscoco_hallucinated_words': hallucinated_words
-                    }
-                except Exception as e:
-                    if verbose:
-                        print(f"  ⚠️  获取CHAIR评估信息失败: {e}")
-                    chair_info = {
-                        'mscoco_gt_words': [],
-                        'mscoco_generated_words': [],
-                        'mscoco_hallucinated_words': []
-                    }
+                chair_info = {
+                    'mscoco_gt_words': sorted(gt_objects),
+                    'mscoco_generated_words': list(node_words),
+                    'mscoco_hallucinated_words': hallucinated_words
+                }
             else:
                 chair_info = {
                     'mscoco_gt_words': [],
@@ -4837,18 +4651,14 @@ def eval_model(args):
 
             # 创建空文件
             marker_file = os.path.join(image_output_dir, marker_filename)
-            try:
-                with open(marker_file, 'w', encoding='utf-8') as f:
-                    pass  # 创建空文件
-                if verbose:
-                    print(f"  ✓ 幻视词汇标记文件已创建: {os.path.basename(marker_file)}")
-                    if hallucinated_words:
-                        print(f"     - 幻视词汇: {', '.join([node_word for _, node_word in hallucinated_words])}")
-                    else:
-                        print(f"     - 无幻视词汇")
-            except Exception as e:
-                if verbose:
-                    print(f"  ⚠️  创建幻视词汇标记文件失败: {e}")
+            with open(marker_file, 'w', encoding='utf-8') as f:
+                pass  # 创建空文件
+            if verbose:
+                print(f"  ✓ 幻视词汇标记文件已创建: {os.path.basename(marker_file)}")
+                if hallucinated_words:
+                    print(f"     - 幻视词汇: {', '.join([node_word for _, node_word in hallucinated_words])}")
+                else:
+                    print(f"     - 无幻视词汇")
 
             if object_tokens_info:
                 print(f"\n  [物体识别] 找到 {len(object_tokens_info)} 个不同物体名字的词汇(可能是同一个物体不同的描述方式):")
