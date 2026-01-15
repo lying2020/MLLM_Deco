@@ -836,8 +836,10 @@ def process_case_chair(
         print(f"    - 物理词汇: '{word}' (node: '{node_word}') [{word_type}] -> 步骤: [{steps_str}] -> tokens: [{tokens_str}] (仅使用第一次出现)")
 
     # 打印汇总信息
-    print(f"  - Grounded物理词汇 ({len(grounded_words)}个): {', '.join([f\"'{w}'\" for w in grounded_words]) if grounded_words else '无'}")
-    print(f"  - Hallucinated物理词汇 ({len(hallucinated_words)}个): {', '.join([f\"'{w}'\" for w in hallucinated_words]) if hallucinated_words else '无'}")
+    grounded_str = ', '.join([f"'{w}'" for w in grounded_words]) if grounded_words else '无'
+    hallucinated_str = ', '.join([f"'{w}'" for w in hallucinated_words]) if hallucinated_words else '无'
+    print(f"  - Grounded物理词汇 ({len(grounded_words)}个): {grounded_str}")
+    print(f"  - Hallucinated物理词汇 ({len(hallucinated_words)}个): {hallucinated_str}")
 
     # 构建H（幻觉候选词表）= COCO对象类别词汇表
     from eval_tool.chair import synonyms_txt
@@ -1147,7 +1149,7 @@ def main():
 
     if args.train_file is None:
         train_dir = Path(__file__).parent
-        args.train_file = os.path.join(train_dir, f"coco_train_10.json")
+        args.train_file = os.path.join(train_dir, f"coco_train_2000.json")
 
     # 加载训练cases
     print("\n[1/5] 加载训练cases...")
