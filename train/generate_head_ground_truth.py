@@ -43,14 +43,14 @@ from transformers import set_seed
 
 
 # SPP 参数
-ALPHA = 2.0  # 温度/尺度参数
+ALPHA = 1.0  # 温度/尺度参数
 BETA = 0.0   # 偏置参数
 TOP_K = 20   # 用于构建候选池的top-K值
 
 
-def sigmoid(x):
-    """Sigmoid函数"""
-    return 1.0 / (1.0 + np.exp(-x))
+def tanh(x):
+    """Tanh函数"""
+    return np.tanh(x)
 
 
 def load_image(image_file):
@@ -516,8 +516,8 @@ def process_case_pope(
             s_u = delta_log_p_minus - delta_log_p_plus
 
             # 计算SPP输出g（公式D1）
-            # g_u^(l,n) = σ(α * s_u^(l,n) + β)
-            g_u = sigmoid(ALPHA * s_u + BETA)
+            # g_u^(l,n) = tanh(α * s_u^(l,n) + β)
+            g_u = tanh(ALPHA * s_u + BETA)
 
             # 保存真值对
             pair = {
@@ -786,18 +786,44 @@ def process_case_chair(
                                 token_positions.append(token_idx)
 
         # 将token位置转换为step索引（token_idx 就是 step_idx）
-        # 对于相同的物理词汇，只保留第一次出现的token位置（最小的token_idx对应的token组）
+        # 对于相同的物理词汇，只保留第一次出现的第一个组成token（只取第一个token，不取整个token组）
         if matched_ranges:
             # 找到第一次出现的匹配范围（最小的start_idx）
             first_range = min(matched_ranges, key=lambda x: x[0])
             first_start, first_end = first_range
 
-            # 只使用第一次出现的token位置
-            for step_idx in range(first_start, first_end + 1):
-                if step_idx not in physical_word_to_steps[word]:
-                    physical_word_to_steps[word].append(step_idx)
-                # 标记每个步骤对应的完整物理词汇
-                step_to_physical_word[step_idx] = word
+            # 只使用第一次出现的第一个组成token（只取first_start，不取整个范围）
+            step_idx = first_start
+            if step_idx not in physical_word_to_steps[word]:
+                physical_word_to_steps[word].append(step_idx)
+            # 标记该步骤对应的完整物理词汇
+            step_to_physical_word[step_idx] = word
+
+    # 对于CHAIR类型，限制物理词汇数量：最多使用6个非重复的词汇
+    # 这样可以保持POPE和CHAIR类型的case生成的真值对数量级相同
+    MAX_PHYSICAL_WORDS_FOR_CHAIR = 6
+    if len(physical_word_to_steps) > MAX_PHYSICAL_WORDS_FOR_CHAIR:
+        # 按step_idx排序，优先选择较早出现的物理词汇
+        word_step_pairs = [(word, steps[0]) for word, steps in physical_word_to_steps.items() if steps]
+        word_step_pairs.sort(key=lambda x: x[1])  # 按step_idx排序
+
+        # 只保留前MAX_PHYSICAL_WORDS_FOR_CHAIR个词汇
+        selected_words = [word for word, _ in word_step_pairs[:MAX_PHYSICAL_WORDS_FOR_CHAIR]]
+
+        # 更新physical_word_to_steps和step_to_physical_word，只保留选中的词汇
+        physical_word_to_steps_filtered = {}
+        step_to_physical_word_filtered = {}
+        for word in selected_words:
+            if word in physical_word_to_steps:
+                steps = physical_word_to_steps[word]
+                physical_word_to_steps_filtered[word] = steps
+                for step_idx in steps:
+                    step_to_physical_word_filtered[step_idx] = word
+
+        physical_word_to_steps = physical_word_to_steps_filtered
+        step_to_physical_word = step_to_physical_word_filtered
+
+        print(f"  ⚠️  物理词汇数量超过限制，已筛选为前 {MAX_PHYSICAL_WORDS_FOR_CHAIR} 个词汇（按出现顺序）")
 
     # 步骤3: 识别每个生成步骤的token类型（Grounded/Hallucinated/Neutral）
     # 根据截图规则：
@@ -993,6 +1019,11 @@ def process_case_chair(
                     continue
                 current_token_ids = get_vocab_tokens_for_words(tokenizer, [current_word])
 
+                # 步骤4: 根据简化规则构建Bu^+和Bu^-
+                # 规则：
+                # - 如果当前推理步是真实词汇：Bu^+ = {当前真实词汇}，Bu^- = top-K中的所有幻视词汇
+                # - 如果当前推理步是幻视词汇：Bu^- = {当前幻视词汇}，Bu^+ = top-K中的所有真实词汇
+
                 # 获取top-K候选池 Ct（针对当前head的logits）
                 top_k_logits, top_k_indices = torch.topk(logits_with_head[0], k=TOP_K)
                 Ct_tokens = set(top_k_indices.cpu().numpy().tolist())
@@ -1035,36 +1066,38 @@ def process_case_chair(
                             Ct_valid_physical_tokens.add(token_id)
                             break
 
-                    # 如果以上都不满足，该token无法映射到完整物理词汇，当做中性词汇（忽略）
-
                 # 从有效的物理词汇中，分离出真实实例和幻视词汇
                 Ct_grounded_tokens = Ct_valid_physical_tokens & G_tokens  # top-K中的真实实例物理词汇
                 Ct_hallucinated_tokens = Ct_valid_physical_tokens - G_tokens  # top-K中的非真实实例物理词汇（幻视词汇）
-                # 注意：无法映射到完整物理词汇的token被忽略（当做中性词汇）
 
-                # 初始化Bu^+和Bu^-（每个head的Bu^-可能不同，因为top-K不同）
+                # 初始化Bu^+和Bu^-
                 step_bu_plus_tokens = set()
                 step_bu_minus_tokens = set()
 
                 # 根据token类型构建Bu^+和Bu^-
                 if current_token_type == 'grounded':
-                    # Section A: 如果yt是Grounded内容词
-                    # Bu^+ = {yt} ∪ (Ct ∩ G) = 当前词 + top-K中的其他真实实例物理词汇
+                    # 如果yt是Grounded（真实实例），例如"dog"
+                    # Bu^+ = {yt}，只包含当前真实词汇
                     step_bu_plus_tokens = current_token_ids.copy()
-                    step_bu_plus_tokens.update(Ct_grounded_tokens)
 
-                    # Bu^- = Ct ∩ H - G = top-K中的非真实实例物理词汇（该head的幻视词汇）
+                    # Bu^- = top-K中的所有幻视词汇
                     step_bu_minus_tokens = Ct_hallucinated_tokens.copy()
-                    # 注意：当前词yt是Grounded，所以不在Ct_hallucinated_tokens中，不需要排除
+
+                    # 如果top-K中没有幻视词汇，跳过（无法构建有效的对比）
+                    if len(step_bu_minus_tokens) == 0:
+                        continue
 
                 elif current_token_type == 'hallucinated':
-                    # Section B: 如果yt是Hallucinated内容词
-                    # Bu^- = {yt} ∪ (Ct ∩ H - G) = 当前词 + top-K中的其他非真实实例物理词汇（该head的幻视词汇）
+                    # 如果yt是Hallucinated（幻视），例如"cat"
+                    # Bu^- = {yt}，只包含当前幻视词汇
                     step_bu_minus_tokens = current_token_ids.copy()
-                    step_bu_minus_tokens.update(Ct_hallucinated_tokens)
 
-                    # Bu^+ = Ct ∩ G = top-K中的真实实例物理词汇
+                    # Bu^+ = top-K中的所有真实词汇
                     step_bu_plus_tokens = Ct_grounded_tokens.copy()
+
+                    # 如果top-K中没有真实实例词汇，跳过（无法构建有效的对比）
+                    if len(step_bu_plus_tokens) == 0:
+                        continue
                 else:
                     # Neutral词汇应该已经被过滤掉了
                     continue
@@ -1072,7 +1105,7 @@ def process_case_chair(
                 # 确保Bu^+和Bu^-不重叠（虽然理论上不应该重叠，但为了安全）
                 step_bu_minus_tokens = step_bu_minus_tokens - step_bu_plus_tokens
 
-                # 如果Bu^+或Bu^-为空，跳过（根据截图，可以mask掉或使用backoff）
+                # 如果Bu^+或Bu^-为空，跳过
                 if len(step_bu_plus_tokens) == 0 or len(step_bu_minus_tokens) == 0:
                     continue
 
@@ -1089,7 +1122,7 @@ def process_case_chair(
                 s_u = delta_log_p_minus - delta_log_p_plus
 
                 # 计算SPP输出g
-                g_u = sigmoid(ALPHA * s_u + BETA)
+                g_u = tanh(ALPHA * s_u + BETA)
 
                 # 保存真值对
                 pair = {
@@ -1149,7 +1182,7 @@ def main():
 
     if args.train_file is None:
         train_dir = Path(__file__).parent
-        args.train_file = os.path.join(train_dir, f"coco_train_2000.json")
+        args.train_file = os.path.join(train_dir, f"coco_train_500.json")
 
     # 加载训练cases
     print("\n[1/5] 加载训练cases...")
