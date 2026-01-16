@@ -174,35 +174,67 @@ H_{e,t}^{(l,n)} \approx \frac{h_{e,t}^{(l)} - h_{e,t}^{(l-1)}}{H}
   2. 创建只包含该head的concat向量
   3. 应用 `o_proj` 得到 $H_{e,t}^{(l,n)}$
 
-### 5.2 CHAIR基准（使用近似方法）
+### 5.2 CHAIR基准（使用理想方法 + Fallback）
 
-⚠️ **使用hidden states差值近似head贡献**
-- 位置：`process_case_chair()`（第976-986行）
-- 原因：`model.generate()` 过程中hook可能无法触发
+✅ **已实现方案1：手动调用forward来触发hook**
+- 位置：`process_case_chair()`（第955-1020行）
+- 实现方式：
+  1. 先生成完整文本（用于识别物理词汇和步骤）
+  2. 对于每个目标生成步骤，手动调用 `model.get_model().forward()` 来触发hook
+  3. 从hook中提取精确的head输出（理想方法）
+  4. 如果hook未捕获到，使用fallback近似方法
+
+**实现细节**：
+```python
+# 构建到当前步骤为止的完整token序列
+current_sequence = torch.cat([
+    input_ids_processed[0],  # 原始input_ids
+    torch.tensor(generated_token_ids[:step_idx+1], device=device, dtype=torch.long)
+], dim=0).unsqueeze(0)
+
+# 清空extractor缓存，准备捕获新的head输出
+extractor.clear()
+
+# 手动调用forward来触发hook
+outputs = model.get_model().forward(
+    input_ids=current_sequence,
+    position_ids=current_position_ids,
+    attention_mask=current_attention_mask,
+    output_hidden_states=True,
+    return_dict=True
+)
+
+# 从hook中获取精确的head输出
+head_output = extractor.get_head_output(layer_idx, head_idx)
+head_raw_output = extractor.get_head_raw_output(layer_idx, head_idx)
+
+if head_output is None or head_raw_output is None:
+    # Fallback: 使用hidden states差值近似
+    head_contribution_approx = (h_after_all_heads - h_before) / num_heads
+else:
+    # 使用精确的head输出（理想方法）
+    h_with_head = h_before + head_output_last
+```
+
+**Fallback方法**（当hook未捕获到时）：
+- 使用hidden states差值近似head贡献
 - 近似公式：$H_{e,t}^{(l,n)} \approx \frac{h_{e,t}^{(l)} - h_{e,t}^{(l-1)}}{H}$
 
-## 6. 改进建议
+## 6. 改进历史
 
-### 6.1 为什么CHAIR不能使用理想方法？
+### 6.1 为什么CHAIR之前不能使用理想方法？
 
 在 `process_case_chair()` 中，我们使用 `model.generate()` 来生成文本，而hook是在 `model.forward()` 时触发的。`generate()` 的内部实现可能：
 - 使用缓存的hidden states
 - 使用不同的forward路径
 - 不触发我们注册的hook
 
-### 6.2 可能的改进方案
+### 6.2 已实现的改进方案
 
-**方案1**：尝试在 `generate()` 过程中注册hook
-- 可能仍然无法触发（取决于模型实现）
-
-**方案2**：使用 `model.forward()` 逐步生成
-- 需要手动实现生成循环
-- 可以确保hook被触发
-- 但实现复杂度较高
-
-**方案3**：接受近似方法
-- 对于CHAIR基准，近似方法可能足够
-- 因为主要关注的是相对贡献，而不是绝对精确的值
+**方案1**：✅ **已实现** - 手动调用forward来触发hook
+- 对每个目标生成步骤，手动构建token序列并调用 `forward()`
+- Hook可以正常工作，能够捕获每个head的输出
+- 如果hook未捕获到，使用fallback近似方法
 
 ## 7. 代码位置索引
 
@@ -210,13 +242,16 @@ H_{e,t}^{(l,n)} \approx \frac{h_{e,t}^{(l)} - h_{e,t}^{(l-1)}}{H}
 |------|------|----------|
 | Hook实现（理想方法） | 第219-295行 | 理想方法 ✅ |
 | POPE使用hook | 第472-504行 | 理想方法 ✅ |
-| CHAIR使用近似 | 第976-986行 | 近似方法 ⚠️ |
+| CHAIR使用理想方法 | 第955-1020行 | 理想方法 ✅ (带Fallback) |
 | Hook注册 | 第297-312行 | - |
 | Hook移除 | 第314-318行 | - |
 
 ## 8. 总结
 
 1. **POPE基准**：使用**理想方法**（Hook机制），按照真实的attention层结构提取head输出
-2. **CHAIR基准**：使用**近似方法**（hidden states差值），因为`generate()`过程中hook可能无法触发
-3. **test_chair_test.py**：没有类似的单个head输出提取实现
-4. **建议**：对于CHAIR基准，如果精度要求高，可以考虑方案2（手动实现生成循环），但当前近似方法可能已经足够
+2. **CHAIR基准**：使用**理想方法**（手动调用forward触发hook），如果hook未捕获到则使用fallback近似方法
+3. **实现优势**：
+   - CHAIR现在也使用理想方法，与POPE保持一致
+   - 通过手动调用forward，确保hook能够正常触发
+   - 提供fallback机制，保证代码的健壮性
+4. **性能考虑**：手动调用forward会增加计算开销，但能够获得更精确的head输出

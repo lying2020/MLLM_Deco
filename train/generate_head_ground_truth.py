@@ -41,6 +41,10 @@ import requests
 from io import BytesIO
 from transformers import set_seed
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+coco_train_json_dir = os.path.join(current_dir, "coco_train_json")
+os.makedirs(coco_train_json_dir, exist_ok=True)
+
 
 # SPP 参数
 ALPHA = 1.0  # 温度/尺度参数
@@ -928,78 +932,146 @@ def process_case_chair(
     lang_model = model.get_model()
     norm_layer = lang_model.norm if hasattr(lang_model, 'norm') else None
 
+    # 准备输入（用于后续手动调用forward）
+    # 我们需要使用prepare_inputs_labels_for_multimodal来处理输入
+    (
+        input_ids_processed,
+        position_ids,
+        attention_mask,
+        _,
+        inputs_embeds,
+        _
+    ) = model.prepare_inputs_labels_for_multimodal(
+        input_ids,
+        None,
+        None,
+        None,
+        None,
+        images
+    )
+
+    # 获取embedding层（如果需要将新生成的token IDs转换为embeddings）
+    lang_model = model.get_model()
+    embedding_layer = lang_model.embed_tokens if hasattr(lang_model, 'embed_tokens') else None
+
     # 遍历每个目标生成步骤
     for step_idx in target_steps:
         # 检查步骤是否有效
-        if step_idx >= len(all_step_hidden_states):
+        if step_idx >= len(generated_token_ids):
             continue
 
-        step_hidden_states = all_step_hidden_states[step_idx]
-        if step_hidden_states is None:
-            continue
+        # 方案1：尝试使用理想方法 - 手动调用forward来触发hook
+        # 构建到当前步骤为止的完整token序列
+        # step_idx=0 表示生成第1个token，所以需要 input_ids + generated_token_ids[0:1]
+        # step_idx=1 表示生成第2个token，所以需要 input_ids + generated_token_ids[0:2]
+        # 注意：generated_token_ids[step_idx] 是当前步骤生成的token
 
-        # 过滤后的step_hidden_states结构: (layer_0, layer_1, ..., layer_31)
-        # step_hidden_states[0] = layer_0的输出（经过layer_0的所有处理）
-        # step_hidden_states[1] = layer_1的输出（经过layer_1的所有处理）
-        # ...
-        # step_hidden_states[layer_idx] = layer_idx的输出（经过layer_idx的所有处理）
+        # 清空extractor缓存，准备捕获新的head输出
+        extractor.clear()
+
+        # 构建当前步骤的完整序列
+        # 如果inputs_embeds不为None，说明原始输入已经被转换为embeddings
+        # 我们需要将新生成的token IDs转换为embeddings并拼接
+        if inputs_embeds is not None:
+            # 原始输入已经是embeddings
+            # 将新生成的token IDs转换为embeddings
+            new_token_ids = torch.tensor(generated_token_ids[:step_idx+1], device=device, dtype=torch.long)
+            if embedding_layer is not None:
+                new_token_embeds = embedding_layer(new_token_ids)  # [step_idx+1, hidden_size]
+            else:
+                # 如果没有embedding层，使用零向量（不应该发生）
+                hidden_size = inputs_embeds.shape[-1]
+                new_token_embeds = torch.zeros((step_idx+1, hidden_size), device=device, dtype=inputs_embeds.dtype)
+
+            # 拼接原始embeddings和新生成的token embeddings
+            current_inputs_embeds = torch.cat([
+                inputs_embeds[0],  # [original_seq_len, hidden_size]
+                new_token_embeds   # [step_idx+1, hidden_size]
+            ], dim=0).unsqueeze(0)  # [1, total_seq_len, hidden_size]
+
+            current_input_ids = None
+        else:
+            # 原始输入是token IDs
+            current_input_ids = torch.cat([
+                input_ids_processed[0],  # 原始input_ids
+                torch.tensor(generated_token_ids[:step_idx+1], device=device, dtype=torch.long)  # 已生成的tokens（包括当前步骤）
+            ], dim=0).unsqueeze(0)  # [1, seq_len]
+            current_inputs_embeds = None
+
+        # 手动调用forward来触发hook
+        with torch.no_grad():
+            # 计算position_ids和attention_mask
+            if current_inputs_embeds is not None:
+                current_seq_len = current_inputs_embeds.shape[1]
+            else:
+                current_seq_len = current_input_ids.shape[1]
+            current_position_ids = torch.arange(current_seq_len, device=device, dtype=torch.long).unsqueeze(0)
+            current_attention_mask = torch.ones((1, current_seq_len), device=device, dtype=torch.long)
+
+            # 调用forward（hook会自动触发）
+            outputs = model.get_model().forward(
+                input_ids=current_input_ids,
+                inputs_embeds=current_inputs_embeds,
+                position_ids=current_position_ids,
+                attention_mask=current_attention_mask,
+                output_hidden_states=True,
+                return_dict=True
+            )
+
+        # 获取hidden states（用于获取h_before）
+        hidden_states = outputs.hidden_states  # 包含所有层的hidden states
+
+        # 获取最后一个token的位置（用于生成预测）
+        seq_len = hidden_states[0].shape[1]
+        last_token_idx = seq_len - 1
 
         # 遍历每一层
         for layer_idx in range(num_layers):
-            # 检查索引有效性
-            if layer_idx >= len(step_hidden_states):
-                continue
-
-            # 获取该层之后的hidden state（经过该层所有head处理后的输出）
-            h_after_all_heads = step_hidden_states[layer_idx]  # [batch, seq_len, hidden_size]
-            # 在生成过程中，每个步骤只生成一个新token，所以seq_len=1
-            # 但我们取最后一个token（索引-1）以确保正确
-            h_after_all_heads = h_after_all_heads[:, -1:, :]
-
-            # 获取该层之前的hidden state（该层的输入）
-            if layer_idx == 0:
-                # 第0层之前是embedding层，需要从原始hidden states中获取
-                # 注意：我们需要从 all_hidden_states_raw 中获取embedding层
-                step_hidden_states_raw = all_hidden_states_raw[step_idx] if step_idx < len(all_hidden_states_raw) else None
-                if step_hidden_states_raw is not None and isinstance(step_hidden_states_raw, (tuple, list)) and len(step_hidden_states_raw) > 0:
-                    h_before = step_hidden_states_raw[0][:, -1:, :]  # embedding层的最后一个token
+            # 获取该层之前的hidden state（h_t^(l-1)）
+            h_before = extractor.get_hidden_state_before(layer_idx)
+            if h_before is None:
+                # 如果没有hook数据，使用hidden_states
+                if layer_idx == 0:
+                    h_before = hidden_states[0][:, last_token_idx:last_token_idx+1, :]
                 else:
-                    continue
+                    h_before = hidden_states[layer_idx][:, last_token_idx:last_token_idx+1, :]
             else:
-                # 其他层之前是前一层的输出（即前一层的hidden state）
-                # layer_idx的输入 = layer_idx-1的输出 = step_hidden_states[layer_idx-1]
-                if layer_idx > 0 and (layer_idx - 1) < len(step_hidden_states):
-                    h_before = step_hidden_states[layer_idx - 1][:, -1:, :]
-                else:
-                    continue
+                h_before = h_before[:, last_token_idx:last_token_idx+1, :]
+
+            # 计算未加入head的logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
+            h_before_processed = h_before.squeeze(1)  # [batch, hidden_size]
+            if norm_layer is not None:
+                h_before_processed = norm_layer(h_before_processed.to(device))
+            else:
+                h_before_processed = h_before_processed.to(device)
+            logits_before = lm_head(h_before_processed)  # [batch, vocab_size]
 
             # 遍历每个head
             for head_idx in range(num_heads):
-                # 获取该head的输出（需要从hook中获取，但hook可能没有捕获到这个步骤）
-                # 由于hook是在forward pass时注册的，而generate过程中可能不会触发hook
-                # 我们需要使用近似方法：计算head的贡献
+                # 尝试从hook中获取精确的head输出（理想方法）
+                head_output = extractor.get_head_output(layer_idx, head_idx)
+                head_raw_output = extractor.get_head_raw_output(layer_idx, head_idx)
 
-                # 方法：使用hidden states的差值来近似head的贡献
-                # h_after_all_heads - h_before 是所有head的总贡献
-                # 单个head的贡献 = (h_after_all_heads - h_before) / num_heads
-                head_contribution_approx = (h_after_all_heads - h_before) / num_heads
-                h_with_head = h_before + head_contribution_approx
-
-                # 对于head_raw_vector，我们无法直接从hidden states中提取
-                # 使用零向量作为占位符（或者可以尝试从h_after_all_heads中提取部分维度）
-                head_raw_vector = None
-                head_dim = model.config.hidden_size // num_heads
-
-                # 计算logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
-                # 处理 h_before
-                h_before_processed = h_before.squeeze(1)  # [batch, hidden_size]
-                if norm_layer is not None:
-                    h_before_processed = norm_layer(h_before_processed.to(device))
+                if head_output is None or head_raw_output is None:
+                    # Hook没有捕获到，使用fallback方法：从hidden states差值近似
+                    # 获取该层之后的hidden state（经过该层所有head处理后的输出）
+                    h_after_all_heads = hidden_states[layer_idx + 1][:, last_token_idx:last_token_idx+1, :]
+                    # 使用hidden states的差值来近似head的贡献
+                    head_contribution_approx = (h_after_all_heads - h_before) / num_heads
+                    h_with_head = h_before + head_contribution_approx
+                    # 无法获取原始head输出，使用零向量
+                    head_raw_vector = None
+                    head_dim = model.config.hidden_size // num_heads
                 else:
-                    h_before_processed = h_before_processed.to(device)
-                logits_before = lm_head(h_before_processed)
+                    # 使用精确的head输出（理想方法）
+                    head_output_last = head_output[:, last_token_idx:last_token_idx+1, :]
+                    h_with_head = h_before + head_output_last
 
-                # 处理 h_with_head
+                    # 提取最后一个token的原始head向量（用于训练linear probe）
+                    head_raw_vector = head_raw_output[:, last_token_idx, :].cpu().numpy()  # [head_dim]
+                    head_dim = model.config.hidden_size // num_heads
+
+                # 计算加入该head后的logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
                 h_with_head_processed = h_with_head.squeeze(1)  # [batch, hidden_size]
                 if norm_layer is not None:
                     h_with_head_processed = norm_layer(h_with_head_processed.to(device))
@@ -1181,8 +1253,7 @@ def main():
     print("=" * 80)
 
     if args.train_file is None:
-        train_dir = Path(__file__).parent
-        args.train_file = os.path.join(train_dir, f"coco_train_500.json")
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_500.json")
 
     # 加载训练cases
     print("\n[1/5] 加载训练cases...")

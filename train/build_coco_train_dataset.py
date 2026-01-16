@@ -24,6 +24,9 @@ if project_root not in sys.path:
 
 import project as project
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+coco_train_json_dir = os.path.join(current_dir, "coco_train_json")
+os.makedirs(coco_train_json_dir, exist_ok=True)
 
 # COCO 80 个类别名称（用于生成 POPE 问题）
 COCO_CATEGORIES = [
@@ -363,10 +366,10 @@ def main():
                        help="COCO 数据集根目录")
     parser.add_argument("--exclude-file", type=str, default="pope_coco/coco_baseline_500.json",
                        help="需要排除的图片列表文件")
-    parser.add_argument("--num-images", type=int, default=500,
+    parser.add_argument("--num-images", type=int, default=200,
                        help="需要选择的图片数量")
     parser.add_argument("--output-file", type=str, default=None,
-                       help="输出 JSON 文件路径（默认: train/coco_train_2000.json）")
+                       help="输出 JSON 文件路径（默认: coco_train_json/coco_train_2000.json）")
     parser.add_argument("--seed", type=int, default=42,
                        help="随机种子")
 
@@ -374,8 +377,7 @@ def main():
 
     # 设置默认输出文件路径
     if args.output_file is None:
-        train_dir = Path(__file__).parent
-        args.output_file = os.path.join(train_dir, f"coco_train_{args.num_images}.json")
+        args.output_file = os.path.join(coco_train_json_dir, f"coco_train_{args.num_images}.json")
 
     # 设置随机种子
     random.seed(args.seed)
