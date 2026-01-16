@@ -214,26 +214,70 @@ class HeadOutputExtractor:
         """创建attention pre-hook来获取输入hidden_states"""
         def attn_pre_hook(module, input_tuple):
             # input_tuple是forward的参数，第一个是hidden_states
+            # 结构应该是: (hidden_states, attention_mask, position_ids, past_key_value, output_attentions, use_cache)
+            hidden_states = None
+
             if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                hidden_states = input_tuple[0]
-                if isinstance(hidden_states, torch.Tensor):
-                    self.hidden_states_before[layer_idx] = hidden_states
+                # 第一个参数应该是hidden_states
+                first_arg = input_tuple[0]
+                if isinstance(first_arg, torch.Tensor):
+                    hidden_states = first_arg
+                elif isinstance(first_arg, tuple) and len(first_arg) > 0:
+                    # 有时候可能是嵌套的tuple
+                    hidden_states = first_arg[0] if isinstance(first_arg[0], torch.Tensor) else None
+
+            if isinstance(hidden_states, torch.Tensor):
+                self.hidden_states_before[layer_idx] = hidden_states
+            elif layer_idx == 0 and not hasattr(self, '_pre_hook_debug_printed'):
+                # 调试：打印为什么pre_hook无法获取hidden_states
+                print(f"  ⚠️  Pre-hook Layer {layer_idx}: 无法获取hidden_states")
+                print(f"      input_tuple类型: {type(input_tuple)}, 长度: {len(input_tuple) if isinstance(input_tuple, tuple) else 'N/A'}")
+                if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
+                    print(f"      input_tuple[0]类型: {type(input_tuple[0])}")
+                    if isinstance(input_tuple[0], torch.Tensor):
+                        print(f"      input_tuple[0]形状: {input_tuple[0].shape}")
+                self._pre_hook_debug_printed = True
         return attn_pre_hook
 
     def _make_attn_hook(self, layer_idx: int):
         """创建attention hook来提取head输出"""
         def attn_hook(module, input_tuple, output):
             # 尝试从input_tuple获取hidden_states
+            # input_tuple的结构应该是: (hidden_states, attention_mask, position_ids, past_key_value, output_attentions, use_cache)
             hidden_states = None
+
             if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                hidden_states = input_tuple[0]
+                # 第一个参数应该是hidden_states
+                first_arg = input_tuple[0]
+                if isinstance(first_arg, torch.Tensor):
+                    hidden_states = first_arg
+                elif isinstance(first_arg, tuple) and len(first_arg) > 0:
+                    # 有时候可能是嵌套的tuple
+                    hidden_states = first_arg[0] if isinstance(first_arg[0], torch.Tensor) else None
 
             # 如果input_tuple为空，尝试从之前保存的hidden_states_before获取
             if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
                 hidden_states = self.hidden_states_before.get(layer_idx)
 
+            # 如果仍然无法获取，尝试从output中获取（某些实现可能返回hidden_states）
+            if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
+                if isinstance(output, tuple) and len(output) > 0:
+                    # output的结构通常是: (attn_output, attn_weights, past_key_value)
+                    # 但attn_output是经过o_proj的，不是我们需要的
+                    pass  # 不能从output获取，因为已经经过o_proj了
+
             # 如果仍然无法获取，跳过这一层
             if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
+                # 只在第一次失败时打印详细调试信息
+                if layer_idx == 0 and not hasattr(self, '_debug_printed'):
+                    print(f"  ⚠️  Layer {layer_idx}: 无法获取hidden_states")
+                    print(f"      input_tuple类型: {type(input_tuple)}, 长度: {len(input_tuple) if isinstance(input_tuple, tuple) else 'N/A'}")
+                    if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
+                        print(f"      input_tuple[0]类型: {type(input_tuple[0])}")
+                        if isinstance(input_tuple[0], torch.Tensor):
+                            print(f"      input_tuple[0]形状: {input_tuple[0].shape}")
+                    print(f"      hidden_states_before: {layer_idx in self.hidden_states_before}")
+                    self._debug_printed = True
                 return
 
             # 确保hidden_states是正确的格式
@@ -495,7 +539,7 @@ def process_case_pope(
 
                 # 提取最后一个token的原始head向量（用于训练linear probe）
                 if head_raw_output is not None:
-                    head_raw_vector = head_raw_output[:, last_token_idx, :].cpu().numpy()  # [head_dim]
+                    head_raw_vector = head_raw_output[:, last_token_idx, :].detach().cpu().numpy()  # [head_dim]
                 else:
                     head_raw_vector = None
 
@@ -978,7 +1022,22 @@ def process_case_chair(
         # 注意：generated_token_ids[step_idx] 是当前步骤生成的token
 
         # 清空extractor缓存，准备捕获新的head输出
+        # 注意：确保hook已经注册，并且每次forward前清空缓存
         extractor.clear()
+
+        # 调试：检查hook是否已注册（只在第一个step检查一次）
+        if step_idx == target_steps[0]:
+            lang_model = model.get_model()
+            if hasattr(lang_model, 'layers') and len(lang_model.layers) > 0:
+                first_layer = lang_model.layers[0]
+                if hasattr(first_layer, 'self_attn'):
+                    # 检查是否有hook注册
+                    hooks = first_layer.self_attn._forward_hooks
+                    pre_hooks = first_layer.self_attn._forward_pre_hooks
+                    if not hooks and not pre_hooks:
+                        print(f"  ⚠️  警告: Layer 0 的attention层没有注册hook！")
+                    else:
+                        print(f"  ✓ Layer 0 的attention层已注册hook（forward_hooks: {len(hooks)}, pre_hooks: {len(pre_hooks)}）")
 
         # 构建当前步骤的完整序列
         # 如果inputs_embeds不为None，说明原始输入已经被转换为embeddings
@@ -1010,6 +1069,7 @@ def process_case_chair(
             current_inputs_embeds = None
 
         # 手动调用forward来触发hook
+        # 注意：需要确保hook已经注册，并且forward会触发hook
         with torch.no_grad():
             # 计算position_ids和attention_mask
             if current_inputs_embeds is not None:
@@ -1020,6 +1080,7 @@ def process_case_chair(
             current_attention_mask = torch.ones((1, current_seq_len), device=device, dtype=torch.long)
 
             # 调用forward（hook会自动触发）
+            # 注意：直接调用model.get_model().forward()会触发hook
             outputs = model.get_model().forward(
                 input_ids=current_input_ids,
                 inputs_embeds=current_inputs_embeds,
@@ -1029,6 +1090,9 @@ def process_case_chair(
                 return_dict=True
             )
 
+            # 注意：我们不再依赖hook，而是直接使用hidden_states手动计算每个head的输出
+            # 因此hook相关的调试信息已不再需要
+
         # 获取hidden states（用于获取h_before）
         hidden_states = outputs.hidden_states  # 包含所有层的hidden states
 
@@ -1036,18 +1100,19 @@ def process_case_chair(
         seq_len = hidden_states[0].shape[1]
         last_token_idx = seq_len - 1
 
-        # 遍历每一层
+        # 获取语言模型
+        lang_model = model.get_model()
+
+        # 遍历每一层，手动计算每个head的输出
         for layer_idx in range(num_layers):
-            # 获取该层之前的hidden state（h_t^(l-1)）
-            h_before = extractor.get_hidden_state_before(layer_idx)
-            if h_before is None:
-                # 如果没有hook数据，使用hidden_states
-                if layer_idx == 0:
-                    h_before = hidden_states[0][:, last_token_idx:last_token_idx+1, :]
-                else:
-                    h_before = hidden_states[layer_idx][:, last_token_idx:last_token_idx+1, :]
+            # 获取该层之前的hidden state（h_t^(l-1)）- 使用完整的序列
+            if layer_idx == 0:
+                h_before_full = hidden_states[0]  # [batch, seq_len, hidden_size]
             else:
-                h_before = h_before[:, last_token_idx:last_token_idx+1, :]
+                h_before_full = hidden_states[layer_idx]  # [batch, seq_len, hidden_size]
+
+            # 获取最后一个token的hidden state（用于计算logits）
+            h_before = h_before_full[:, last_token_idx:last_token_idx+1, :]  # [batch, 1, hidden_size]
 
             # 计算未加入head的logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
             h_before_processed = h_before.squeeze(1)  # [batch, hidden_size]
@@ -1057,30 +1122,65 @@ def process_case_chair(
                 h_before_processed = h_before_processed.to(device)
             logits_before = lm_head(h_before_processed)  # [batch, vocab_size]
 
+            # 获取该层的attention模块
+            layer = lang_model.layers[layer_idx]
+            attn_module = layer.self_attn
+
+            # 手动计算attention，提取每个head的输出
+            # 使用完整的序列来计算attention
+            batch_size, seq_len_for_attn, hidden_size = h_before_full.shape
+            head_dim = hidden_size // num_heads
+
+            # 计算Q, K, V（使用完整序列）
+            Q = attn_module.q_proj(h_before_full)  # [batch, seq_len, hidden_size]
+            K = attn_module.k_proj(h_before_full)
+            V = attn_module.v_proj(h_before_full)
+
+            # 获取数据类型，确保后续计算使用相同类型
+            dtype = Q.dtype
+
+            # 重塑为多头格式
+            Q = Q.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
+            K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
+            V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
+
+            # 计算attention scores（使用完整序列）
+            scale = 1.0 / (head_dim ** 0.5)
+            scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
+
+            # 应用causal mask（下三角矩阵）- 使用相同的数据类型
+            causal_mask = torch.triu(torch.ones(seq_len_for_attn, seq_len_for_attn, device=device, dtype=dtype), diagonal=1)
+            causal_mask = causal_mask.masked_fill(causal_mask == 1, float('-inf'))
+            scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)  # [batch, num_heads, seq_len, seq_len]
+
+            # 应用softmax
+            attn_weights = torch.softmax(scores, dim=-1)
+
+            # 应用attention到V
+            attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
+
             # 遍历每个head
             for head_idx in range(num_heads):
-                # 尝试从hook中获取精确的head输出（理想方法）
-                head_output = extractor.get_head_output(layer_idx, head_idx)
-                head_raw_output = extractor.get_head_raw_output(layer_idx, head_idx)
+                # 提取单个head的输出（原始输出，未经过o_proj）- 只取最后一个token
+                head_attn_output_full = attn_output[:, head_idx, :, :]  # [batch, seq_len, head_dim]
+                head_attn_output = head_attn_output_full[:, last_token_idx:last_token_idx+1, :]  # [batch, 1, head_dim]
 
-                if head_output is None or head_raw_output is None:
-                    # Hook没有捕获到，使用fallback方法：从hidden states差值近似
-                    # 获取该层之后的hidden state（经过该层所有head处理后的输出）
-                    h_after_all_heads = hidden_states[layer_idx + 1][:, last_token_idx:last_token_idx+1, :]
-                    # 使用hidden states的差值来近似head的贡献
-                    head_contribution_approx = (h_after_all_heads - h_before) / num_heads
-                    h_with_head = h_before + head_contribution_approx
-                    # 无法获取原始head输出，使用零向量
-                    head_raw_vector = None
-                    head_dim = model.config.hidden_size // num_heads
-                else:
-                    # 使用精确的head输出（理想方法）
-                    head_output_last = head_output[:, last_token_idx:last_token_idx+1, :]
-                    h_with_head = h_before + head_output_last
+                # 保存原始head输出（用于训练linear probe）- 最后一个token
+                # 需要先detach()，因为张量可能requires_grad
+                head_raw_vector = head_attn_output[:, 0, :].detach().cpu().numpy()  # [head_dim]
 
-                    # 提取最后一个token的原始head向量（用于训练linear probe）
-                    head_raw_vector = head_raw_output[:, last_token_idx, :].cpu().numpy()  # [head_dim]
-                    head_dim = model.config.hidden_size // num_heads
+                # 创建一个只包含该head的完整attn_output（其他head为零）- 只对最后一个token
+                # 使用与模型相同的数据类型
+                head_only_concat = torch.zeros(batch_size, 1, hidden_size, device=device, dtype=dtype)
+                head_start = head_idx * head_dim
+                head_end = (head_idx + 1) * head_dim
+                head_only_concat[:, :, head_start:head_end] = head_attn_output
+
+                # 应用o_proj得到该head的完整输出
+                head_output_full = attn_module.o_proj(head_only_concat)  # [batch, 1, hidden_size]
+
+                # 使用精确的head输出
+                h_with_head = h_before + head_output_full
 
                 # 计算加入该head后的logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
                 h_with_head_processed = h_with_head.squeeze(1)  # [batch, hidden_size]
@@ -1109,7 +1209,7 @@ def process_case_chair(
 
                 # 获取top-K候选池 Ct（针对当前head的logits）
                 top_k_logits, top_k_indices = torch.topk(logits_with_head[0], k=TOP_K)
-                Ct_tokens = set(top_k_indices.cpu().numpy().tolist())
+                Ct_tokens = set(top_k_indices.detach().cpu().numpy().tolist())
 
                 # 从top-K中筛选物理词汇（只保留在H中的token）
                 Ct_physical_tokens = Ct_tokens & H_tokens
@@ -1254,6 +1354,9 @@ def main():
     args = parser.parse_args()
     set_seed(args.seed)
 
+    if args.train_file is None:
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_200.json")
+
     print("=" * 80)
     print("生成 Head 级别真值对")
     print("=" * 80)
@@ -1262,9 +1365,6 @@ def main():
     print(f"COCO根目录: {args.coco_root}")
     print(f"设备: {args.device}")
     print("=" * 80)
-
-    if args.train_file is None:
-        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_500.json")
 
     # 加载训练cases
     print("\n[1/5] 加载训练cases...")
@@ -1376,12 +1476,12 @@ def main():
 
     # 保存结果（按layer和head分文件保存）
     print(f"\n[5/5] 保存结果...")
+    train_file_name = Path(args.train_file).stem
     if args.output_file is None:
-        train_file_name = Path(args.train_file).stem
         output_dir = f"train/{train_file_name}_head_ground_truth"
     else:
-        # 如果指定了输出文件，使用其目录名
-        output_dir = str(Path(args.output_file).parent / Path(args.output_file).stem)
+        # 如果指定了输出文件，在输出目录中包含train_file的名称
+        output_dir = str(Path(args.output_file).parent / f"{train_file_name}_head_ground_truth")
 
     os.makedirs(output_dir, exist_ok=True)
     print(f"✓ 输出目录: {output_dir}")

@@ -638,7 +638,7 @@ def main():
                        help="COCO 数据集根目录")
     parser.add_argument("--exclude-file", type=str, default="pope_coco/coco_baseline_500.json",
                        help="需要排除的图片列表文件")
-    parser.add_argument("--num-images", type=int, default=200,
+    parser.add_argument("--num-images", type=int, default=20,
                        help="需要选择的图片数量")
     parser.add_argument("--output-file", type=str, default=None,
                        help="输出 JSON 文件路径（默认: coco_train_json/coco_train_2000.json）")
