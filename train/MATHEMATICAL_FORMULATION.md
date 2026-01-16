@@ -244,16 +244,22 @@ $$B_u^+ = C_t \cap G$$
    H_{e,t}^{(l,n)} = W_O [\mathbf{0}; \ldots; \text{head\_out}_{l,n,t}; \ldots; \mathbf{0}]
    ```
 
-   **近似方法**（在 generate 过程中，hook 可能无法捕获每个步骤）：
-   由于 `model.generate()` 过程中 hook 的限制，我们使用近似：
+   **理想方法实现**（手动调用forward触发hook）：
+   对于每个目标生成步骤，我们手动构建完整的token序列并调用 `forward()` 来触发hook，从而使用理想方法提取精确的head输出：
+
+   $$H_{e,t}^{(l,n)} = W_O [\mathbf{0}; \ldots; \text{head\_out}_{l,n,t}; \ldots; \mathbf{0}]$$
+
+   如果hook未捕获到，则使用fallback近似方法：
 
    $$H_{e,t}^{(l,n)} \approx \frac{h_{e,t}^{(l)} - h_{e,t}^{(l-1)}}{H} = \frac{W_O [\text{head\_out}_{l,0,t}; \ldots; \text{head\_out}_{l,H-1,t}]}{H}$$
 
-   这是一个近似，假设所有 head 的贡献相等。理想情况下应该使用 hook 提取的精确 head 输出。
-
    **LaTeX代码：**
    ```latex
-   H_{e,t}^{(l,n)} \approx \frac{h_{e,t}^{(l)} - h_{e,t}^{(l-1)}}{H}
+   H_{e,t}^{(l,n)} = W_O [\mathbf{0}; \ldots; \text{head\_out}_{l,n,t}; \ldots; \mathbf{0}] \quad \text{(理想方法)}
+   ```
+
+   ```latex
+   H_{e,t}^{(l,n)} \approx \frac{h_{e,t}^{(l)} - h_{e,t}^{(l-1)}}{H} \quad \text{(fallback方法)}
    ```
 
 3. **计算 logits**：

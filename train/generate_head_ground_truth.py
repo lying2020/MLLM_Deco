@@ -721,7 +721,18 @@ def process_case_chair(
             return True
         return False
 
+    # 使用node_word作为key，确保相同node的词汇只保留第一次出现
+    # node_word_to_first_word: {node_word: first_word} - 记录每个node第一次出现的词汇
+    node_word_to_first_word = {}  # {node_word: first_word}
+
     for word, node_word, word_idx in zip(words, node_words, word_indices):
+        # 如果这个node_word已经出现过，跳过（只保留第一次出现的词汇）
+        if node_word in node_word_to_first_word:
+            continue
+
+        # 记录这个node_word第一次出现的词汇
+        node_word_to_first_word[node_word] = word
+
         if word not in physical_word_to_steps:
             physical_word_to_steps[word] = []
             physical_word_to_node[word] = node_word
