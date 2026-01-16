@@ -17,7 +17,6 @@ import argparse
 import torch
 import warnings
 from PIL import Image
-from transformers import set_seed
 
 warnings.filterwarnings('ignore')
 
@@ -131,52 +130,53 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
     images_with_0_instances = []  # 0个实例（排除）
     images_with_more_instances = []  # 5个及以上实例（最后选择）
 
-    # 如果启用幻视优化，在每个实例数量组内，按幻视数量分类
-    # 优先级：2个幻视 -> 3个幻视 -> 1个幻视 -> 其他
-    if prioritize_by_hallucination and len(hallucination_scores) > 0:
-        images_with_3_instances_2_hallucinations = []
-        images_with_3_instances_3_hallucinations = []
-        images_with_3_instances_1_hallucination = []
-        images_with_3_instances_other = []
-
-        images_with_2_instances_2_hallucinations = []
-        images_with_2_instances_3_hallucinations = []
-        images_with_2_instances_1_hallucination = []
-        images_with_2_instances_other = []
-
-        images_with_4_instances_2_hallucinations = []
-        images_with_4_instances_3_hallucinations = []
-        images_with_4_instances_1_hallucination = []
-        images_with_4_instances_other = []
-
-        images_with_1_instance_2_hallucinations = []
-        images_with_1_instance_3_hallucinations = []
-        images_with_1_instance_1_hallucination = []
-        images_with_1_instance_other = []
-
     image_files = sorted(val2014_dir.glob("COCO_val2014_*.jpg"))
 
-    # 如果启用幻视优化，需要先生成caption并计算幻视数量
-    hallucination_scores = {}
+    # 如果启用幻视优化，按照新逻辑：先按实例数量排序，然后逐张生成caption并筛选
+    selected_images = []
     if prioritize_by_hallucination and model is not None and chair_evaluator is not None:
-        print(f"  正在为候选图片生成caption并计算幻视数量...")
-        from tqdm import tqdm
+        print(f"  正在按实例数量排序候选图片，然后逐张生成caption并筛选...")
 
+        # 先收集所有候选图片并按实例数量排序
         candidate_images = []
         for image_file in image_files:
             filename = image_file.name
             if filename not in exclude_images:
                 image_id = int(filename.split("_")[-1].replace(".jpg", ""))
                 objects = imid_to_objects.get(image_id, [])
-                if len(objects) > 0:  # 只处理有对象的图片
+                num_instances = len(objects)
+                if num_instances > 0:  # 只处理有对象的图片
                     candidate_images.append({
                         "image_id": image_id,
                         "image_filename": filename,
-                        "objects": objects
+                        "objects": objects,
+                        "num_instances": num_instances
                     })
 
-        # 为每张候选图片生成caption并计算幻视数量
-        for img_info in tqdm(candidate_images, desc="生成caption"):
+        # 按实例数量排序：3个实例 -> 2个实例 -> 4个实例 -> 1个实例
+        def sort_key(img):
+            num_inst = img['num_instances']
+            if num_inst == 3:
+                return 0
+            elif num_inst == 2:
+                return 1
+            elif num_inst == 4:
+                return 2
+            elif num_inst == 1:
+                return 3
+            else:
+                return 4
+
+        candidate_images.sort(key=sort_key)
+
+        print(f"  已收集 {len(candidate_images)} 张候选图片，开始逐张生成caption并筛选...")
+        from tqdm import tqdm
+
+        # 逐张生成caption并筛选
+        for img_info in tqdm(candidate_images, desc="生成caption并筛选"):
+            if len(selected_images) >= num_images:
+                break  # 已经选够了
+
             image_id = img_info['image_id']
             image_filename = img_info['image_filename']
             gt_objects = img_info['objects']
@@ -189,15 +189,61 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
                     conv_mode, device
                 )
 
-                # 计算幻视数量
-                num_hallucinations = count_hallucinations(caption, gt_objects, chair_evaluator)
-                hallucination_scores[image_id] = num_hallucinations
+                # 提取实例词汇和幻视词汇
+                grounded_words, hallucinated_words, num_grounded, num_hallucinated = extract_physical_words(
+                    caption, gt_objects, chair_evaluator
+                )
+
+                # 判断是否满足选择条件
+                # 条件1：实例词汇数量 >= 幻视词汇数量，且非重复的幻视词汇数量 == 2个
+                # 条件2：实例词汇数量 >= 幻视词汇数量，且幻视词汇数量 <= 3个
+                is_selected = False
+
+                if num_grounded >= num_hallucinated:
+                    if num_hallucinated == 2:
+                        # 条件1：幻视词汇数量 == 2个
+                        is_selected = True
+                    elif num_hallucinated <= 3:
+                        # 条件2：幻视词汇数量 <= 3个（但不等于2个的情况已经在上面处理了）
+                        # 实际上这里会包括1个和3个幻视的情况
+                        is_selected = True
+
+                if is_selected:
+                    selected_images.append({
+                        "image_id": image_id,
+                        "image_filename": image_filename
+                    })
+
             except Exception as e:
                 print(f"  ⚠️  处理图片 {image_filename} 时出错: {e}")
-                hallucination_scores[image_id] = 0
+                continue
 
-        print(f"  ✓ 已完成 {len(hallucination_scores)} 张图片的幻视评估")
+        print(f"  ✓ 已筛选出 {len(selected_images)} 张符合条件的图片")
 
+        # 如果选出的图片不够，从剩余的候选图片中随机补充
+        if len(selected_images) < num_images:
+            remaining_needed = num_images - len(selected_images)
+            selected_ids = {img['image_id'] for img in selected_images}
+            remaining_candidates = [
+                img for img in candidate_images
+                if img['image_id'] not in selected_ids
+            ]
+
+            if len(remaining_candidates) > 0:
+                num_to_add = min(remaining_needed, len(remaining_candidates))
+                additional = random.sample(remaining_candidates, num_to_add)
+                for img in additional:
+                    selected_images.append({
+                        "image_id": img['image_id'],
+                        "image_filename": img['image_filename']
+                    })
+                print(f"  ✓ 从剩余候选图片中随机补充了 {num_to_add} 张图片")
+
+        # 按 image_id 排序
+        selected_images.sort(key=lambda x: x['image_id'])
+        return selected_images
+
+    # 否则使用原来的逻辑（不启用幻视优化）
     for image_file in image_files:
         filename = image_file.name
         # 如果不在排除列表中，添加到候选列表
@@ -210,96 +256,30 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
             objects = imid_to_objects.get(image_id, [])
             num_instances = len(objects)
 
-            # 获取幻视数量（如果启用幻视优化）
-            num_hallucinations = hallucination_scores.get(image_id, 0) if prioritize_by_hallucination else 0
-
             img_info = {
                 "image_id": image_id,
                 "image_filename": filename,
-                "num_instances": num_instances,
-                "num_hallucinations": num_hallucinations
+                "num_instances": num_instances
             }
 
             if num_instances == 0:
                 images_with_0_instances.append(img_info)
             elif num_instances == 1:
-                if prioritize_by_hallucination and len(hallucination_scores) > 0:
-                    if num_hallucinations == 2:
-                        images_with_1_instance_2_hallucinations.append(img_info)
-                    elif num_hallucinations == 3:
-                        images_with_1_instance_3_hallucinations.append(img_info)
-                    elif num_hallucinations == 1:
-                        images_with_1_instance_1_hallucination.append(img_info)
-                    else:
-                        images_with_1_instance_other.append(img_info)
-                else:
-                    images_with_1_instance.append(img_info)
+                images_with_1_instance.append(img_info)
             elif num_instances == 2:
-                if prioritize_by_hallucination and len(hallucination_scores) > 0:
-                    if num_hallucinations == 2:
-                        images_with_2_instances_2_hallucinations.append(img_info)
-                    elif num_hallucinations == 3:
-                        images_with_2_instances_3_hallucinations.append(img_info)
-                    elif num_hallucinations == 1:
-                        images_with_2_instances_1_hallucination.append(img_info)
-                    else:
-                        images_with_2_instances_other.append(img_info)
-                else:
-                    images_with_2_instances.append(img_info)
+                images_with_2_instances.append(img_info)
             elif num_instances == 3:
-                if prioritize_by_hallucination and len(hallucination_scores) > 0:
-                    if num_hallucinations == 2:
-                        images_with_3_instances_2_hallucinations.append(img_info)
-                    elif num_hallucinations == 3:
-                        images_with_3_instances_3_hallucinations.append(img_info)
-                    elif num_hallucinations == 1:
-                        images_with_3_instances_1_hallucination.append(img_info)
-                    else:
-                        images_with_3_instances_other.append(img_info)
-                else:
-                    images_with_3_instances.append(img_info)
+                images_with_3_instances.append(img_info)
             elif num_instances == 4:
-                if prioritize_by_hallucination and len(hallucination_scores) > 0:
-                    if num_hallucinations == 2:
-                        images_with_4_instances_2_hallucinations.append(img_info)
-                    elif num_hallucinations == 3:
-                        images_with_4_instances_3_hallucinations.append(img_info)
-                    elif num_hallucinations == 1:
-                        images_with_4_instances_1_hallucination.append(img_info)
-                    else:
-                        images_with_4_instances_other.append(img_info)
-                else:
-                    images_with_4_instances.append(img_info)
+                images_with_4_instances.append(img_info)
             else:
                 images_with_more_instances.append(img_info)
 
     print(f"  图片分类统计:")
-    if prioritize_by_hallucination and len(hallucination_scores) > 0:
-        print(f"    - 3个实例:")
-        print(f"      * 2个幻视: {len(images_with_3_instances_2_hallucinations)} 张")
-        print(f"      * 3个幻视: {len(images_with_3_instances_3_hallucinations)} 张")
-        print(f"      * 1个幻视: {len(images_with_3_instances_1_hallucination)} 张")
-        print(f"      * 其他: {len(images_with_3_instances_other)} 张")
-        print(f"    - 2个实例:")
-        print(f"      * 2个幻视: {len(images_with_2_instances_2_hallucinations)} 张")
-        print(f"      * 3个幻视: {len(images_with_2_instances_3_hallucinations)} 张")
-        print(f"      * 1个幻视: {len(images_with_2_instances_1_hallucination)} 张")
-        print(f"      * 其他: {len(images_with_2_instances_other)} 张")
-        print(f"    - 4个实例:")
-        print(f"      * 2个幻视: {len(images_with_4_instances_2_hallucinations)} 张")
-        print(f"      * 3个幻视: {len(images_with_4_instances_3_hallucinations)} 张")
-        print(f"      * 1个幻视: {len(images_with_4_instances_1_hallucination)} 张")
-        print(f"      * 其他: {len(images_with_4_instances_other)} 张")
-        print(f"    - 1个实例:")
-        print(f"      * 2个幻视: {len(images_with_1_instance_2_hallucinations)} 张")
-        print(f"      * 3个幻视: {len(images_with_1_instance_3_hallucinations)} 张")
-        print(f"      * 1个幻视: {len(images_with_1_instance_1_hallucination)} 张")
-        print(f"      * 其他: {len(images_with_1_instance_other)} 张")
-    else:
-        print(f"    - 3个实例（最高优先级）: {len(images_with_3_instances)} 张")
-        print(f"    - 2个实例（第二优先级）: {len(images_with_2_instances)} 张")
-        print(f"    - 4个实例（第三优先级）: {len(images_with_4_instances)} 张")
-        print(f"    - 1个实例（第四优先级）: {len(images_with_1_instance)} 张")
+    print(f"    - 3个实例（最高优先级）: {len(images_with_3_instances)} 张")
+    print(f"    - 2个实例（第二优先级）: {len(images_with_2_instances)} 张")
+    print(f"    - 4个实例（第三优先级）: {len(images_with_4_instances)} 张")
+    print(f"    - 1个实例（第四优先级）: {len(images_with_1_instance)} 张")
     print(f"    - 5个及以上实例（最后选择）: {len(images_with_more_instances)} 张")
     print(f"    - 0个实例（将被排除）: {len(images_with_0_instances)} 张")
 
@@ -323,101 +303,36 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
         return selected, remaining_count
 
     # 1. 优先选择3个实例的图片
-    if prioritize_by_hallucination and len(hallucination_scores) > 0:
-        # 按幻视数量优先级选择：2个幻视 -> 3个幻视 -> 1个幻视 -> 其他
-        groups_3 = [
-            images_with_3_instances_2_hallucinations,
-            images_with_3_instances_3_hallucinations,
-            images_with_3_instances_1_hallucination,
-            images_with_3_instances_other
-        ]
-        names_3 = [
-            "3个实例+2个幻视",
-            "3个实例+3个幻视",
-            "3个实例+1个幻视",
-            "3个实例+其他幻视"
-        ]
-        selected_from_3, remaining = select_from_group(groups_3, names_3, remaining)
+    if remaining > 0 and len(images_with_3_instances) > 0:
+        num_from_3 = min(remaining, len(images_with_3_instances))
+        selected_from_3 = random.sample(images_with_3_instances, num_from_3)
         selected_images.extend(selected_from_3)
-    else:
-        if remaining > 0 and len(images_with_3_instances) > 0:
-            num_from_3 = min(remaining, len(images_with_3_instances))
-            selected_from_3 = random.sample(images_with_3_instances, num_from_3)
-            selected_images.extend(selected_from_3)
-            print(f"  ✓ 从3个实例的图片中选择了 {num_from_3} 张")
-            remaining -= num_from_3
+        print(f"  ✓ 从3个实例的图片中选择了 {num_from_3} 张")
+        remaining -= num_from_3
 
     # 2. 如果不够，从2个实例的图片中选择
-    if prioritize_by_hallucination and len(hallucination_scores) > 0:
-        groups_2 = [
-            images_with_2_instances_2_hallucinations,
-            images_with_2_instances_3_hallucinations,
-            images_with_2_instances_1_hallucination,
-            images_with_2_instances_other
-        ]
-        names_2 = [
-            "2个实例+2个幻视",
-            "2个实例+3个幻视",
-            "2个实例+1个幻视",
-            "2个实例+其他幻视"
-        ]
-        selected_from_2, remaining = select_from_group(groups_2, names_2, remaining)
+    if remaining > 0 and len(images_with_2_instances) > 0:
+        num_from_2 = min(remaining, len(images_with_2_instances))
+        selected_from_2 = random.sample(images_with_2_instances, num_from_2)
         selected_images.extend(selected_from_2)
-    else:
-        if remaining > 0 and len(images_with_2_instances) > 0:
-            num_from_2 = min(remaining, len(images_with_2_instances))
-            selected_from_2 = random.sample(images_with_2_instances, num_from_2)
-            selected_images.extend(selected_from_2)
-            print(f"  ✓ 从2个实例的图片中选择了 {num_from_2} 张")
-            remaining -= num_from_2
+        print(f"  ✓ 从2个实例的图片中选择了 {num_from_2} 张")
+        remaining -= num_from_2
 
     # 3. 如果还不够，从4个实例的图片中选择
-    if prioritize_by_hallucination and len(hallucination_scores) > 0:
-        groups_4 = [
-            images_with_4_instances_2_hallucinations,
-            images_with_4_instances_3_hallucinations,
-            images_with_4_instances_1_hallucination,
-            images_with_4_instances_other
-        ]
-        names_4 = [
-            "4个实例+2个幻视",
-            "4个实例+3个幻视",
-            "4个实例+1个幻视",
-            "4个实例+其他幻视"
-        ]
-        selected_from_4, remaining = select_from_group(groups_4, names_4, remaining)
+    if remaining > 0 and len(images_with_4_instances) > 0:
+        num_from_4 = min(remaining, len(images_with_4_instances))
+        selected_from_4 = random.sample(images_with_4_instances, num_from_4)
         selected_images.extend(selected_from_4)
-    else:
-        if remaining > 0 and len(images_with_4_instances) > 0:
-            num_from_4 = min(remaining, len(images_with_4_instances))
-            selected_from_4 = random.sample(images_with_4_instances, num_from_4)
-            selected_images.extend(selected_from_4)
-            print(f"  ✓ 从4个实例的图片中选择了 {num_from_4} 张")
-            remaining -= num_from_4
+        print(f"  ✓ 从4个实例的图片中选择了 {num_from_4} 张")
+        remaining -= num_from_4
 
     # 4. 如果还不够，从1个实例的图片中选择
-    if prioritize_by_hallucination and len(hallucination_scores) > 0:
-        groups_1 = [
-            images_with_1_instance_2_hallucinations,
-            images_with_1_instance_3_hallucinations,
-            images_with_1_instance_1_hallucination,
-            images_with_1_instance_other
-        ]
-        names_1 = [
-            "1个实例+2个幻视",
-            "1个实例+3个幻视",
-            "1个实例+1个幻视",
-            "1个实例+其他幻视"
-        ]
-        selected_from_1, remaining = select_from_group(groups_1, names_1, remaining)
+    if remaining > 0 and len(images_with_1_instance) > 0:
+        num_from_1 = min(remaining, len(images_with_1_instance))
+        selected_from_1 = random.sample(images_with_1_instance, num_from_1)
         selected_images.extend(selected_from_1)
-    else:
-        if remaining > 0 and len(images_with_1_instance) > 0:
-            num_from_1 = min(remaining, len(images_with_1_instance))
-            selected_from_1 = random.sample(images_with_1_instance, num_from_1)
-            selected_images.extend(selected_from_1)
-            print(f"  ✓ 从1个实例的图片中选择了 {num_from_1} 张")
-            remaining -= num_from_1
+        print(f"  ✓ 从1个实例的图片中选择了 {num_from_1} 张")
+        remaining -= num_from_1
 
     # 5. 如果还不够，从5个及以上实例的图片中选择
     if remaining > 0 and len(images_with_more_instances) > 0:
@@ -433,10 +348,9 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
     # 按 image_id 排序
     selected_images.sort(key=lambda x: x['image_id'])
 
-    # 移除 num_instances 和 num_hallucinations 字段（不需要在返回结果中）
+    # 移除 num_instances 字段（不需要在返回结果中）
     for img in selected_images:
         img.pop('num_instances', None)
-        img.pop('num_hallucinations', None)
 
     return selected_images
 
@@ -664,9 +578,9 @@ def generate_caption(model, tokenizer, image_processor, image_path: str,
     return caption
 
 
-def count_hallucinations(caption: str, gt_objects: List[str], chair_evaluator) -> int:
+def extract_physical_words(caption: str, gt_objects: List[str], chair_evaluator) -> tuple:
     """
-    使用CHAIR评估器计算caption中的幻视数量
+    使用CHAIR评估器从caption中提取实例词汇和幻视词汇
 
     Args:
         caption: 生成的caption
@@ -674,24 +588,28 @@ def count_hallucinations(caption: str, gt_objects: List[str], chair_evaluator) -
         chair_evaluator: CHAIR评估器
 
     Returns:
-        int: 幻视数量
+        tuple: (实例词汇集合, 幻视词汇集合, 实例词汇数量, 幻视词汇数量)
     """
     if not caption:
-        return 0
+        return set(), set(), 0, 0
 
     # 使用CHAIR接口识别物理词汇
     words, node_words, word_indices, raw_words = chair_evaluator.caption_to_words(caption)
 
-    # 统计幻视数量
-    hallucination_count = 0
+    # 分离实例词汇和幻视词汇
+    grounded_words = set()  # 实例词汇（在GT对象中）
+    hallucinated_words = set()  # 幻视词汇（不在GT对象中）
     gt_objects_lower = [obj.lower() for obj in gt_objects]
 
     for word, node_word in zip(words, node_words):
-        # 如果node_word不在gt_objects中，认为是幻视
-        if node_word.lower() not in gt_objects_lower:
-            hallucination_count += 1
+        if node_word.lower() in gt_objects_lower:
+            # 实例词汇
+            grounded_words.add(node_word.lower())
+        else:
+            # 幻视词汇
+            hallucinated_words.add(node_word.lower())
 
-    return hallucination_count
+    return grounded_words, hallucinated_words, len(grounded_words), len(hallucinated_words)
 
 
 def generate_chair_case(image_id: int, image_filename: str, objects_in_image: List[str]) -> Dict:
