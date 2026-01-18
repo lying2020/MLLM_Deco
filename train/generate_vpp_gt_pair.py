@@ -572,6 +572,36 @@ class HeadOutputExtractor:
         self.hidden_states_before.clear()
 
 
+def enable_attn_output_extraction(model, enable: bool = True):
+    """
+    启用或禁用 attention output 提取功能
+
+    Args:
+        model: LLaVA模型
+        enable: 是否启用
+    """
+    lang_model = model.get_model()
+    if hasattr(lang_model, 'layers'):
+        for layer in lang_model.layers:
+            if hasattr(layer, 'self_attn'):
+                layer._output_attn_output = enable
+
+
+def get_attn_output_from_layer(layer):
+    """
+    从层中获取最后一次 forward 的 attn_output（在 reshape 之前）
+
+    Args:
+        layer: LlamaDecoderLayer 实例
+
+    Returns:
+        torch.Tensor 或 None: attn_output [batch, num_heads, seq_len, head_dim]，如果未启用则返回 None
+    """
+    if hasattr(layer, '_last_attn_output_before_reshape'):
+        return layer._last_attn_output_before_reshape
+    return None
+
+
 def process_case_pope(
     model, tokenizer, image_processor, case: Dict, coco_root: str,
     device: str, conv_mode: str, num_layers: int, num_heads: int,
@@ -724,65 +754,60 @@ def process_case_pope(
             h_before_processed = h_before_processed.to(device)
         logits_before = lm_head(h_before_processed)  # [batch, vocab_size]
 
-        # 获取该层的attention模块
-        attn_module = lang_model.layers[layer_idx].self_attn
+        # 获取该层的attention模块和层对象
+        layer = lang_model.layers[layer_idx]
+        attn_module = layer.self_attn
 
-        # 手动计算attention，提取每个head的输出
-        # 使用完整的序列来计算attention
-        batch_size, seq_len_for_attn, hidden_size = h_before_full.shape
+        # 从模型内部获取 attn_output（在 reshape 之前）
+        # 注意：我们需要重新调用 forward 来触发 output_attn_output
+        # 但为了效率，我们可以直接从层的属性中获取（如果已经计算过）
+        attn_output_full = get_attn_output_from_layer(layer)
+
+        # 如果无法从层属性获取，需要手动调用一次 forward
+        if attn_output_full is None:
+            # 手动调用 forward 来获取 attn_output
+            with torch.no_grad():
+                # 只对当前层调用 forward，传入 h_before_full
+                attn_result = attn_module.forward(
+                    hidden_states=h_before_full,
+                    attention_mask=None,  # POPE case 通常不需要 attention_mask
+                    position_ids=position_ids if position_ids is not None and position_ids.shape[1] == h_before_full.shape[1] else None,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                    output_attn_output=True,
+                )
+                # 解包返回值（应该是4个元素）
+                if len(attn_result) == 4:
+                    _, _, _, attn_output_full = attn_result
+                else:
+                    raise ValueError(
+                        f"Expected 4 return values from attention forward (with output_attn_output=True), "
+                        f"but got {len(attn_result)}. This indicates the model's attention layer "
+                        f"does not support output_attn_output parameter."
+                    )
+
+        # 如果仍然无法获取，直接报错（不再回退到手动计算）
+        if attn_output_full is None:
+            raise RuntimeError(
+                f"Failed to get attn_output from layer {layer_idx}. "
+                f"This should not happen if output_attn_output is enabled. "
+                f"Please check if the model's attention layer supports output_attn_output parameter."
+            )
+
+        # 确保 attn_output_full 的形状正确
+        batch_size, seq_len_for_attn = h_before_full.shape[0], h_before_full.shape[1]
         head_dim = hidden_size // num_heads
-
-        # 计算Q, K, V（使用完整序列）
-        Q = attn_module.q_proj(h_before_full)  # [batch, seq_len, hidden_size]
-        K = attn_module.k_proj(h_before_full)
-        V = attn_module.v_proj(h_before_full)
-
-        # 获取数据类型，确保后续计算使用相同类型
-        dtype = Q.dtype
-
-        # 重塑为多头格式
-        Q = Q.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
-        K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
-        V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
-
-        # 应用 Rotary Position Embedding (RoPE) - 在计算 attention scores 之前
-        if hasattr(attn_module, 'rotary_emb'):
-            # 计算 kv_seq_len（对于单次forward，通常等于seq_len_for_attn）
-            kv_seq_len = seq_len_for_attn
-
-            # 生成 cos, sin（使用 V 的形状来确定序列长度）
-            cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
-
-            # 计算 position_ids（对于完整的序列，从0到seq_len_for_attn-1）
-            # 注意：如果 position_ids 已经可用且长度匹配，可以直接使用；否则重新计算
-            if position_ids is not None and position_ids.shape[1] == seq_len_for_attn:
-                current_position_ids = position_ids
-            else:
-                # 重新计算 position_ids（从0开始）
-                current_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
-
-            # 应用 RoPE 到 Q 和 K
-            Q, K = apply_rotary_pos_emb(Q, K, cos, sin, current_position_ids)
-
-        # 计算attention scores（使用完整序列）
-        scale = 1.0 / (head_dim ** 0.5)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
-
-        # 应用causal mask（下三角矩阵）- 使用相同的数据类型
-        causal_mask = torch.triu(torch.ones(seq_len_for_attn, seq_len_for_attn, device=device, dtype=dtype), diagonal=1)
-        causal_mask = causal_mask.masked_fill(causal_mask == 1, float('-inf'))
-        scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)  # [batch, num_heads, seq_len, seq_len]
-
-        # 应用softmax
-        attn_weights = torch.softmax(scores, dim=-1)
-
-        # 应用attention到V
-        attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
+        if attn_output_full.shape != (batch_size, num_heads, seq_len_for_attn, head_dim):
+            raise ValueError(
+                f"attn_output_full shape mismatch: expected {(batch_size, num_heads, seq_len_for_attn, head_dim)}, "
+                f"got {attn_output_full.shape}"
+            )
 
         # 遍历每个head
         for head_idx in range(num_heads):
             # 提取单个head的输出（原始输出，未经过o_proj）- 只取最后一个token
-            head_attn_output_full = attn_output[:, head_idx, :, :]  # [batch, seq_len, head_dim]
+            head_attn_output_full = attn_output_full[:, head_idx, :, :]  # [batch, seq_len, head_dim]
             head_attn_output = head_attn_output_full[:, last_token_idx:last_token_idx+1, :]  # [batch, 1, head_dim]
 
             # 保存原始head输出（用于训练linear probe）- 最后一个token
@@ -1468,7 +1493,10 @@ def process_case_chair(
         # 获取语言模型
         lang_model = model.get_model()
 
-        # 遍历每一层，手动计算每个head的输出
+        # 启用 attention output 提取功能（在调用 forward 之前）
+        enable_attn_output_extraction(model, enable=True)
+
+        # 遍历每一层，使用模型内部计算的 attn_output（而不是手动计算）
         for layer_idx in range(num_layers):
             # 获取该层之前的hidden state（h_t^(l-1)）- 使用完整的序列
             if layer_idx == 0:
@@ -1487,66 +1515,55 @@ def process_case_chair(
                 h_before_processed = h_before_processed.to(device)
             logits_before = lm_head(h_before_processed)  # [batch, vocab_size]
 
-            # 获取该层的attention模块
+            # 获取该层的attention模块和层对象
             layer = lang_model.layers[layer_idx]
             attn_module = layer.self_attn
 
-            # 手动计算attention，提取每个head的输出
-            # 使用完整的序列来计算attention
+            # 从模型内部获取 attn_output（在 reshape 之前）
+            # 注意：我们已经在前面调用了 forward，所以应该可以从层的属性中获取
+            attn_output_full = get_attn_output_from_layer(layer)
+
+            # 如果无法从层属性获取，需要手动调用一次 forward
+            if attn_output_full is None:
+                # 手动调用 forward 来获取 attn_output
+                with torch.no_grad():
+                    # 只对当前层调用 forward，传入 h_before_full
+                    attn_result = attn_module.forward(
+                        hidden_states=h_before_full,
+                        attention_mask=current_attention_mask if 'current_attention_mask' in locals() else None,
+                        position_ids=current_position_ids if 'current_position_ids' in locals() and current_position_ids.shape[1] == h_before_full.shape[1] else None,
+                        past_key_value=None,
+                        output_attentions=False,
+                        use_cache=False,
+                        output_attn_output=True,
+                    )
+                    # 解包返回值（可能是3个或4个元素）
+                    if len(attn_result) == 4:
+                        _, _, _, attn_output_full = attn_result
+                    else:
+                        # 如果返回的不是4个元素，回退到手动计算
+                        attn_output_full = None
+
+            # 如果仍然无法获取，直接报错（不再回退到手动计算）
+            if attn_output_full is None:
+                raise RuntimeError(
+                    f"Failed to get attn_output from layer {layer_idx} at step {step_idx}. "
+                    f"This should not happen if output_attn_output is enabled. "
+                    f"Please check if the model's attention layer supports output_attn_output parameter."
+                )
+
+            # 确保 attn_output_full 的形状正确
             batch_size, seq_len_for_attn, hidden_size = h_before_full.shape
             head_dim = hidden_size // num_heads
+            if attn_output_full.shape != (batch_size, num_heads, seq_len_for_attn, head_dim):
+                raise ValueError(
+                    f"attn_output_full shape mismatch at layer {layer_idx}, step {step_idx}: "
+                    f"expected {(batch_size, num_heads, seq_len_for_attn, head_dim)}, "
+                    f"got {attn_output_full.shape}"
+                )
 
-            # 计算Q, K, V（使用完整序列）
-            Q = attn_module.q_proj(h_before_full)  # [batch, seq_len, hidden_size]
-            K = attn_module.k_proj(h_before_full)
-            V = attn_module.v_proj(h_before_full)
-
-            # 获取数据类型，确保后续计算使用相同类型
-            dtype = Q.dtype
-
-            # 重塑为多头格式
-            Q = Q.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
-            K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
-            V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
-
-            # 应用 Rotary Position Embedding (RoPE) - 在计算 attention scores 之前
-            if hasattr(attn_module, 'rotary_emb'):
-                # 计算 kv_seq_len（对于单次forward，通常等于seq_len_for_attn）
-                kv_seq_len = seq_len_for_attn
-
-                # 生成 cos, sin（使用 V 的形状来确定序列长度）
-                cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
-
-                # 计算 position_ids（对于完整的序列，从0到seq_len_for_attn-1）
-                # 注意：在 process_case_chair 中，我们手动调用了 forward，current_position_ids 已在前面计算
-                # 如果 current_position_ids 存在且长度匹配，使用它；否则重新计算
-                try:
-                    if current_position_ids is not None and current_position_ids.shape[1] == seq_len_for_attn:
-                        rope_position_ids = current_position_ids
-                    else:
-                        # 重新计算 position_ids（从0开始）
-                        rope_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
-                except NameError:
-                    # current_position_ids 不在作用域内，重新计算
-                    rope_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
-
-                # 应用 RoPE 到 Q 和 K
-                Q, K = apply_rotary_pos_emb(Q, K, cos, sin, rope_position_ids)
-
-            # 计算attention scores（使用完整序列）
-            scale = 1.0 / (head_dim ** 0.5)
-            scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
-
-            # 应用causal mask（下三角矩阵）- 使用相同的数据类型
-            causal_mask = torch.triu(torch.ones(seq_len_for_attn, seq_len_for_attn, device=device, dtype=dtype), diagonal=1)
-            causal_mask = causal_mask.masked_fill(causal_mask == 1, float('-inf'))
-            scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)  # [batch, num_heads, seq_len, seq_len]
-
-            # 应用softmax
-            attn_weights = torch.softmax(scores, dim=-1)
-
-            # 应用attention到V
-            attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
+            # 获取数据类型（用于后续创建张量）
+            dtype = attn_output_full.dtype
 
             # 遍历每个head
             for head_idx in range(num_heads):
@@ -1885,6 +1902,9 @@ def process_case_chair(
                     # 只显示第一个唯一原因，避免输出过长
                     unique_reason = list(set(reasons))[0] if reasons else "未知原因"
                     print(f"       Step {step_idx}: 处理了 {processed}/{expected} 个head，跳过 {skipped} 个 - {unique_reason}")
+
+    # 禁用 attention output 提取功能
+    enable_attn_output_extraction(model, enable=False)
 
     return ground_truth_pairs
 

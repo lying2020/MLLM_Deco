@@ -284,7 +284,8 @@ class LlamaAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         head_weights: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        output_attn_output: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]], Optional[torch.Tensor]]:
         bsz, q_len, _ = hidden_states.size()
 
         if self.pretraining_tp > 1:
@@ -353,6 +354,11 @@ class LlamaAttention(nn.Module):
                 f" {attn_output.size()}"
             )
 
+        # 保存 attn_output（在 reshape 之前），如果需要返回
+        attn_output_before_reshape = None
+        if output_attn_output:
+            attn_output_before_reshape = attn_output.clone()
+
         # 如果提供了 head_weights，在 reshape 之前应用权重
         # head_weights 的形状应该是 [num_heads] 或 [batch, num_heads] 或 [batch, num_heads, 1, 1]
         if head_weights is not None:
@@ -387,7 +393,13 @@ class LlamaAttention(nn.Module):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        # 如果 output_attn_output=True，返回 attn_output_before_reshape（在 reshape 之前）
+        # 注意：为了向后兼容，如果 output_attn_output=False，返回的第四个元素是 None
+        if output_attn_output:
+            return attn_output, attn_weights, past_key_value, attn_output_before_reshape
+        else:
+            # 返回 None 作为第四个元素，保持向后兼容
+            return attn_output, attn_weights, past_key_value, None
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -427,14 +439,25 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        # 注意：self_attn 现在可能返回4个元素（如果 output_attn_output=True）
+        # 为了向后兼容，我们解包时处理3个或4个返回值
+        attn_result = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            output_attn_output=getattr(self, '_output_attn_output', False),  # 从层属性获取
         )
+        # 处理返回值：可能是3个或4个元素
+        if len(attn_result) == 4:
+            hidden_states, self_attn_weights, present_key_value, attn_output_before_reshape = attn_result
+            # 保存 attn_output_before_reshape 到层属性，供外部访问
+            self._last_attn_output_before_reshape = attn_output_before_reshape
+        else:
+            hidden_states, self_attn_weights, present_key_value = attn_result
+            self._last_attn_output_before_reshape = None
         hidden_states = residual + hidden_states
 
         # Fully Connected

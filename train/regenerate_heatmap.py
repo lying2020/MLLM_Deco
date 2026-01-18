@@ -230,7 +230,7 @@ def plot_binarized_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, 
 
 def main():
     parser = argparse.ArgumentParser(description="从 JSON 文件重新生成热力图")
-    parser.add_argument("--heatmap-json", type=str, required=True,
+    parser.add_argument("--heatmap-json", type=str, default="train/coco_train_json/head_gu_statistics/coco_train_200_generate_spp_gt_pair_head_gu_heatmap_data_v1.json",
                        help="热力图数据 JSON 文件路径")
     parser.add_argument("--output-dir", type=str, default=None,
                        help="输出目录（如果不指定，使用 JSON 文件所在目录）")
