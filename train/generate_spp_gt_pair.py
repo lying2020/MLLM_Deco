@@ -40,7 +40,7 @@ from PIL import Image
 import requests
 from io import BytesIO
 from transformers import set_seed
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, _expand_mask, _make_causal_mask
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 coco_train_json_dir = os.path.join(current_dir, "coco_train_json")
@@ -1167,10 +1167,31 @@ def process_case_chair(
             if attn_output_full is None:
                 # 手动调用 forward 来获取 attn_output
                 with torch.no_grad():
+                    # 准备 4D attention_mask（LlamaAttention.forward 期望 4D 格式）
+                    attn_mask_4d = None
+                    if 'current_attention_mask' in locals() and current_attention_mask is not None:
+                        # 将 2D mask [batch_size, seq_len] 转换为 4D mask [batch_size, 1, tgt_len, src_len]
+                        batch_size, seq_len = h_before_full.shape[:2]
+                        # 创建因果mask
+                        causal_mask = _make_causal_mask(
+                            (batch_size, seq_len),
+                            dtype=h_before_full.dtype,
+                            device=h_before_full.device,
+                            past_key_values_length=0
+                        )
+                        # 扩展 attention_mask
+                        expanded_mask = _expand_mask(
+                            current_attention_mask.to(h_before_full.dtype),
+                            dtype=h_before_full.dtype,
+                            tgt_len=seq_len
+                        )
+                        # 合并因果mask和attention mask
+                        attn_mask_4d = expanded_mask + causal_mask
+
                     # 只对当前层调用 forward，传入 h_before_full
                     attn_result = attn_module.forward(
                         hidden_states=h_before_full,
-                        attention_mask=current_attention_mask if 'current_attention_mask' in locals() else None,
+                        attention_mask=attn_mask_4d,
                         position_ids=current_position_ids if 'current_position_ids' in locals() and current_position_ids.shape[1] == h_before_full.shape[1] else None,
                         past_key_value=None,
                         output_attentions=False,

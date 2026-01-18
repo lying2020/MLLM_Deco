@@ -251,6 +251,7 @@ class LinearProbeManager:
                     past_key_value=None,
                     output_attentions=False,
                     use_cache=False,
+                    output_attn_output=False,  # 添加 output_attn_output 参数
                 ):
                     # 获取attention层参数
                     batch_size, seq_len, hidden_size = hidden_states.shape
@@ -266,7 +267,7 @@ class LinearProbeManager:
                         past_key_value=past_key_value,
                         output_attentions=output_attentions,
                         use_cache=use_cache,
-                        output_attn_output=True,  # 启用 attn_output 输出
+                        output_attn_output=True,  # 启用 attn_output 输出（内部需要，忽略传入的值）
                     )
 
                     # 解包返回值（应该是4个元素：output, attn_weights, past_key_value, attn_output_before_reshape）

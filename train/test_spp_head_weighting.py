@@ -127,6 +127,7 @@ class SPPHeadWeightManager:
                             past_key_value=None,
                             output_attentions=False,
                             use_cache=False,
+                            output_attn_output=False,  # 添加 output_attn_output 参数
                         ):
                             # 检查是否有需要调整权重的 head
                             has_weight_adjustment = any(
@@ -143,6 +144,7 @@ class SPPHeadWeightManager:
                                     past_key_value=past_key_value,
                                     output_attentions=output_attentions,
                                     use_cache=use_cache,
+                                    output_attn_output=output_attn_output,  # 传递 output_attn_output
                                 )
 
                             # 如果有权重调整，构建 head_weights 并传递给原始 forward
@@ -167,6 +169,7 @@ class SPPHeadWeightManager:
                                 past_key_value=past_key_value,
                                 output_attentions=output_attentions,
                                 use_cache=use_cache,
+                                output_attn_output=output_attn_output,  # 传递 output_attn_output
                                 head_weights=head_weights,
                             )
 
