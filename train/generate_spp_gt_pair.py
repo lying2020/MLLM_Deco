@@ -148,6 +148,53 @@ def get_vocab_tokens_for_words(tokenizer, words: List[str]) -> Set[int]:
     return token_ids
 
 
+def format_tokens_with_probs(tokenizer, logits: torch.Tensor, token_set: Set[int], max_display: int = 10) -> str:
+    """
+    格式化token集合，显示token ID、对应的词汇和概率值
+
+    Args:
+        tokenizer: tokenizer对象
+        logits: [vocab_size] 的logits
+        token_set: token ID集合
+        max_display: 最多显示的token数量
+
+    Returns:
+        str: 格式化后的字符串，例如 "2022('person':0.023), 3094('bicycle':0.015), ..."
+    """
+    if len(token_set) == 0:
+        return "[] (空)"
+
+    # 转换为概率分布
+    probs = torch.softmax(logits, dim=-1)
+
+    # 获取token列表（限制显示数量）
+    token_list = list(token_set)[:max_display]
+
+    # 格式化每个token
+    formatted_tokens = []
+    for token_id in token_list:
+        if token_id < len(probs):
+            prob = probs[token_id].item()
+            # 尝试解码token（可能包含特殊字符，需要处理）
+            try:
+                word = tokenizer.decode([token_id], skip_special_tokens=False).strip()
+                # 清理特殊字符和空白
+                word = word.replace('\n', '\\n').replace('\t', '\\t').replace('\r', '\\r')
+                if not word or word.isspace():
+                    word = f"<token_{token_id}>"
+            except:
+                word = f"<token_{token_id}>"
+            formatted_tokens.append(f"{token_id}('{word}':{prob:.4f})")
+        else:
+            formatted_tokens.append(f"{token_id}(<invalid>)")
+
+    # 如果还有更多token，添加省略号
+    if len(token_set) > max_display:
+        formatted_tokens.append(f"... (共{len(token_set)}个)")
+
+    return f"[{', '.join(formatted_tokens)}]"
+
+
 def compute_set_probability(logits: torch.Tensor, token_set: Set[int]) -> float:
     """
     计算集合概率 P(B | ξ) = Σ_{b∈B} P(b | ξ)
@@ -157,15 +204,29 @@ def compute_set_probability(logits: torch.Tensor, token_set: Set[int]) -> float:
         token_set: token ID集合
 
     Returns:
-        float: 集合概率
+        float: 集合概率（如果计算失败或包含nan/inf，返回0.0）
     """
+    # 检查logits是否包含nan或inf
+    if torch.isnan(logits).any() or torch.isinf(logits).any():
+        return 0.0
+
     # 转换为概率分布
     probs = torch.softmax(logits, dim=-1)
+
+    # 检查softmax结果是否包含nan或inf
+    if torch.isnan(probs).any() or torch.isinf(probs).any():
+        return 0.0
 
     # 计算集合中所有token的概率和
     set_probs = [probs[token_id].item() for token_id in token_set if token_id < len(probs)]
 
-    return sum(set_probs) if set_probs else 0.0
+    result = sum(set_probs) if set_probs else 0.0
+
+    # 检查结果是否为nan或inf
+    if np.isnan(result) or np.isinf(result):
+        return 0.0
+
+    return result
 
 
 def compute_log_probability_gain(
@@ -199,14 +260,26 @@ def compute_log_probability_gain(
     prob_with = compute_set_probability(logits_with_head, token_set)
     prob_without = compute_set_probability(logits_without_head, token_set)
 
+    # 检查概率值是否为nan或inf
+    if np.isnan(prob_with) or np.isinf(prob_with):
+        prob_with = 0.0
+    if np.isnan(prob_without) or np.isinf(prob_without):
+        prob_without = 0.0
+
     # 使用指数函数计算增益，避免log(0)的数值不稳定问题
     # exp(prob) 的范围是 [1, e]，其中 e ≈ 2.718
     # 当 prob 接近 0 时，exp(prob) ≈ 1，不会趋向 -inf
     # 当 prob 接近 1 时，exp(prob) ≈ e，不会趋向 +inf
     # 当 prob = 0（空集合）时，exp(0) - exp(0) = 0，自动处理空集合情况
-    exp_gain = np.exp(EXP_GAIN_COEFF*prob_with) - np.exp(EXP_GAIN_COEFF*prob_without)
-
-    return exp_gain
+    try:
+        exp_gain = np.exp(EXP_GAIN_COEFF*prob_with) - np.exp(EXP_GAIN_COEFF*prob_without)
+        # 检查结果是否为nan或inf
+        if np.isnan(exp_gain) or np.isinf(exp_gain):
+            return 0.0
+        return exp_gain
+    except (OverflowError, ValueError):
+        # 如果exp计算溢出，返回0.0
+        return 0.0
 
 
 class HeadOutputExtractor:
@@ -594,9 +667,19 @@ def process_case_pope(
             # 注意：这里使用的是指数函数计算的概率增益，而不是对数概率增益
             s_u = delta_log_p_minus - delta_log_p_plus
 
+            # 检查s_u是否为nan或inf
+            if np.isnan(s_u) or np.isinf(s_u):
+                # 如果s_u是nan或inf，跳过这个head
+                continue
+
             # 计算SPP输出g（公式D1）
             # g_u^(l,n) = tanh(α * s_u^(l,n) + β)
             g_u = tanh(ALPHA * s_u + BETA)
+
+            # 检查g_u是否为nan或inf
+            if np.isnan(g_u) or np.isinf(g_u):
+                # 如果g_u是nan或inf，跳过这个head
+                continue
 
             # 保存真值对
             pair = {
@@ -1248,7 +1331,38 @@ def process_case_chair(
                 current_word = step_token_word.get(step_idx)
                 if current_word is None:
                     continue
+
+                # 获取当前词汇的所有合理变体的token IDs
+                # 包括：原始形式、小写、大写、首字母大写等（如 people, People, PEOPLE, person, Person等）
+                # 这样可以处理tokenizer可能以不同方式编码同一个概念的情况
                 current_token_ids = get_vocab_tokens_for_words(tokenizer, [current_word])
+
+                # 同时，如果当前词汇在CHAIR的同义词组中，也应该包含同义词的token
+                # 例如：如果current_word是"people"，而CHAIR认为"people"和"person"是同义词（都映射到"person" node）
+                # 那么也应该包含"person"的token
+                if current_word in physical_word_to_node:
+                    node_word = physical_word_to_node[current_word]
+                    # 从CHAIR的synonyms_txt中查找所有属于同一个node的词汇
+                    from eval_tool.chair import synonyms_txt
+                    synonyms = synonyms_txt.strip().splitlines()
+                    synonyms = [s.strip().split(', ') for s in synonyms if s.strip()]
+                    # 找到包含node_word的同义词组
+                    for synonym_group in synonyms:
+                        if node_word.lower() in [s.lower() for s in synonym_group]:
+                            # 这个同义词组中的所有词汇都应该被包含
+                            # 但只包含那些是物理词汇的（在physical_word_to_node中的）
+                            for synonym_word in synonym_group:
+                                synonym_lower = synonym_word.lower()
+                                # 检查是否是已知的物理词汇（通过检查是否在physical_word_to_node中）
+                                # 或者直接添加到token IDs中（因为get_vocab_tokens_for_words会处理编码）
+                                synonym_tokens = get_vocab_tokens_for_words(tokenizer, [synonym_word])
+                                current_token_ids.update(synonym_tokens)
+                            break
+
+                # 确保至少包含实际生成的token（如果step_idx有效）
+                if step_idx < len(generated_token_ids):
+                    actual_token_id = generated_token_ids[step_idx]
+                    current_token_ids.add(actual_token_id)  # 确保包含实际生成的token
 
                 # ========================================================================
                 # 步骤4: 根据简化规则构建Bu^+和Bu^-，并计算语义先验偏置分数
@@ -1390,8 +1504,10 @@ def process_case_chair(
                         if head_idx == 0 and layer_idx == 0:
                             print(f"      ℹ️  [优化] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: Bu^-为空，使用 delta_log_p_minus = 0（中性假设）")
                             print(f"         当前token: '{current_word}' (Grounded)")
-                            print(f"         Bu^+ = {list(step_bu_plus_tokens)} (当前真实词汇)")
-                            print(f"         Bu^- = {list(step_bu_minus_tokens)} (空，将使用 delta_log_p_minus = 0)")
+                            # logits_with_head 已经在第1286行计算好了，可以直接使用
+                            bu_plus_str = format_tokens_with_probs(tokenizer, logits_with_head[0], step_bu_plus_tokens)
+                            print(f"         Bu^+ = {bu_plus_str}")
+                            print(f"         Bu^- = [] (空，将使用 delta_log_p_minus = 0)")
 
                 elif current_token_type == 'hallucinated':
                     # 如果yt是Hallucinated（幻视），例如"cat"
@@ -1408,8 +1524,10 @@ def process_case_chair(
                         if head_idx == 0 and layer_idx == 0:
                             print(f"      ℹ️  [优化] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: Bu^+为空，使用 delta_log_p_plus = 0（中性假设）")
                             print(f"         当前token: '{current_word}' (Hallucinated)")
-                            print(f"         Bu^- = {list(step_bu_minus_tokens)} (当前幻视词汇)")
-                            print(f"         Bu^+ = {list(step_bu_plus_tokens)} (空，将使用 delta_log_p_plus = 0)")
+                            # logits_with_head 已经在第1286行计算好了，可以直接使用
+                            bu_minus_str = format_tokens_with_probs(tokenizer, logits_with_head[0], step_bu_minus_tokens)
+                            print(f"         Bu^- = {bu_minus_str}")
+                            print(f"         Bu^+ = [] (空，将使用 delta_log_p_plus = 0)")
                 else:
                     # Neutral词汇应该已经被过滤掉了
                     continue
@@ -1453,8 +1571,24 @@ def process_case_chair(
                 # 计算语义先验偏置分数
                 s_u = delta_log_p_minus - delta_log_p_plus
 
+                # 检查s_u是否为nan或inf
+                if np.isnan(s_u) or np.isinf(s_u):
+                    # 如果s_u是nan或inf，跳过这个head
+                    if head_idx == 0 and layer_idx == 0:
+                        print(f"      ⚠️  [警告] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: s_u为nan/inf，跳过")
+                        print(f"         delta_log_p_plus: {delta_log_p_plus}, delta_log_p_minus: {delta_log_p_minus}")
+                    continue
+
                 # 计算SPP输出g
                 g_u = tanh(ALPHA * s_u + BETA)
+
+                # 检查g_u是否为nan或inf
+                if np.isnan(g_u) or np.isinf(g_u):
+                    # 如果g_u是nan或inf，跳过这个head
+                    if head_idx == 0 and layer_idx == 0:
+                        print(f"      ⚠️  [警告] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: g_u为nan/inf，跳过")
+                        print(f"         s_u: {s_u}, ALPHA: {ALPHA}, BETA: {BETA}")
+                    continue
 
                 # 保存真值对
                 pair = {
@@ -1718,7 +1852,8 @@ def main():
     # 保存结果（按layer和head分文件保存）
     print(f"\n[5/5] 保存结果...")
     train_file_name = os.path.basename(args.train_file).split(".")[0]
-    output_dir = os.path.join(coco_train_json_dir, f"{train_file_name}_head_ground_truth")
+    script_name = "generate_spp_gt_pair"  # 脚本名字
+    output_dir = os.path.join(coco_train_json_dir, f"{train_file_name}_{script_name}")
     os.makedirs(output_dir, exist_ok=True)
     print(f"✓ 输出目录: {output_dir}")
 
@@ -1812,26 +1947,52 @@ def main():
             print(f"  Head向量维度: {head_dim}")
 
     # g_u的统计
-    g_values = [p["g_u"] for p in all_ground_truth_pairs if "g_u" in p]
+    g_values_raw = [p["g_u"] for p in all_ground_truth_pairs if "g_u" in p]
+    # 过滤掉nan和inf值
+    g_values = [v for v in g_values_raw if not (np.isnan(v) or np.isinf(v))]
+    nan_count_g = len(g_values_raw) - len(g_values)
+
     if len(g_values) > 0:
         print(f"\ng_u 统计:")
+        print(f"  总数据点: {len(g_values_raw)}")
+        if nan_count_g > 0:
+            print(f"  ⚠️  nan/inf值数量: {nan_count_g}")
+        print(f"  有效数据点: {len(g_values)}")
         print(f"  平均值: {np.mean(g_values):.4f}")
         print(f"  标准差: {np.std(g_values):.4f}")
         print(f"  最小值: {np.min(g_values):.4f}")
         print(f"  最大值: {np.max(g_values):.4f}")
     else:
-        print(f"\ng_u 统计: 无数据（未生成任何真值对）")
+        print(f"\ng_u 统计: 无有效数据")
+        if len(g_values_raw) > 0:
+            print(f"  总数据点: {len(g_values_raw)}")
+            print(f"  ⚠️  所有值都是nan/inf")
+        else:
+            print(f"  未生成任何真值对")
 
     # s_u的统计
-    s_values = [p["s_u"] for p in all_ground_truth_pairs if "s_u" in p]
+    s_values_raw = [p["s_u"] for p in all_ground_truth_pairs if "s_u" in p]
+    # 过滤掉nan和inf值
+    s_values = [v for v in s_values_raw if not (np.isnan(v) or np.isinf(v))]
+    nan_count_s = len(s_values_raw) - len(s_values)
+
     if len(s_values) > 0:
         print(f"\ns_u 统计:")
+        print(f"  总数据点: {len(s_values_raw)}")
+        if nan_count_s > 0:
+            print(f"  ⚠️  nan/inf值数量: {nan_count_s}")
+        print(f"  有效数据点: {len(s_values)}")
         print(f"  平均值: {np.mean(s_values):.4f}")
         print(f"  标准差: {np.std(s_values):.4f}")
         print(f"  最小值: {np.min(s_values):.4f}")
         print(f"  最大值: {np.max(s_values):.4f}")
     else:
-        print(f"\ns_u 统计: 无数据（未生成任何真值对）")
+        print(f"\ns_u 统计: 无有效数据")
+        if len(s_values_raw) > 0:
+            print(f"  总数据点: {len(s_values_raw)}")
+            print(f"  ⚠️  所有值都是nan/inf")
+        else:
+            print(f"  未生成任何真值对")
 
     # 文件大小统计
     total_size = 0

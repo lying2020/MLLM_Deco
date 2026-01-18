@@ -195,6 +195,115 @@ def plot_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_h
     plt.close()
 
 
+def plot_binarized_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_heads: int = 32,
+                          output_path: str = None, threshold_min: float = -0.3, threshold_max: float = 0.5):
+    """
+    绘制二值化热力图：将g_u值在[threshold_min, threshold_max]范围内的置为0，其他保持原值
+
+    Args:
+        stats: {(layer_idx, head_idx): {'mean': float, ...}}
+        num_layers: 层数
+        num_heads: 每层的head数
+        output_path: 输出文件路径
+        threshold_min: 阈值下限（默认-0.3）
+        threshold_max: 阈值上限（默认0.5）
+    """
+    # 创建矩阵：行是layer，列是head
+    heatmap_data = np.zeros((num_layers, num_heads))
+    binarized_data = np.zeros((num_layers, num_heads))
+
+    # 填充数据并进行二值化
+    for (layer_idx, head_idx), stat in stats.items():
+        if 0 <= layer_idx < num_layers and 0 <= head_idx < num_heads:
+            g_u_mean = stat['mean']
+            heatmap_data[layer_idx, head_idx] = g_u_mean
+
+            # 二值化：如果值在[threshold_min, threshold_max]范围内，置为0；否则保持原值
+            if threshold_min <= g_u_mean <= threshold_max:
+                binarized_data[layer_idx, head_idx] = 0.0
+            else:
+                binarized_data[layer_idx, head_idx] = g_u_mean
+
+    # 创建图形（设置为正方形，确保32x32的网格显示为正方形）
+    fig, ax = plt.subplots(figsize=(12, 12))
+
+    # 创建自定义colormap：深蓝到深绿
+    # 深蓝 (dark blue) -> 浅蓝 -> 白色 -> 浅绿 -> 深绿 (dark green)
+    colors = ['#000080', '#4169E1', '#87CEEB', '#90EE90', '#228B22', '#006400']
+    n_bins = 256
+    cmap = mcolors.LinearSegmentedColormap.from_list('blue_to_green', colors, N=n_bins)
+
+    # 绘制二值化热力图（反转y轴，使layer 1在底部，layer 32在顶部）
+    # 使用 aspect='equal' 确保每个单元格都是正方形
+    im = ax.imshow(binarized_data, cmap=cmap, aspect='equal', vmin=-1.0, vmax=1.0,
+                   interpolation='nearest', origin='lower',
+                   extent=[-0.5, num_heads - 0.5, -0.5, num_layers - 0.5])
+
+    # 设置坐标轴标签（字体放大2倍）
+    ax.set_xlabel('Head Index', fontsize=24, fontweight='bold')
+    ax.set_ylabel('Layer Index', fontsize=24, fontweight='bold')
+    # 添加阈值信息到标题
+    ax.set_title(f'Head g_u Mean Value Heatmap (Binarized: [{threshold_min}, {threshold_max}] → 0)',
+                 fontsize=28, fontweight='bold', pad=20)
+
+    # 设置坐标轴范围，确保显示完整的32x32网格
+    ax.set_xlim(-0.5, num_heads - 0.5)
+    ax.set_ylim(-0.5, num_layers - 0.5)
+
+    # 设置刻度：只显示 [8, 16, 24, 32]，索引从1开始计数
+    # 横轴：head索引+1，只显示 [8, 16, 24, 32]
+    major_ticks = [7, 15, 23, 31]  # 对应索引 8, 16, 24, 32（因为从0开始，所以是7, 15, 23, 31）
+    major_labels = [8, 16, 24, 32]  # 显示的标签（索引+1）
+
+    ax.set_xticks(major_ticks)
+    ax.set_xticklabels(major_labels, fontsize=24, fontweight='bold')  # 字体放大：20->24
+    ax.set_yticks(major_ticks)
+    ax.set_yticklabels(major_labels, fontsize=24, fontweight='bold')  # 字体放大：20->24
+
+    # 设置刻度线加粗
+    ax.tick_params(axis='x', which='major', width=2, length=6, labelsize=24)
+    ax.tick_params(axis='y', which='major', width=2, length=6, labelsize=24)
+
+    # 隐藏次要刻度标签（但保留网格线）
+    ax.set_xticks(range(num_heads), minor=True)
+    ax.set_yticks(range(num_layers), minor=True)
+
+    # 添加colorbar（只显示 [-1.0, 0.0, 1.0] 三个刻度，不显示标签）
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_ticks([-1.0, 0.0, 1.0])  # 只显示三个刻度
+    cbar.ax.tick_params(labelsize=24, width=2)  # colorbar刻度字体大小和线宽
+    # 不设置label，移除colorbar标签
+
+    # 添加网格线（可选）
+    ax.set_xticks(np.arange(-0.5, num_heads, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, num_layers, 1), minor=True)
+    ax.grid(which='minor', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+
+    # 调整布局
+    plt.tight_layout()
+
+    # 保存图片
+    if output_path is None:
+        output_path = 'head_gu_binarized_heatmap.png'
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"✓ 二值化热力图已保存到: {output_path}")
+
+    # 打印统计信息
+    total_heads = num_layers * num_heads
+    binarized_count = np.sum((binarized_data == 0.0) & (heatmap_data != 0.0))  # 被置为0的数量（排除原本就是0的）
+    original_zero_count = np.sum(heatmap_data == 0.0)  # 原本就是0的数量
+    kept_count = np.sum(binarized_data != 0.0)  # 保持原值的数量
+
+    print(f"  二值化统计:")
+    print(f"    总head数: {total_heads}")
+    print(f"    被置为0的数量: {binarized_count}")
+    print(f"    原本就是0的数量: {original_zero_count}")
+    print(f"    保持原值的数量: {kept_count}")
+    print(f"    阈值范围: [{threshold_min}, {threshold_max}]")
+
+    plt.close()
+
+
 def plot_histogram(stats: Dict[Tuple[int, int], Dict], output_path: str = None, bin_width: float = 0.1):
     """
     绘制1024个head的g_u平均值分布柱状图
@@ -291,7 +400,7 @@ def plot_histogram(stats: Dict[Tuple[int, int], Dict], output_path: str = None, 
 def main():
     parser = argparse.ArgumentParser(description="分析head级别的g_u统计信息")
     parser.add_argument("--ground-truth-dir", type=str,
-                       default="train/coco_train_500_head_ground_truth",
+                       default="train/coco_train_json/coco_train_20_generate_vpp_gt_pair",
                        help="真值对文件目录")
     parser.add_argument("--num-layers", type=int, default=32,
                        help="模型层数")
@@ -344,19 +453,25 @@ def main():
         print(f"  ⚠️  警告: 所有head的g_u平均值都是nan！")
 
     # 生成图表
-    print("\n[3/3] 生成可视化图表...")
+    print("\n[3/4] 生成可视化图表...")
 
     # 从ground_truth_dir中提取目录名，用于生成文件名
     ground_truth_dir_name = ground_truth_dir.name  # 获取目录名，例如 "coco_train_500_head_ground_truth"
 
-    # 1. 热力图
+    # 1. 原始热力图
     heatmap_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_heatmap.png")
-    print(f"\n生成热力图...")
+    print(f"\n[1/3] 生成原始热力图...")
     plot_heatmap(stats, args.num_layers, args.num_heads, str(heatmap_path))
 
-    # 2. 柱状图
+    # 2. 二值化热力图
+    binarized_heatmap_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_binarized_heatmap.png")
+    print(f"\n[2/3] 生成二值化热力图...")
+    plot_binarized_heatmap(stats, args.num_layers, args.num_heads, str(binarized_heatmap_path),
+                          threshold_min=-0.3, threshold_max=0.5)
+
+    # 3. 柱状图
     histogram_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_histogram.png")
-    print(f"\n生成柱状图...")
+    print(f"\n[3/3] 生成柱状图...")
     plot_histogram(stats, str(histogram_path), args.bin_width)
 
     # 保存统计信息到JSON文件
@@ -382,9 +497,10 @@ def main():
     print("✓ 所有分析完成！")
     print("=" * 80)
     print(f"输出文件:")
-    print(f"  1. 热力图: {heatmap_path}")
-    print(f"  2. 柱状图: {histogram_path}")
-    print(f"  3. 统计信息: {stats_json_path}")
+    print(f"  1. 原始热力图: {heatmap_path}")
+    print(f"  2. 二值化热力图: {binarized_heatmap_path}")
+    print(f"  3. 柱状图: {histogram_path}")
+    print(f"  4. 统计信息: {stats_json_path}")
 
 
 if __name__ == "__main__":
