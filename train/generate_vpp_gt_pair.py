@@ -2124,7 +2124,7 @@ def main():
     # 保存结果（按layer和head分文件保存）
     print(f"\n[5/5] 保存结果...")
     train_file_name = os.path.basename(args.train_file).split(".")[0]
-    script_name = "generate_vpp_gt_pair"  # 脚本名字
+    script_name = "generate_vpp_gt_pair" + ("_np_exp" if USE_NP_EXP else "_np_log")  # 脚本名字
     output_dir = os.path.join(coco_train_json_dir, f"{train_file_name}_{script_name}")
     os.makedirs(output_dir, exist_ok=True)
     print(f"✓ 输出目录: {output_dir}")

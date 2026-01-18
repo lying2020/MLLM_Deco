@@ -13,6 +13,7 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from matplotlib.colors import TwoSlopeNorm
 from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
@@ -120,6 +121,9 @@ def plot_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_h
         num_layers: 层数
         num_heads: 每层的head数
         output_path: 输出文件路径
+
+    Returns:
+        np.ndarray: 热力图数据矩阵 [num_layers, num_heads]
     """
     # 创建矩阵：行是layer，列是head
     heatmap_data = np.zeros((num_layers, num_heads))
@@ -132,15 +136,21 @@ def plot_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_h
     # 创建图形（设置为正方形，确保32x32的网格显示为正方形）
     fig, ax = plt.subplots(figsize=(12, 12))
 
-    # 创建自定义colormap：深蓝到深绿
-    # 深蓝 (dark blue) -> 浅蓝 -> 白色 -> 浅绿 -> 深绿 (dark green)
-    colors = ['#000080', '#4169E1', '#87CEEB', '#90EE90', '#228B22', '#006400']
+    # 创建自定义colormap：深蓝 -> 白色 -> 深绿
+    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
+    # 负值部分：深蓝 -> 浅蓝 -> 白色
+    # 正值部分：白色 -> 浅绿 -> 深绿
+    colors = ['#000080', '#4169E1', '#87CEEB', '#FFFFFF', '#90EE90', '#228B22', '#006400']
     n_bins = 256
-    cmap = mcolors.LinearSegmentedColormap.from_list('blue_to_green', colors, N=n_bins)
+    cmap = mcolors.LinearSegmentedColormap.from_list('blue_white_green', colors, N=n_bins)
+
+    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
+    # vmin=-1.0, vcenter=0.0, vmax=1.0 确保 0 值对应 colormap 的中间位置（白色）
+    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
 
     # 绘制热力图（反转y轴，使layer 1在底部，layer 32在顶部）
     # 使用 aspect='equal' 确保每个单元格都是正方形
-    im = ax.imshow(heatmap_data, cmap=cmap, aspect='equal', vmin=-1.0, vmax=1.0,
+    im = ax.imshow(heatmap_data, cmap=cmap, norm=norm, aspect='equal',
                    interpolation='nearest', origin='lower',
                    extent=[-0.5, num_heads - 0.5, -0.5, num_layers - 0.5])
 
@@ -178,10 +188,7 @@ def plot_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_h
     cbar.ax.tick_params(labelsize=24, width=2)  # colorbar刻度字体大小和线宽
     # 不设置label，移除colorbar标签
 
-    # 添加网格线（可选）
-    ax.set_xticks(np.arange(-0.5, num_heads, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, num_layers, 1), minor=True)
-    ax.grid(which='minor', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+    # 不添加网格线
 
     # 调整布局
     plt.tight_layout()
@@ -194,9 +201,11 @@ def plot_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_h
 
     plt.close()
 
+    return heatmap_data
+
 
 def plot_binarized_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_heads: int = 32,
-                          output_path: str = None, threshold_min: float = -0.3, threshold_max: float = 0.5):
+                          output_path: str = None, threshold_min: float = -0.5, threshold_max: float = 0.5):
     """
     绘制二值化热力图：将g_u值在[threshold_min, threshold_max]范围内的置为0，其他保持原值
 
@@ -205,7 +214,7 @@ def plot_binarized_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int =
         num_layers: 层数
         num_heads: 每层的head数
         output_path: 输出文件路径
-        threshold_min: 阈值下限（默认-0.3）
+        threshold_min: 阈值下限（默认-0.5）
         threshold_max: 阈值上限（默认0.5）
     """
     # 创建矩阵：行是layer，列是head
@@ -227,15 +236,21 @@ def plot_binarized_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int =
     # 创建图形（设置为正方形，确保32x32的网格显示为正方形）
     fig, ax = plt.subplots(figsize=(12, 12))
 
-    # 创建自定义colormap：深蓝到深绿
-    # 深蓝 (dark blue) -> 浅蓝 -> 白色 -> 浅绿 -> 深绿 (dark green)
-    colors = ['#000080', '#4169E1', '#87CEEB', '#90EE90', '#228B22', '#006400']
+    # 创建自定义colormap：深蓝 -> 白色 -> 深绿
+    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
+    # 负值部分：深蓝 -> 浅蓝 -> 白色
+    # 正值部分：白色 -> 浅绿 -> 深绿
+    colors = ['#000080', '#4169E1', '#87CEEB', '#FFFFFF', '#90EE90', '#228B22', '#006400']
     n_bins = 256
-    cmap = mcolors.LinearSegmentedColormap.from_list('blue_to_green', colors, N=n_bins)
+    cmap = mcolors.LinearSegmentedColormap.from_list('blue_white_green', colors, N=n_bins)
+
+    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
+    # vmin=-1.0, vcenter=0.0, vmax=1.0 确保 0 值对应 colormap 的中间位置（白色）
+    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
 
     # 绘制二值化热力图（反转y轴，使layer 1在底部，layer 32在顶部）
     # 使用 aspect='equal' 确保每个单元格都是正方形
-    im = ax.imshow(binarized_data, cmap=cmap, aspect='equal', vmin=-1.0, vmax=1.0,
+    im = ax.imshow(binarized_data, cmap=cmap, norm=norm, aspect='equal',
                    interpolation='nearest', origin='lower',
                    extent=[-0.5, num_heads - 0.5, -0.5, num_layers - 0.5])
 
@@ -274,10 +289,7 @@ def plot_binarized_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int =
     cbar.ax.tick_params(labelsize=24, width=2)  # colorbar刻度字体大小和线宽
     # 不设置label，移除colorbar标签
 
-    # 添加网格线（可选）
-    ax.set_xticks(np.arange(-0.5, num_heads, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, num_layers, 1), minor=True)
-    ax.grid(which='minor', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+    # 不添加网格线
 
     # 调整布局
     plt.tight_layout()
@@ -342,7 +354,7 @@ def plot_histogram(stats: Dict[Tuple[int, int], Dict], output_path: str = None, 
     # 设置坐标轴（字体放大2倍：12->24, 14->28）
     ax.set_xlabel('g_u Mean Value', fontsize=24, fontweight='bold')
     ax.set_ylabel('Number of Heads', fontsize=24, fontweight='bold')
-    ax.set_title(f'Distribution of g_u Mean Values for 1024 Heads\n(Bin Width: 0.05)',
+    ax.set_title(f'Distribution of g_u Mean Values for 1024 Heads',
                  fontsize=28, fontweight='bold', pad=20)
 
     # 设置x轴范围：只显示有数据的那部分范围
@@ -400,7 +412,7 @@ def plot_histogram(stats: Dict[Tuple[int, int], Dict], output_path: str = None, 
 def main():
     parser = argparse.ArgumentParser(description="分析head级别的g_u统计信息")
     parser.add_argument("--ground-truth-dir", type=str,
-                       default="train/coco_train_json/coco_train_200_generate_vpp_gt_pair",
+                       default="train/coco_train_json/coco_train_200_generate_spp_gt_pair",
                        help="真值对文件目录")
     parser.add_argument("--num-layers", type=int, default=32,
                        help="模型层数")
@@ -461,13 +473,30 @@ def main():
     # 1. 原始热力图
     heatmap_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_heatmap.png")
     print(f"\n[1/3] 生成原始热力图...")
-    plot_heatmap(stats, args.num_layers, args.num_heads, str(heatmap_path))
+    heatmap_data = plot_heatmap(stats, args.num_layers, args.num_heads, str(heatmap_path))
+
+    # 保存热力图数据到JSON文件（用于后续手动编辑和重新生成）
+    heatmap_json_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_heatmap_data.json")
+    # 将数据转换为字典格式，每个layer作为一个key，便于识别和编辑
+    heatmap_data_dict = {
+        'num_layers': args.num_layers,
+        'num_heads': args.num_heads,
+        'data': {}
+    }
+    # 为每个layer创建带标签的数据
+    for layer_idx in range(args.num_layers):
+        layer_key = f"layer_{layer_idx}"
+        heatmap_data_dict['data'][layer_key] = heatmap_data[layer_idx].tolist()
+
+    with open(heatmap_json_path, 'w', encoding='utf-8') as f:
+        json.dump(heatmap_data_dict, f, indent=2, ensure_ascii=False)
+    print(f"✓ 热力图数据已保存到: {heatmap_json_path} (可用于手动编辑后重新生成)")
 
     # 2. 二值化热力图
     binarized_heatmap_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_binarized_heatmap.png")
     print(f"\n[2/3] 生成二值化热力图...")
     plot_binarized_heatmap(stats, args.num_layers, args.num_heads, str(binarized_heatmap_path),
-                          threshold_min=-0.3, threshold_max=0.5)
+                          threshold_min=-0.5, threshold_max=0.5)
 
     # 3. 柱状图
     histogram_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_histogram.png")
@@ -501,6 +530,7 @@ def main():
     print(f"  2. 二值化热力图: {binarized_heatmap_path}")
     print(f"  3. 柱状图: {histogram_path}")
     print(f"  4. 统计信息: {stats_json_path}")
+    print(f"  5. 热力图数据 (JSON): {heatmap_json_path} (可用于手动编辑后重新生成)")
 
 
 if __name__ == "__main__":
