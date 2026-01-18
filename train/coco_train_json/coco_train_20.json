@@ -1,7 +1,7 @@
 [
   {
     "question_id": 1,
-    "image": "COCO_val2014_000000000074.jpg",
+    "image": "COCO_val2014_000000000641.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
@@ -9,7 +9,7 @@
   },
   {
     "question_id": 2,
-    "image": "COCO_val2014_000000000074.jpg",
+    "image": "COCO_val2014_000000000641.jpg",
     "text": "Is there a bicycle in the image?  Please answer Yes or No.",
     "label": [
       "yes"
@@ -17,222 +17,6 @@
   },
   {
     "question_id": 3,
-    "image": "COCO_val2014_000000000074.jpg",
-    "text": "Is there a dog in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 4,
-    "image": "COCO_val2014_000000000074.jpg",
-    "text": "Is there a horse in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 5,
-    "image": "COCO_val2014_000000000074.jpg",
-    "text": "Is there a frisbee in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 6,
-    "image": "COCO_val2014_000000000074.jpg",
-    "text": "Is there an elephant in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 7,
-    "image": "COCO_val2014_000000000074.jpg",
-    "text": "Please help me describe the image in detail.",
-    "label": [
-      "bicycle",
-      "dog",
-      "person"
-    ]
-  },
-  {
-    "question_id": 8,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Is there a baseball bat in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 9,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 10,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Is there a baseball glove in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 11,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Is there a wine glass in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 12,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Is there a sink in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 13,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Is there a bear in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 14,
-    "image": "COCO_val2014_000000000357.jpg",
-    "text": "Please help me describe the image in detail.",
-    "label": [
-      "baseball bat",
-      "baseball glove",
-      "person"
-    ]
-  },
-  {
-    "question_id": 15,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Is there a cake in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 16,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Is there a tie in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 17,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 18,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Is there an elephant in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 19,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Is there a teddy bear in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 20,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Is there a banana in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 21,
-    "image": "COCO_val2014_000000000428.jpg",
-    "text": "Please help me describe the image in detail.",
-    "label": [
-      "cake",
-      "person",
-      "tie"
-    ]
-  },
-  {
-    "question_id": 22,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Is there a tennis racket in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 23,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Is there a chair in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 24,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 25,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Is there a donut in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 26,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Is there a skis in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 27,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Is there a wine glass in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 28,
-    "image": "COCO_val2014_000000000564.jpg",
-    "text": "Please help me describe the image in detail.",
-    "label": [
-      "chair",
-      "person",
-      "tennis racket"
-    ]
-  },
-  {
-    "question_id": 29,
     "image": "COCO_val2014_000000000641.jpg",
     "text": "Is there a bus in the image?  Please answer Yes or No.",
     "label": [
@@ -240,39 +24,7 @@
     ]
   },
   {
-    "question_id": 30,
-    "image": "COCO_val2014_000000000641.jpg",
-    "text": "Is there a bicycle in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 31,
-    "image": "COCO_val2014_000000000641.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 32,
-    "image": "COCO_val2014_000000000641.jpg",
-    "text": "Is there a sink in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 33,
-    "image": "COCO_val2014_000000000641.jpg",
-    "text": "Is there a mouse in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 34,
+    "question_id": 4,
     "image": "COCO_val2014_000000000641.jpg",
     "text": "Is there a horse in the image?  Please answer Yes or No.",
     "label": [
@@ -280,7 +32,23 @@
     ]
   },
   {
-    "question_id": 35,
+    "question_id": 5,
+    "image": "COCO_val2014_000000000641.jpg",
+    "text": "Is there a frisbee in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 6,
+    "image": "COCO_val2014_000000000641.jpg",
+    "text": "Is there an elephant in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 7,
     "image": "COCO_val2014_000000000641.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
@@ -290,7 +58,7 @@
     ]
   },
   {
-    "question_id": 36,
+    "question_id": 8,
     "image": "COCO_val2014_000000000724.jpg",
     "text": "Is there a car in the image?  Please answer Yes or No.",
     "label": [
@@ -298,7 +66,7 @@
     ]
   },
   {
-    "question_id": 37,
+    "question_id": 9,
     "image": "COCO_val2014_000000000724.jpg",
     "text": "Is there a truck in the image?  Please answer Yes or No.",
     "label": [
@@ -306,7 +74,7 @@
     ]
   },
   {
-    "question_id": 38,
+    "question_id": 10,
     "image": "COCO_val2014_000000000724.jpg",
     "text": "Is there a stop sign in the image?  Please answer Yes or No.",
     "label": [
@@ -314,31 +82,31 @@
     ]
   },
   {
-    "question_id": 39,
+    "question_id": 11,
     "image": "COCO_val2014_000000000724.jpg",
-    "text": "Is there a bottle in the image?  Please answer Yes or No.",
+    "text": "Is there a wine glass in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
-    "question_id": 40,
+    "question_id": 12,
     "image": "COCO_val2014_000000000724.jpg",
-    "text": "Is there a boat in the image?  Please answer Yes or No.",
+    "text": "Is there a scissors in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
-    "question_id": 41,
+    "question_id": 13,
     "image": "COCO_val2014_000000000724.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "text": "Is there a baseball bat in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
-    "question_id": 42,
+    "question_id": 14,
     "image": "COCO_val2014_000000000724.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
@@ -348,24 +116,256 @@
     ]
   },
   {
+    "question_id": 15,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Is there a couch in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 16,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 17,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Is there a laptop in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 18,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Is there an elephant in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 19,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Is there a tennis racket in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 20,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Is there a banana in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 21,
+    "image": "COCO_val2014_000000001436.jpg",
+    "text": "Please help me describe the image in detail.",
+    "label": [
+      "couch",
+      "laptop",
+      "person"
+    ]
+  },
+  {
+    "question_id": 22,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Is there a remote in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 23,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Is there a chair in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 24,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 25,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Is there a donut in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 26,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Is there a snowboard in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 27,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Is there a wine glass in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 28,
+    "image": "COCO_val2014_000000004092.jpg",
+    "text": "Please help me describe the image in detail.",
+    "label": [
+      "chair",
+      "person",
+      "remote"
+    ]
+  },
+  {
+    "question_id": 29,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Is there a couch in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 30,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Is there a chair in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 31,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Is there a tv in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 32,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Is there a sheep in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 33,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Is there a mouse in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 34,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Is there a horse in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 35,
+    "image": "COCO_val2014_000000004495.jpg",
+    "text": "Please help me describe the image in detail.",
+    "label": [
+      "chair",
+      "couch",
+      "tv"
+    ]
+  },
+  {
+    "question_id": 36,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 37,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Is there a train in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 38,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Is there a suitcase in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 39,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Is there a bottle in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 40,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Is there a boat in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 41,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Is there a parking meter in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 42,
+    "image": "COCO_val2014_000000004980.jpg",
+    "text": "Please help me describe the image in detail.",
+    "label": [
+      "person",
+      "suitcase",
+      "train"
+    ]
+  },
+  {
     "question_id": 43,
-    "image": "COCO_val2014_000000000730.jpg",
-    "text": "Is there a bus in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005178.jpg",
+    "text": "Is there a cow in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 44,
-    "image": "COCO_val2014_000000000730.jpg",
-    "text": "Is there a car in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005178.jpg",
+    "text": "Is there a horse in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 45,
-    "image": "COCO_val2014_000000000730.jpg",
+    "image": "COCO_val2014_000000005178.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
@@ -373,15 +373,15 @@
   },
   {
     "question_id": 46,
-    "image": "COCO_val2014_000000000730.jpg",
-    "text": "Is there a hair drier in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005178.jpg",
+    "text": "Is there a giraffe in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 47,
-    "image": "COCO_val2014_000000000730.jpg",
+    "image": "COCO_val2014_000000005178.jpg",
     "text": "Is there a baseball glove in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -389,7 +389,7 @@
   },
   {
     "question_id": 48,
-    "image": "COCO_val2014_000000000730.jpg",
+    "image": "COCO_val2014_000000005178.jpg",
     "text": "Is there a spoon in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -397,49 +397,49 @@
   },
   {
     "question_id": 49,
-    "image": "COCO_val2014_000000000730.jpg",
+    "image": "COCO_val2014_000000005178.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "bus",
-      "car",
+      "cow",
+      "horse",
       "person"
     ]
   },
   {
     "question_id": 50,
-    "image": "COCO_val2014_000000000761.jpg",
-    "text": "Is there a snowboard in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005595.jpg",
+    "text": "Is there a potted plant in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 51,
-    "image": "COCO_val2014_000000000761.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005595.jpg",
+    "text": "Is there a bird in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 52,
-    "image": "COCO_val2014_000000000761.jpg",
-    "text": "Is there a skis in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005595.jpg",
+    "text": "Is there a book in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 53,
-    "image": "COCO_val2014_000000000761.jpg",
-    "text": "Is there a bird in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005595.jpg",
+    "text": "Is there a boat in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 54,
-    "image": "COCO_val2014_000000000761.jpg",
+    "image": "COCO_val2014_000000005595.jpg",
     "text": "Is there a train in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -447,49 +447,49 @@
   },
   {
     "question_id": 55,
-    "image": "COCO_val2014_000000000761.jpg",
-    "text": "Is there a horse in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000005595.jpg",
+    "text": "Is there a keyboard in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 56,
-    "image": "COCO_val2014_000000000761.jpg",
+    "image": "COCO_val2014_000000005595.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "person",
-      "skis",
-      "snowboard"
+      "bird",
+      "book",
+      "potted plant"
     ]
   },
   {
     "question_id": 57,
-    "image": "COCO_val2014_000000000775.jpg",
-    "text": "Is there a motorcycle in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009772.jpg",
+    "text": "Is there a tv in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 58,
-    "image": "COCO_val2014_000000000775.jpg",
-    "text": "Is there a car in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009772.jpg",
+    "text": "Is there a sink in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 59,
-    "image": "COCO_val2014_000000000775.jpg",
-    "text": "Is there a bicycle in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009772.jpg",
+    "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 60,
-    "image": "COCO_val2014_000000000775.jpg",
+    "image": "COCO_val2014_000000009772.jpg",
     "text": "Is there a bench in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -497,7 +497,7 @@
   },
   {
     "question_id": 61,
-    "image": "COCO_val2014_000000000775.jpg",
+    "image": "COCO_val2014_000000009772.jpg",
     "text": "Is there a baseball glove in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -505,49 +505,49 @@
   },
   {
     "question_id": 62,
-    "image": "COCO_val2014_000000000775.jpg",
-    "text": "Is there a fire hydrant in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009772.jpg",
+    "text": "Is there a donut in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 63,
-    "image": "COCO_val2014_000000000775.jpg",
+    "image": "COCO_val2014_000000009772.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "bicycle",
-      "car",
-      "motorcycle"
+      "person",
+      "sink",
+      "tv"
     ]
   },
   {
     "question_id": 64,
-    "image": "COCO_val2014_000000000872.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009830.jpg",
+    "text": "Is there a cat in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 65,
-    "image": "COCO_val2014_000000000872.jpg",
-    "text": "Is there a baseball glove in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009830.jpg",
+    "text": "Is there a book in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 66,
-    "image": "COCO_val2014_000000000872.jpg",
-    "text": "Is there a sports ball in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009830.jpg",
+    "text": "Is there a laptop in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 67,
-    "image": "COCO_val2014_000000000872.jpg",
+    "image": "COCO_val2014_000000009830.jpg",
     "text": "Is there a bottle in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -555,123 +555,123 @@
   },
   {
     "question_id": 68,
-    "image": "COCO_val2014_000000000872.jpg",
-    "text": "Is there a pizza in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009830.jpg",
+    "text": "Is there a potted plant in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 69,
-    "image": "COCO_val2014_000000000872.jpg",
-    "text": "Is there a handbag in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000009830.jpg",
+    "text": "Is there a horse in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 70,
-    "image": "COCO_val2014_000000000872.jpg",
+    "image": "COCO_val2014_000000009830.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "baseball glove",
-      "person",
-      "sports ball"
+      "book",
+      "cat",
+      "laptop"
     ]
   },
   {
     "question_id": 71,
-    "image": "COCO_val2014_000000000962.jpg",
-    "text": "Is there a sports ball in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000010920.jpg",
+    "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 72,
-    "image": "COCO_val2014_000000000962.jpg",
-    "text": "Is there a tennis racket in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000010920.jpg",
+    "text": "Is there a traffic light in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 73,
-    "image": "COCO_val2014_000000000962.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000010920.jpg",
+    "text": "Is there a car in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 74,
-    "image": "COCO_val2014_000000000962.jpg",
-    "text": "Is there an oven in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000010920.jpg",
+    "text": "Is there a parking meter in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 75,
-    "image": "COCO_val2014_000000000962.jpg",
-    "text": "Is there a mouse in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000010920.jpg",
+    "text": "Is there an orange in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 76,
-    "image": "COCO_val2014_000000000962.jpg",
-    "text": "Is there a cup in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000010920.jpg",
+    "text": "Is there a dining table in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 77,
-    "image": "COCO_val2014_000000000962.jpg",
+    "image": "COCO_val2014_000000010920.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
+      "car",
       "person",
-      "sports ball",
-      "tennis racket"
+      "traffic light"
     ]
   },
   {
     "question_id": 78,
-    "image": "COCO_val2014_000000000969.jpg",
-    "text": "Is there a sports ball in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011262.jpg",
+    "text": "Is there a scissors in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 79,
-    "image": "COCO_val2014_000000000969.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011262.jpg",
+    "text": "Is there a bottle in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 80,
-    "image": "COCO_val2014_000000000969.jpg",
-    "text": "Is there a baseball glove in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011262.jpg",
+    "text": "Is there a book in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 81,
-    "image": "COCO_val2014_000000000969.jpg",
-    "text": "Is there a chair in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011262.jpg",
+    "text": "Is there a clock in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 82,
-    "image": "COCO_val2014_000000000969.jpg",
+    "image": "COCO_val2014_000000011262.jpg",
     "text": "Is there a toothbrush in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -679,57 +679,57 @@
   },
   {
     "question_id": 83,
-    "image": "COCO_val2014_000000000969.jpg",
-    "text": "Is there a fork in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011262.jpg",
+    "text": "Is there a frisbee in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 84,
-    "image": "COCO_val2014_000000000969.jpg",
+    "image": "COCO_val2014_000000011262.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "baseball glove",
-      "person",
-      "sports ball"
+      "book",
+      "bottle",
+      "scissors"
     ]
   },
   {
     "question_id": 85,
-    "image": "COCO_val2014_000000000974.jpg",
-    "text": "Is there a bench in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011699.jpg",
+    "text": "Is there a handbag in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 86,
-    "image": "COCO_val2014_000000000974.jpg",
-    "text": "Is there an elephant in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 87,
-    "image": "COCO_val2014_000000000974.jpg",
+    "image": "COCO_val2014_000000011699.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
+    "question_id": 87,
+    "image": "COCO_val2014_000000011699.jpg",
+    "text": "Is there a suitcase in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
     "question_id": 88,
-    "image": "COCO_val2014_000000000974.jpg",
-    "text": "Is there a handbag in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011699.jpg",
+    "text": "Is there a giraffe in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 89,
-    "image": "COCO_val2014_000000000974.jpg",
+    "image": "COCO_val2014_000000011699.jpg",
     "text": "Is there a truck in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -737,57 +737,57 @@
   },
   {
     "question_id": 90,
-    "image": "COCO_val2014_000000000974.jpg",
-    "text": "Is there a donut in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011699.jpg",
+    "text": "Is there a dog in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 91,
-    "image": "COCO_val2014_000000000974.jpg",
+    "image": "COCO_val2014_000000011699.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "bench",
-      "elephant",
-      "person"
+      "handbag",
+      "person",
+      "suitcase"
     ]
   },
   {
     "question_id": 92,
-    "image": "COCO_val2014_000000000985.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011796.jpg",
+    "text": "Is there a toothbrush in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 93,
-    "image": "COCO_val2014_000000000985.jpg",
-    "text": "Is there a chair in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011796.jpg",
+    "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 94,
-    "image": "COCO_val2014_000000000985.jpg",
-    "text": "Is there a bus in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011796.jpg",
+    "text": "Is there a handbag in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 95,
-    "image": "COCO_val2014_000000000985.jpg",
-    "text": "Is there a fire hydrant in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011796.jpg",
+    "text": "Is there a donut in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 96,
-    "image": "COCO_val2014_000000000985.jpg",
+    "image": "COCO_val2014_000000011796.jpg",
     "text": "Is there a baseball bat in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -795,57 +795,57 @@
   },
   {
     "question_id": 97,
-    "image": "COCO_val2014_000000000985.jpg",
-    "text": "Is there a laptop in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000011796.jpg",
+    "text": "Is there a knife in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 98,
-    "image": "COCO_val2014_000000000985.jpg",
+    "image": "COCO_val2014_000000011796.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "bus",
-      "chair",
-      "person"
+      "handbag",
+      "person",
+      "toothbrush"
     ]
   },
   {
     "question_id": 99,
-    "image": "COCO_val2014_000000000999.jpg",
-    "text": "Is there a baseball glove in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 100,
-    "image": "COCO_val2014_000000000999.jpg",
+    "image": "COCO_val2014_000000012147.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
+    "question_id": 100,
+    "image": "COCO_val2014_000000012147.jpg",
+    "text": "Is there a skateboard in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
     "question_id": 101,
-    "image": "COCO_val2014_000000000999.jpg",
-    "text": "Is there a baseball bat in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000012147.jpg",
+    "text": "Is there a bench in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 102,
-    "image": "COCO_val2014_000000000999.jpg",
-    "text": "Is there a donut in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000012147.jpg",
+    "text": "Is there a dog in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 103,
-    "image": "COCO_val2014_000000000999.jpg",
+    "image": "COCO_val2014_000000012147.jpg",
     "text": "Is there a tv in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -853,131 +853,15 @@
   },
   {
     "question_id": 104,
-    "image": "COCO_val2014_000000000999.jpg",
-    "text": "Is there a laptop in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000012147.jpg",
+    "text": "Is there a knife in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 105,
-    "image": "COCO_val2014_000000000999.jpg",
-    "text": "Please help me describe the image in detail.",
-    "label": [
-      "baseball bat",
-      "baseball glove",
-      "person"
-    ]
-  },
-  {
-    "question_id": 106,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Is there a cup in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 107,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 108,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Is there a tie in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 109,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Is there a snowboard in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 110,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Is there a car in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 111,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Is there a giraffe in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 112,
-    "image": "COCO_val2014_000000001089.jpg",
-    "text": "Please help me describe the image in detail.",
-    "label": [
-      "cup",
-      "person",
-      "tie"
-    ]
-  },
-  {
-    "question_id": 113,
-    "image": "COCO_val2014_000000001176.jpg",
-    "text": "Is there a bench in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 114,
-    "image": "COCO_val2014_000000001176.jpg",
-    "text": "Is there a skateboard in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 115,
-    "image": "COCO_val2014_000000001176.jpg",
-    "text": "Is there a person in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 116,
-    "image": "COCO_val2014_000000001176.jpg",
-    "text": "Is there a vase in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 117,
-    "image": "COCO_val2014_000000001176.jpg",
-    "text": "Is there a sheep in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 118,
-    "image": "COCO_val2014_000000001176.jpg",
-    "text": "Is there a remote in the image?  Please answer Yes or No.",
-    "label": [
-      "no"
-    ]
-  },
-  {
-    "question_id": 119,
-    "image": "COCO_val2014_000000001176.jpg",
+    "image": "COCO_val2014_000000012147.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
       "bench",
@@ -986,48 +870,164 @@
     ]
   },
   {
-    "question_id": 120,
-    "image": "COCO_val2014_000000001296.jpg",
-    "text": "Is there a clock in the image?  Please answer Yes or No.",
+    "question_id": 106,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Is there a bottle in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
-    "question_id": 121,
-    "image": "COCO_val2014_000000001296.jpg",
-    "text": "Is there a cell phone in the image?  Please answer Yes or No.",
+    "question_id": 107,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Is there a cake in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
-    "question_id": 122,
-    "image": "COCO_val2014_000000001296.jpg",
+    "question_id": 108,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Is there a horse in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 109,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Is there a spoon in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 110,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Is there a cat in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 111,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Is there a hair drier in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 112,
+    "image": "COCO_val2014_000000013605.jpg",
+    "text": "Please help me describe the image in detail.",
+    "label": [
+      "bottle",
+      "cake",
+      "horse"
+    ]
+  },
+  {
+    "question_id": 113,
+    "image": "COCO_val2014_000000013783.jpg",
+    "text": "Is there a bowl in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 114,
+    "image": "COCO_val2014_000000013783.jpg",
+    "text": "Is there a scissors in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 115,
+    "image": "COCO_val2014_000000013783.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
+    "question_id": 116,
+    "image": "COCO_val2014_000000013783.jpg",
+    "text": "Is there a vase in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 117,
+    "image": "COCO_val2014_000000013783.jpg",
+    "text": "Is there a sink in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 118,
+    "image": "COCO_val2014_000000013783.jpg",
+    "text": "Is there a remote in the image?  Please answer Yes or No.",
+    "label": [
+      "no"
+    ]
+  },
+  {
+    "question_id": 119,
+    "image": "COCO_val2014_000000013783.jpg",
+    "text": "Please help me describe the image in detail.",
+    "label": [
+      "bowl",
+      "person",
+      "scissors"
+    ]
+  },
+  {
+    "question_id": 120,
+    "image": "COCO_val2014_000000013965.jpg",
+    "text": "Is there a car in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 121,
+    "image": "COCO_val2014_000000013965.jpg",
+    "text": "Is there a bus in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
+    "question_id": 122,
+    "image": "COCO_val2014_000000013965.jpg",
+    "text": "Is there a train in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
     "question_id": 123,
-    "image": "COCO_val2014_000000001296.jpg",
-    "text": "Is there a tie in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000013965.jpg",
+    "text": "Is there a tennis racket in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 124,
-    "image": "COCO_val2014_000000001296.jpg",
-    "text": "Is there a teddy bear in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000013965.jpg",
+    "text": "Is there a surfboard in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 125,
-    "image": "COCO_val2014_000000001296.jpg",
+    "image": "COCO_val2014_000000013965.jpg",
     "text": "Is there a boat in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -1035,33 +1035,33 @@
   },
   {
     "question_id": 126,
-    "image": "COCO_val2014_000000001296.jpg",
+    "image": "COCO_val2014_000000013965.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "cell phone",
-      "clock",
-      "person"
+      "bus",
+      "car",
+      "train"
     ]
   },
   {
     "question_id": 127,
-    "image": "COCO_val2014_000000001404.jpg",
-    "text": "Is there a couch in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000014353.jpg",
+    "text": "Is there an oven in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 128,
-    "image": "COCO_val2014_000000001404.jpg",
-    "text": "Is there a teddy bear in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000014353.jpg",
+    "text": "Is there a pizza in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 129,
-    "image": "COCO_val2014_000000001404.jpg",
+    "image": "COCO_val2014_000000014353.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
@@ -1069,7 +1069,7 @@
   },
   {
     "question_id": 130,
-    "image": "COCO_val2014_000000001404.jpg",
+    "image": "COCO_val2014_000000014353.jpg",
     "text": "Is there a cat in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -1077,15 +1077,15 @@
   },
   {
     "question_id": 131,
-    "image": "COCO_val2014_000000001404.jpg",
-    "text": "Is there a sheep in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000014353.jpg",
+    "text": "Is there a sink in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 132,
-    "image": "COCO_val2014_000000001404.jpg",
+    "image": "COCO_val2014_000000014353.jpg",
     "text": "Is there a zebra in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -1093,41 +1093,41 @@
   },
   {
     "question_id": 133,
-    "image": "COCO_val2014_000000001404.jpg",
+    "image": "COCO_val2014_000000014353.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "couch",
+      "oven",
       "person",
-      "teddy bear"
+      "pizza"
     ]
   },
   {
     "question_id": 134,
-    "image": "COCO_val2014_000000001436.jpg",
-    "text": "Is there a couch in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000014591.jpg",
+    "text": "Is there a cup in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
     "question_id": 135,
-    "image": "COCO_val2014_000000001436.jpg",
-    "text": "Is there a laptop in the image?  Please answer Yes or No.",
-    "label": [
-      "yes"
-    ]
-  },
-  {
-    "question_id": 136,
-    "image": "COCO_val2014_000000001436.jpg",
+    "image": "COCO_val2014_000000014591.jpg",
     "text": "Is there a person in the image?  Please answer Yes or No.",
     "label": [
       "yes"
     ]
   },
   {
+    "question_id": 136,
+    "image": "COCO_val2014_000000014591.jpg",
+    "text": "Is there a toothbrush in the image?  Please answer Yes or No.",
+    "label": [
+      "yes"
+    ]
+  },
+  {
     "question_id": 137,
-    "image": "COCO_val2014_000000001436.jpg",
+    "image": "COCO_val2014_000000014591.jpg",
     "text": "Is there a zebra in the image?  Please answer Yes or No.",
     "label": [
       "no"
@@ -1135,28 +1135,28 @@
   },
   {
     "question_id": 138,
-    "image": "COCO_val2014_000000001436.jpg",
-    "text": "Is there a sports ball in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000014591.jpg",
+    "text": "Is there a spoon in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 139,
-    "image": "COCO_val2014_000000001436.jpg",
-    "text": "Is there a toilet in the image?  Please answer Yes or No.",
+    "image": "COCO_val2014_000000014591.jpg",
+    "text": "Is there a toaster in the image?  Please answer Yes or No.",
     "label": [
       "no"
     ]
   },
   {
     "question_id": 140,
-    "image": "COCO_val2014_000000001436.jpg",
+    "image": "COCO_val2014_000000014591.jpg",
     "text": "Please help me describe the image in detail.",
     "label": [
-      "couch",
-      "laptop",
-      "person"
+      "cup",
+      "person",
+      "toothbrush"
     ]
   }
 ]

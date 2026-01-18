@@ -49,7 +49,7 @@ os.makedirs(coco_train_json_dir, exist_ok=True)
 # SPP 参数
 ALPHA = 1.0  # 温度/尺度参数
 BETA = 0.0   # 偏置参数
-TOP_K = 20   # 用于构建候选池的top-K值
+TOP_K = 40   # 用于构建候选池的top-K值
 
 
 def tanh(x):
@@ -183,7 +183,14 @@ def compute_log_probability_gain(
 
     Returns:
         float: 对数概率增益
+        如果 token_set 为空，返回 0.0（中性假设：head 对空集合的概率增益为 0）
     """
+    # 如果 token_set 为空，返回 0（中性假设）
+    # 数学解释：空集合的概率为 0，head 对空集合的影响可以视为中性（0）
+    # 语义解释：空集合表示 head 对缺失的对比对象没有贡献（中性）
+    if len(token_set) == 0:
+        return 0.0
+
     # 计算集合概率
     prob_with = compute_set_probability(logits_with_head, token_set)
     prob_without = compute_set_probability(logits_without_head, token_set)
@@ -496,18 +503,16 @@ def process_case_pope(
     # 存储所有head的真值对
     ground_truth_pairs = []
 
-    # 遍历每一层
+    # 遍历每一层，手动计算每个head的输出（与CHAIR处理一致）
     for layer_idx in range(num_layers):
-        # 获取该层之前的hidden state（h_t^(l-1)）
-        h_before = extractor.get_hidden_state_before(layer_idx)
-        if h_before is None:
-            # 如果没有hook数据，使用hidden_states
-            if layer_idx == 0:
-                h_before = hidden_states[0][:, last_token_idx:last_token_idx+1, :]
-            else:
-                h_before = hidden_states[layer_idx][:, last_token_idx:last_token_idx+1, :]
+        # 获取该层之前的hidden state（h_t^(l-1)）- 使用完整的序列
+        if layer_idx == 0:
+            h_before_full = hidden_states[0]  # [batch, seq_len, hidden_size]
         else:
-            h_before = h_before[:, last_token_idx:last_token_idx+1, :]
+            h_before_full = hidden_states[layer_idx]  # [batch, seq_len, hidden_size]
+
+        # 获取最后一个token的hidden state（用于计算logits）
+        h_before = h_before_full[:, last_token_idx:last_token_idx+1, :]  # [batch, 1, hidden_size]
 
         # 计算未加入head的logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
         h_before_processed = h_before.squeeze(1)  # [batch, hidden_size]
@@ -517,31 +522,64 @@ def process_case_pope(
             h_before_processed = h_before_processed.to(device)
         logits_before = lm_head(h_before_processed)  # [batch, vocab_size]
 
+        # 获取该层的attention模块
+        attn_module = lang_model.layers[layer_idx].self_attn
+
+        # 手动计算attention，提取每个head的输出
+        # 使用完整的序列来计算attention
+        batch_size, seq_len_for_attn, hidden_size = h_before_full.shape
+        head_dim = hidden_size // num_heads
+
+        # 计算Q, K, V（使用完整序列）
+        Q = attn_module.q_proj(h_before_full)  # [batch, seq_len, hidden_size]
+        K = attn_module.k_proj(h_before_full)
+        V = attn_module.v_proj(h_before_full)
+
+        # 获取数据类型，确保后续计算使用相同类型
+        dtype = Q.dtype
+
+        # 重塑为多头格式
+        Q = Q.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
+        K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
+        V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
+
+        # 计算attention scores（使用完整序列）
+        scale = 1.0 / (head_dim ** 0.5)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
+
+        # 应用causal mask（下三角矩阵）- 使用相同的数据类型
+        causal_mask = torch.triu(torch.ones(seq_len_for_attn, seq_len_for_attn, device=device, dtype=dtype), diagonal=1)
+        causal_mask = causal_mask.masked_fill(causal_mask == 1, float('-inf'))
+        scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)  # [batch, num_heads, seq_len, seq_len]
+
+        # 应用softmax
+        attn_weights = torch.softmax(scores, dim=-1)
+
+        # 应用attention到V
+        attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
+
         # 遍历每个head
         for head_idx in range(num_heads):
-            # 获取该head的输出 H_t^(l,n)（经过o_proj后的完整输出）
-            head_output = extractor.get_head_output(layer_idx, head_idx)
+            # 提取单个head的输出（原始输出，未经过o_proj）- 只取最后一个token
+            head_attn_output_full = attn_output[:, head_idx, :, :]  # [batch, seq_len, head_dim]
+            head_attn_output = head_attn_output_full[:, last_token_idx:last_token_idx+1, :]  # [batch, 1, head_dim]
 
-            # 获取该head的原始输出（未经过o_proj，用于训练linear probe）
-            head_raw_output = extractor.get_head_raw_output(layer_idx, head_idx)
+            # 保存原始head输出（用于训练linear probe）- 最后一个token
+            # 需要先detach()，因为张量可能requires_grad
+            head_raw_vector = head_attn_output[:, 0, :].detach().cpu().numpy()  # [head_dim]
 
-            if head_output is None:
-                # 如果hook没有捕获到，使用近似方法
-                h_after_all_heads = hidden_states[layer_idx + 1][:, last_token_idx:last_token_idx+1, :]
-                head_contribution_approx = (h_after_all_heads - h_before) / num_heads
-                h_with_head = h_before + head_contribution_approx
-                # 无法获取原始head输出，使用零向量
-                head_raw_vector = None
-            else:
-                # 使用精确的head输出
-                head_output_last = head_output[:, last_token_idx:last_token_idx+1, :]
-                h_with_head = h_before + head_output_last
+            # 创建一个只包含该head的完整attn_output（其他head为零）- 只对最后一个token
+            # 使用与模型相同的数据类型
+            head_only_concat = torch.zeros(batch_size, 1, hidden_size, device=device, dtype=dtype)
+            head_start = head_idx * head_dim
+            head_end = (head_idx + 1) * head_dim
+            head_only_concat[:, :, head_start:head_end] = head_attn_output
 
-                # 提取最后一个token的原始head向量（用于训练linear probe）
-                if head_raw_output is not None:
-                    head_raw_vector = head_raw_output[:, last_token_idx, :].detach().cpu().numpy()  # [head_dim]
-                else:
-                    head_raw_vector = None
+            # 应用o_proj得到该head的完整输出
+            head_output_full = attn_module.o_proj(head_only_concat)  # [batch, 1, hidden_size]
+
+            # 使用精确的head输出
+            h_with_head = h_before + head_output_full
 
             # 计算加入该head后的logits（参考 test_chair_test.py，在应用lm_head之前先通过norm_layer）
             h_with_head_processed = h_with_head.squeeze(1)  # [batch, hidden_size]
@@ -926,6 +964,16 @@ def process_case_chair(
     print(f"  - Grounded物理词汇 ({len(grounded_words)}个): {grounded_str}")
     print(f"  - Hallucinated物理词汇 ({len(hallucinated_words)}个): {hallucinated_str}")
 
+    # 检查是否有幻视词汇（用于调试）
+    if len(hallucinated_words) == 0:
+        print(f"  ⚠️  警告: 生成的 caption 中没有幻视词汇！")
+        print(f"     这可能导致无法构建有效的对比（Bu^- 为空），所有 head 都会被跳过")
+        print(f"     可能原因:")
+        print(f"     1. 模型生成的 caption 非常准确，没有产生幻视")
+        print(f"     2. 筛选时生成的 caption 与当前生成的 caption 不一致（模型生成的不确定性）")
+        print(f"     3. 图片在补充阶段被随机选中，没有经过 caption 检查")
+        print(f"     建议: 检查 build_coco_train_dataset.py 的筛选逻辑，确保所有图片都经过 caption 检查")
+
     # 构建H（幻觉候选词表）= COCO对象类别词汇表
     from eval_tool.chair import synonyms_txt
     synonyms = synonyms_txt.strip().splitlines()
@@ -1009,10 +1057,17 @@ def process_case_chair(
     lang_model = model.get_model()
     embedding_layer = lang_model.embed_tokens if hasattr(lang_model, 'embed_tokens') else None
 
+    # 统计信息：记录每个step的处理情况（用于调试）
+    step_processed_count = {}  # {step_idx: count} - 记录每个step成功处理的head数量
+    step_skipped_reasons = {}  # {step_idx: [reasons]} - 记录每个step被跳过的原因
+
     # 遍历每个目标生成步骤
     for step_idx in target_steps:
         # 检查步骤是否有效
         if step_idx >= len(generated_token_ids):
+            if step_idx not in step_skipped_reasons:
+                step_skipped_reasons[step_idx] = []
+            step_skipped_reasons[step_idx].append(f"step_idx >= len(generated_token_ids): {step_idx} >= {len(generated_token_ids)}")
             continue
 
         # 方案1：尝试使用理想方法 - 手动调用forward来触发hook
@@ -1202,12 +1257,60 @@ def process_case_chair(
                     continue
                 current_token_ids = get_vocab_tokens_for_words(tokenizer, [current_word])
 
-                # 步骤4: 根据简化规则构建Bu^+和Bu^-
-                # 规则：
-                # - 如果当前推理步是真实词汇：Bu^+ = {当前真实词汇}，Bu^- = top-K中的所有幻视词汇
-                # - 如果当前推理步是幻视词汇：Bu^- = {当前幻视词汇}，Bu^+ = top-K中的所有真实词汇
+                # ========================================================================
+                # 步骤4: 根据简化规则构建Bu^+和Bu^-，并计算语义先验偏置分数
+                # ========================================================================
+                #
+                # 【计算对比逻辑说明】
+                #
+                # 1. 目标：计算语义先验偏置分数 s_u，用于衡量head对幻视/真实实例的贡献
+                #    s_u = delta_log_p_minus - delta_log_p_plus
+                #    其中：
+                #    - delta_log_p_plus = log P(Bu^+ | h_with_head) - log P(Bu^+ | h_without_head)
+                #    - delta_log_p_minus = log P(Bu^- | h_with_head) - log P(Bu^- | h_without_head)
+                #    - P(Bu) = Σ_{b∈Bu} P(b)，即集合中所有token的概率和
+                #
+                # 2. 为什么需要同时有 Bu^+ 和 Bu^-？
+                #    - 如果 Bu^+ 为空：P(Bu^+) = 0，log(0) = -inf，无法计算 delta_log_p_plus
+                #    - 如果 Bu^- 为空：P(Bu^-) = 0，log(0) = -inf，无法计算 delta_log_p_minus
+                #    - 因此，必须同时有 Bu^+ 和 Bu^- 才能计算 s_u
+                #
+                # 3. 构建规则：
+                #    - 如果当前推理步是真实词汇（Grounded）：
+                #      * Bu^+ = {当前真实词汇}（例如：{"dog"}）
+                #      * Bu^- = top-K中的所有幻视词汇（例如：{"cat", "bird"}）
+                #      * 如果 top-K 中没有幻视词汇，则 Bu^- 为空，无法计算对比
+                #
+                #    - 如果当前推理步是幻视词汇（Hallucinated）：
+                #      * Bu^- = {当前幻视词汇}（例如：{"cat"}）
+                #      * Bu^+ = top-K中的所有真实词汇（例如：{"dog", "person"}）
+                #      * 如果 top-K 中没有真实实例词汇，则 Bu^+ 为空，无法计算对比
+                #
+                # 4. 举例说明：
+                #    例1：Grounded token "dog"，但 top-K 中没有幻视词汇
+                #    - 当前词汇：yt = "dog"（真实实例）
+                #    - top-K 预测：["dog", "puppy", "animal", "pet", ...]（都是真实实例或非物理词汇）
+                #    - Bu^+ = {"dog"} ✓
+                #    - Bu^- = {} ✗（空集合）
+                #    - 结果：无法计算 delta_log_p_minus，因为 P(Bu^-) = 0
+                #
+                #    例2：Hallucinated token "cat"，但 top-K 中没有真实实例词汇
+                #    - 当前词汇：yt = "cat"（幻视，因为图像中只有"dog"）
+                #    - top-K 预测：["cat", "kitten", "animal", "pet", ...]（都是幻视或非物理词汇）
+                #    - Bu^- = {"cat"} ✓
+                #    - Bu^+ = {} ✗（空集合）
+                #    - 结果：无法计算 delta_log_p_plus，因为 P(Bu^+) = 0
+                #
+                #    例3：正常情况（Grounded token "dog"，top-K 中有幻视词汇）
+                #    - 当前词汇：yt = "dog"（真实实例）
+                #    - top-K 预测：["dog", "cat", "bird", "puppy", ...]
+                #    - Bu^+ = {"dog"} ✓
+                #    - Bu^- = {"cat", "bird"} ✓（从 top-K 中筛选出的幻视词汇）
+                #    - 结果：可以计算 s_u = delta_log_p_minus - delta_log_p_plus
+                # ========================================================================
 
                 # 获取top-K候选池 Ct（针对当前head的logits）
+                # 注意：不同head的top-K预测可能不同，因此每个head需要单独计算
                 top_k_logits, top_k_indices = torch.topk(logits_with_head[0], k=TOP_K)
                 Ct_tokens = set(top_k_indices.detach().cpu().numpy().tolist())
 
@@ -1257,7 +1360,27 @@ def process_case_chair(
                 step_bu_plus_tokens = set()
                 step_bu_minus_tokens = set()
 
+                # 调试信息：记录top-K的详细信息（仅在第一个head和layer记录，避免输出过多）
+                debug_info = None
+                if head_idx == 0 and layer_idx == 0:
+                    # 解码top-K tokens用于调试
+                    top_k_words = [tokenizer.decode([tid], skip_special_tokens=False).strip()
+                                   for tid in list(Ct_tokens)[:10]]  # 只显示前10个
+                    debug_info = {
+                        'top_k_tokens': list(Ct_tokens)[:10],
+                        'top_k_words': top_k_words,
+                        'Ct_physical_count': len(Ct_valid_physical_tokens),
+                        'Ct_grounded_count': len(Ct_grounded_tokens),
+                        'Ct_hallucinated_count': len(Ct_hallucinated_tokens),
+                        'Ct_grounded_tokens': list(Ct_grounded_tokens),
+                        'Ct_hallucinated_tokens': list(Ct_hallucinated_tokens)
+                    }
+
                 # 根据token类型构建Bu^+和Bu^-
+                # 优化：如果单个集合为空，不再跳过，而是使用 delta_log_p = 0（中性假设）
+                # 如果两者都为空，仍然跳过（因为无法确定 head 的真实倾向）
+                is_approximated = False  # 标记是否为近似值（使用了空集合的 delta_log_p = 0）
+
                 if current_token_type == 'grounded':
                     # 如果yt是Grounded（真实实例），例如"dog"
                     # Bu^+ = {yt}，只包含当前真实词汇
@@ -1266,9 +1389,15 @@ def process_case_chair(
                     # Bu^- = top-K中的所有幻视词汇
                     step_bu_minus_tokens = Ct_hallucinated_tokens.copy()
 
-                    # 如果top-K中没有幻视词汇，跳过（无法构建有效的对比）
+                    # 如果top-K中没有幻视词汇，不再跳过，而是使用 delta_log_p_minus = 0（中性假设）
                     if len(step_bu_minus_tokens) == 0:
-                        continue
+                        is_approximated = True
+                        # 记录调试信息（只在第一个head记录，避免重复）
+                        if head_idx == 0 and layer_idx == 0:
+                            print(f"      ℹ️  [优化] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: Bu^-为空，使用 delta_log_p_minus = 0（中性假设）")
+                            print(f"         当前token: '{current_word}' (Grounded)")
+                            print(f"         Bu^+ = {list(step_bu_plus_tokens)} (当前真实词汇)")
+                            print(f"         Bu^- = {list(step_bu_minus_tokens)} (空，将使用 delta_log_p_minus = 0)")
 
                 elif current_token_type == 'hallucinated':
                     # 如果yt是Hallucinated（幻视），例如"cat"
@@ -1278,22 +1407,48 @@ def process_case_chair(
                     # Bu^+ = top-K中的所有真实词汇
                     step_bu_plus_tokens = Ct_grounded_tokens.copy()
 
-                    # 如果top-K中没有真实实例词汇，跳过（无法构建有效的对比）
+                    # 如果top-K中没有真实实例词汇，不再跳过，而是使用 delta_log_p_plus = 0（中性假设）
                     if len(step_bu_plus_tokens) == 0:
-                        continue
+                        is_approximated = True
+                        # 记录调试信息（只在第一个head记录，避免重复）
+                        if head_idx == 0 and layer_idx == 0:
+                            print(f"      ℹ️  [优化] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: Bu^+为空，使用 delta_log_p_plus = 0（中性假设）")
+                            print(f"         当前token: '{current_word}' (Hallucinated)")
+                            print(f"         Bu^- = {list(step_bu_minus_tokens)} (当前幻视词汇)")
+                            print(f"         Bu^+ = {list(step_bu_plus_tokens)} (空，将使用 delta_log_p_plus = 0)")
                 else:
                     # Neutral词汇应该已经被过滤掉了
                     continue
 
                 # 确保Bu^+和Bu^-不重叠（虽然理论上不应该重叠，但为了安全）
+                # 注意：如果当前token同时出现在Bu^+和Bu^-中，需要从Bu^-中移除
                 step_bu_minus_tokens = step_bu_minus_tokens - step_bu_plus_tokens
 
-                # 如果Bu^+或Bu^-为空，跳过
-                if len(step_bu_plus_tokens) == 0 or len(step_bu_minus_tokens) == 0:
+                # 如果Bu^+和Bu^-都为空，仍然跳过（因为无法确定 head 的真实倾向）
+                if len(step_bu_plus_tokens) == 0 and len(step_bu_minus_tokens) == 0:
+                    # 记录跳过原因（只在第一个head记录，避免重复）
+                    if head_idx == 0 and layer_idx == 0:
+                        if step_idx not in step_skipped_reasons:
+                            step_skipped_reasons[step_idx] = []
+                        reason = f"'{current_word}': Bu^+和Bu^-都为空（所有head都被跳过）"
+                        step_skipped_reasons[step_idx].append(reason)
+
+                        # 打印详细的调试信息
+                        print(f"      ⚠️  [调试] Step {step_idx}, Layer {layer_idx}, Head {head_idx}: Bu^+和Bu^-都为空（去重后）")
+                        print(f"         当前token: '{current_word}' (类型: {current_token_type})")
+                        print(f"         Bu^+ = {list(step_bu_plus_tokens)} (数量: {len(step_bu_plus_tokens)})")
+                        print(f"         Bu^- = {list(step_bu_minus_tokens)} (数量: {len(step_bu_minus_tokens)})")
+                        print(f"         原因：两者都为空，无法确定 head 的真实倾向，跳过")
                     continue
 
+                # 成功处理了这个head，记录统计
+                if step_idx not in step_processed_count:
+                    step_processed_count[step_idx] = 0
+                step_processed_count[step_idx] += 1
+
                 # 计算对数概率增益
-                # 注意：需要分别把Bu^+和Bu^-中所有词汇的对数概率加起来
+                # 注意：如果 Bu 为空集合，compute_log_probability_gain 会自动返回 0（中性假设）
+                # 需要分别把Bu^+和Bu^-中所有词汇的对数概率加起来
                 delta_log_p_plus = compute_log_probability_gain(
                     logits_with_head[0], logits_before[0], step_bu_plus_tokens
                 )
@@ -1317,17 +1472,64 @@ def process_case_chair(
                     "g_u": float(g_u),
                     "delta_log_p_plus": float(delta_log_p_plus),
                     "delta_log_p_minus": float(delta_log_p_minus),
+                    "is_approximated": is_approximated,  # 标记是否为近似值（使用了空集合的 delta_log_p = 0）
                     "case_type": "CHAIR"
                 }
 
                 # 添加head的原始输出向量
-                if head_raw_vector is not None:
-                    pair["head_vector"] = head_raw_vector.tolist()
+                # head_raw_vector 已经在循环开始时计算（第1170行）
+                # 确保它被正确保存
+                if 'head_raw_vector' in locals() and head_raw_vector is not None:
+                    # head_raw_vector 已经是numpy数组，直接转换为list
+                    if isinstance(head_raw_vector, np.ndarray):
+                        pair["head_vector"] = head_raw_vector.tolist()
+                    else:
+                        pair["head_vector"] = list(head_raw_vector)
                 else:
-                    # 使用零向量作为占位符
-                    pair["head_vector"] = [0.0] * head_dim
+                    # 如果head_raw_vector不存在或为None，重新计算
+                    head_raw_vector = head_attn_output[:, 0, :].detach().cpu().numpy()
+                    pair["head_vector"] = head_raw_vector.tolist()
 
                 ground_truth_pairs.append(pair)
+
+    # 统计信息
+    if len(ground_truth_pairs) == 0:
+        print(f"  ⚠️  警告: 未生成任何真值对")
+        print(f"     可能原因:")
+        print(f"     1. 所有生成步骤的Bu^+或Bu^-都为空")
+        print(f"     2. top-K中没有找到有效的物理词汇")
+        print(f"     3. 所有步骤都被continue跳过")
+
+        # 打印详细的步骤统计信息
+        if step_skipped_reasons:
+            print(f"     详细统计:")
+            for step_idx in sorted(step_skipped_reasons.keys()):
+                reasons = step_skipped_reasons[step_idx]
+                processed = step_processed_count.get(step_idx, 0)
+                print(f"       Step {step_idx}: 处理了 {processed} 个head")
+                # 只显示前3个唯一原因，避免输出过长
+                unique_reasons = list(set(reasons))[:3]
+                for reason in unique_reasons:
+                    print(f"          - {reason}")
+    else:
+        print(f"  ✓ 生成了 {len(ground_truth_pairs)} 个真值对")
+        # 打印简要统计
+        if step_processed_count:
+            total_processed = sum(step_processed_count.values())
+            expected_total = len(target_steps) * num_layers * num_heads
+            total_skipped = expected_total - total_processed
+            print(f"     步骤统计: 总共处理了 {total_processed} 个head（预期: {expected_total}，跳过: {total_skipped}）")
+            if step_skipped_reasons:
+                total_skipped_steps = len(step_skipped_reasons)
+                print(f"     有 {total_skipped_steps} 个步骤的部分head被跳过:")
+                for step_idx in sorted(step_skipped_reasons.keys()):
+                    reasons = step_skipped_reasons[step_idx]
+                    processed = step_processed_count.get(step_idx, 0)
+                    expected = num_layers * num_heads
+                    skipped = expected - processed
+                    # 只显示第一个唯一原因，避免输出过长
+                    unique_reason = list(set(reasons))[0] if reasons else "未知原因"
+                    print(f"       Step {step_idx}: 处理了 {processed}/{expected} 个head，跳过 {skipped} 个 - {unique_reason}")
 
     return ground_truth_pairs
 
@@ -1355,7 +1557,7 @@ def main():
     set_seed(args.seed)
 
     if args.train_file is None:
-        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_200.json")
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_20.json")
 
     print("=" * 80)
     print("生成 Head 级别真值对")
@@ -1437,6 +1639,15 @@ def main():
     print(f"\n[4/5] 处理cases并生成真值对...")
     all_ground_truth_pairs = []
 
+    # 统计信息：追踪哪些case返回了空列表
+    empty_case_stats = {
+        'total_cases': len(cases),
+        'processed_cases': 0,
+        'empty_cases': 0,
+        'cases_with_pairs': 0,
+        'total_pairs': 0
+    }
+
     for idx, case in enumerate(tqdm(cases, desc="处理进度")):
         # 打印case基本信息（索引从0开始，但显示时从1开始）
         case_id = case.get("question_id", case.get("image_id", idx))
@@ -1455,24 +1666,62 @@ def main():
         # 判断case类型
         case_type = "CHAIR" if "describe" in case["text"].lower() else "POPE"
 
-        if case_type == "POPE":
-            pairs = process_case_pope(
-                model, tokenizer, image_processor, case, args.coco_root,
-                device, conv_mode, num_layers, num_heads, extractor
-            )
-        else:
-            pairs = process_case_chair(
-                model, tokenizer, image_processor, case, args.coco_root,
-                device, conv_mode, num_layers, num_heads, extractor, chair_evaluator
-            )
+        try:
+            empty_case_stats['processed_cases'] += 1
 
-        all_ground_truth_pairs.extend(pairs)
+            if case_type == "POPE":
+                pairs = process_case_pope(
+                    model, tokenizer, image_processor, case, args.coco_root,
+                    device, conv_mode, num_layers, num_heads, extractor
+                )
+            else:
+                pairs = process_case_chair(
+                    model, tokenizer, image_processor, case, args.coco_root,
+                    device, conv_mode, num_layers, num_heads, extractor, chair_evaluator
+                )
+
+            # 记录处理结果
+            if len(pairs) == 0:
+                empty_case_stats['empty_cases'] += 1
+                print(f"  ⚠️  警告: Case #{case_id} 处理完成，但未生成任何真值对（可能所有步骤都被跳过）")
+            else:
+                empty_case_stats['cases_with_pairs'] += 1
+                empty_case_stats['total_pairs'] += len(pairs)
+                print(f"  ✓ Case #{case_id} 生成了 {len(pairs)} 个真值对")
+
+            all_ground_truth_pairs.extend(pairs)
+        except Exception as e:
+            empty_case_stats['empty_cases'] += 1
+            print(f"  ❌ 错误: Case #{case_id} 处理失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # 继续处理下一个case，不中断整个流程
 
     # 移除hooks
     extractor.remove_hooks()
     print(f"✓ 已移除所有hooks")
 
-    print(f"\n✓ 生成了 {len(all_ground_truth_pairs)} 个head真值对")
+    # 打印处理统计信息
+    print(f"\n{'='*80}")
+    print(f"处理统计:")
+    print(f"  总case数: {empty_case_stats['total_cases']}")
+    print(f"  已处理case数: {empty_case_stats['processed_cases']}")
+    print(f"  生成真值对的case数: {empty_case_stats['cases_with_pairs']}")
+    print(f"  未生成真值对的case数: {empty_case_stats['empty_cases']}")
+    print(f"  总真值对数量: {empty_case_stats['total_pairs']}")
+    print(f"{'='*80}")
+
+    if len(all_ground_truth_pairs) == 0:
+        print(f"\n⚠️  警告: 所有case都未生成真值对！")
+        print(f"  可能原因:")
+        print(f"  1. 所有图像文件都不存在")
+        print(f"  2. 所有case的生成文本都为空")
+        print(f"  3. 所有case都无法获取hidden states")
+        print(f"  4. 所有case都没有找到物理词汇对应的生成步骤")
+        print(f"  5. 所有case的所有步骤的Bu^+或Bu^-都为空")
+        print(f"  请检查上面的警告信息，找出具体原因")
+    else:
+        print(f"\n✓ 生成了 {len(all_ground_truth_pairs)} 个head真值对")
 
     # 保存结果（按layer和head分文件保存）
     print(f"\n[5/5] 保存结果...")
@@ -1576,20 +1825,26 @@ def main():
             print(f"  Head向量维度: {head_dim}")
 
     # g_u的统计
-    g_values = [p["g_u"] for p in all_ground_truth_pairs]
-    print(f"\ng_u 统计:")
-    print(f"  平均值: {np.mean(g_values):.4f}")
-    print(f"  标准差: {np.std(g_values):.4f}")
-    print(f"  最小值: {np.min(g_values):.4f}")
-    print(f"  最大值: {np.max(g_values):.4f}")
+    g_values = [p["g_u"] for p in all_ground_truth_pairs if "g_u" in p]
+    if len(g_values) > 0:
+        print(f"\ng_u 统计:")
+        print(f"  平均值: {np.mean(g_values):.4f}")
+        print(f"  标准差: {np.std(g_values):.4f}")
+        print(f"  最小值: {np.min(g_values):.4f}")
+        print(f"  最大值: {np.max(g_values):.4f}")
+    else:
+        print(f"\ng_u 统计: 无数据（未生成任何真值对）")
 
     # s_u的统计
-    s_values = [p["s_u"] for p in all_ground_truth_pairs]
-    print(f"\ns_u 统计:")
-    print(f"  平均值: {np.mean(s_values):.4f}")
-    print(f"  标准差: {np.std(s_values):.4f}")
-    print(f"  最小值: {np.min(s_values):.4f}")
-    print(f"  最大值: {np.max(s_values):.4f}")
+    s_values = [p["s_u"] for p in all_ground_truth_pairs if "s_u" in p]
+    if len(s_values) > 0:
+        print(f"\ns_u 统计:")
+        print(f"  平均值: {np.mean(s_values):.4f}")
+        print(f"  标准差: {np.std(s_values):.4f}")
+        print(f"  最小值: {np.min(s_values):.4f}")
+        print(f"  最大值: {np.max(s_values):.4f}")
+    else:
+        print(f"\ns_u 统计: 无数据（未生成任何真值对）")
 
     # 文件大小统计
     total_size = 0

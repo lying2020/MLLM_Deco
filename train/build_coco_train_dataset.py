@@ -169,14 +169,41 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
 
         candidate_images.sort(key=sort_key)
 
-        print(f"  已收集 {len(candidate_images)} 张候选图片，开始逐张生成caption并筛选...")
+        # 定义候选图片数量（通常是目标数量的10倍，但不超过总候选图片数）
+        max_candidate_count = min(num_images * 10, len(candidate_images))
+        print(f"  已收集 {len(candidate_images)} 张候选图片，将处理前 {max_candidate_count} 张")
+        print(f"  开始逐张生成caption并实时校验...")
         from tqdm import tqdm
 
-        # 逐张生成caption并筛选
-        for img_info in tqdm(candidate_images, desc="生成caption并筛选"):
-            if len(selected_images) >= num_images:
-                break  # 已经选够了
+        # 定义筛选优先级函数
+        def check_priority_1(num_grounded, num_hallucinated):
+            """优先级1：3个实例词汇 + 2个幻视词汇"""
+            return num_grounded == 3 and num_hallucinated == 2
 
+        def check_priority_2(num_grounded, num_hallucinated):
+            """优先级2：4个实例词汇 + 2个或3个幻视词汇"""
+            return num_grounded == 4 and num_hallucinated in [2, 3]
+
+        def check_priority_3(num_grounded, num_hallucinated):
+            """优先级3：2个实例词汇 + 1个幻视词汇"""
+            return num_grounded == 2 and num_hallucinated == 1
+
+        def check_priority_4(num_grounded, num_hallucinated):
+            """优先级4：1-4个实例词汇 + 1-4个幻视词汇（且实例词汇数量 >= 幻视词汇数量）"""
+            return (1 <= num_grounded <= 4 and
+                    1 <= num_hallucinated <= 4 and
+                    num_grounded >= num_hallucinated)
+
+        # 存储所有处理过的图片信息（用于按优先级筛选）
+        processed_images = []  # 存储所有处理过的图片信息
+        selected_ids = set()  # 已选中的图片ID集合
+        priority_stats = {
+            1: 0, 2: 0, 3: 0, 4: 0
+        }
+
+        # 第一步：逐张生成caption并实时校验优先级1
+        print(f"\n  第一步：逐张生成caption并实时校验优先级1...")
+        for img_info in tqdm(candidate_images[:max_candidate_count], desc="生成caption并校验"):
             image_id = img_info['image_id']
             image_filename = img_info['image_filename']
             gt_objects = img_info['objects']
@@ -194,50 +221,121 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
                     caption, gt_objects, chair_evaluator
                 )
 
-                # 判断是否满足选择条件
-                # 条件1：实例词汇数量 >= 幻视词汇数量，且非重复的幻视词汇数量 == 2个
-                # 条件2：实例词汇数量 >= 幻视词汇数量，且幻视词汇数量 <= 3个
-                is_selected = False
+                # 保存处理结果（无论是否满足条件，都保存下来用于后续优先级筛选）
+                proc_img_data = {
+                    "img_info": img_info,
+                    "num_grounded": num_grounded,
+                    "num_hallucinated": num_hallucinated,
+                    "grounded_words": grounded_words,
+                    "hallucinated_words": hallucinated_words
+                }
+                processed_images.append(proc_img_data)
 
-                if num_grounded >= num_hallucinated:
-                    if num_hallucinated == 2:
-                        # 条件1：幻视词汇数量 == 2个
-                        is_selected = True
-                    elif num_hallucinated <= 3:
-                        # 条件2：幻视词汇数量 <= 3个（但不等于2个的情况已经在上面处理了）
-                        # 实际上这里会包括1个和3个幻视的情况
-                        is_selected = True
-
-                if is_selected:
-                    selected_images.append({
-                        "image_id": image_id,
-                        "image_filename": image_filename
-                    })
+                # 实时校验优先级1：如果满足条件且还没选够，立即选中
+                if len(selected_images) < num_images:
+                    if image_id not in selected_ids:
+                        if check_priority_1(num_grounded, num_hallucinated):
+                            selected_images.append({
+                                "image_id": image_id,
+                                "image_filename": image_filename,
+                                "num_grounded": num_grounded,
+                                "num_hallucinated": num_hallucinated,
+                                "grounded_words": list(grounded_words),
+                                "hallucinated_words": list(hallucinated_words)
+                            })
+                            selected_ids.add(image_id)
+                            priority_stats[1] += 1
 
             except Exception as e:
                 print(f"  ⚠️  处理图片 {image_filename} 时出错: {e}")
                 continue
 
-        print(f"  ✓ 已筛选出 {len(selected_images)} 张符合条件的图片")
+        print(f"  ✓ 已处理 {len(processed_images)} 张图片的caption")
+        print(f"    ✓ 优先级1实时筛选出 {priority_stats[1]} 张图片（当前总计: {len(selected_images)} 张）")
 
-        # 如果选出的图片不够，从剩余的候选图片中随机补充
+        # 第二步：如果优先级1不够，从已处理的图片中筛选优先级2
+        if len(selected_images) < num_images:
+            print(f"\n  第二步：从已处理的图片中筛选优先级2...")
+            print(f"  优先级2：4个实例词汇 + 2个或3个幻视词汇")
+            for proc_img in processed_images:
+                if len(selected_images) >= num_images:
+                    break
+                image_id = proc_img["img_info"]["image_id"]
+                if image_id in selected_ids:
+                    continue
+                if check_priority_2(proc_img["num_grounded"], proc_img["num_hallucinated"]):
+                    selected_images.append({
+                        "image_id": image_id,
+                        "image_filename": proc_img["img_info"]["image_filename"],
+                        "num_grounded": proc_img["num_grounded"],
+                        "num_hallucinated": proc_img["num_hallucinated"],
+                        "grounded_words": list(proc_img["grounded_words"]),
+                        "hallucinated_words": list(proc_img["hallucinated_words"])
+                    })
+                    selected_ids.add(image_id)
+                    priority_stats[2] += 1
+            print(f"    ✓ 优先级2筛选出 {priority_stats[2]} 张图片（当前总计: {len(selected_images)} 张）")
+
+        # 第三步：如果还不够，筛选优先级3
+        if len(selected_images) < num_images:
+            print(f"\n  第三步：从已处理的图片中筛选优先级3...")
+            print(f"  优先级3：2个实例词汇 + 1个幻视词汇")
+            for proc_img in processed_images:
+                if len(selected_images) >= num_images:
+                    break
+                image_id = proc_img["img_info"]["image_id"]
+                if image_id in selected_ids:
+                    continue
+                if check_priority_3(proc_img["num_grounded"], proc_img["num_hallucinated"]):
+                    selected_images.append({
+                        "image_id": image_id,
+                        "image_filename": proc_img["img_info"]["image_filename"],
+                        "num_grounded": proc_img["num_grounded"],
+                        "num_hallucinated": proc_img["num_hallucinated"],
+                        "grounded_words": list(proc_img["grounded_words"]),
+                        "hallucinated_words": list(proc_img["hallucinated_words"])
+                    })
+                    selected_ids.add(image_id)
+                    priority_stats[3] += 1
+            print(f"    ✓ 优先级3筛选出 {priority_stats[3]} 张图片（当前总计: {len(selected_images)} 张）")
+
+        # 第四步：如果还不够，筛选优先级4
+        if len(selected_images) < num_images:
+            print(f"\n  第四步：从已处理的图片中筛选优先级4...")
+            print(f"  优先级4：1-4个实例词汇 + 1-4个幻视词汇（且实例词汇数量 >= 幻视词汇数量）")
+            for proc_img in processed_images:
+                if len(selected_images) >= num_images:
+                    break
+                image_id = proc_img["img_info"]["image_id"]
+                if image_id in selected_ids:
+                    continue
+                if check_priority_4(proc_img["num_grounded"], proc_img["num_hallucinated"]):
+                    selected_images.append({
+                        "image_id": image_id,
+                        "image_filename": proc_img["img_info"]["image_filename"],
+                        "num_grounded": proc_img["num_grounded"],
+                        "num_hallucinated": proc_img["num_hallucinated"],
+                        "grounded_words": list(proc_img["grounded_words"]),
+                        "hallucinated_words": list(proc_img["hallucinated_words"])
+                    })
+                    selected_ids.add(image_id)
+                    priority_stats[4] += 1
+            print(f"    ✓ 优先级4筛选出 {priority_stats[4]} 张图片（当前总计: {len(selected_images)} 张）")
+
+        # 打印最终筛选统计信息
+        print(f"\n  ✓ 筛选完成，共筛选出 {len(selected_images)} 张图片")
+        print(f"  筛选统计（按优先级）:")
+        for priority in sorted(priority_stats.keys()):
+            print(f"    - 优先级{priority}: {priority_stats[priority]} 张图片")
+
+        # 如果选出的图片不够，输出警告并结束
         if len(selected_images) < num_images:
             remaining_needed = num_images - len(selected_images)
-            selected_ids = {img['image_id'] for img in selected_images}
-            remaining_candidates = [
-                img for img in candidate_images
-                if img['image_id'] not in selected_ids
-            ]
-
-            if len(remaining_candidates) > 0:
-                num_to_add = min(remaining_needed, len(remaining_candidates))
-                additional = random.sample(remaining_candidates, num_to_add)
-                for img in additional:
-                    selected_images.append({
-                        "image_id": img['image_id'],
-                        "image_filename": img['image_filename']
-                    })
-                print(f"  ✓ 从剩余候选图片中随机补充了 {num_to_add} 张图片")
+            print(f"\n  ⚠️  警告: 筛选出的图片数量不足！")
+            print(f"     需求数量: {num_images} 张")
+            print(f"     实际筛选: {len(selected_images)} 张")
+            print(f"     缺少数量: {remaining_needed} 张")
+            print(f"     已结束筛选，不再补充图片")
 
         # 按 image_id 排序
         selected_images.sort(key=lambda x: x['image_id'])
@@ -348,9 +446,11 @@ def get_coco_val2014_images(coco_root: str, exclude_images: Set[str],
     # 按 image_id 排序
     selected_images.sort(key=lambda x: x['image_id'])
 
-    # 移除 num_instances 字段（不需要在返回结果中）
+    # 移除不需要的字段（保留调试信息字段，但不在最终 JSON 中保存）
     for img in selected_images:
         img.pop('num_instances', None)
+        # 注意：保留 num_grounded, num_hallucinated, grounded_words, hallucinated_words 用于调试
+        # 但这些字段不会保存到最终的 JSON 文件中（在生成 case 时不会使用）
 
     return selected_images
 
@@ -638,7 +738,7 @@ def main():
                        help="COCO 数据集根目录")
     parser.add_argument("--exclude-file", type=str, default="pope_coco/coco_baseline_500.json",
                        help="需要排除的图片列表文件")
-    parser.add_argument("--num-images", type=int, default=20,
+    parser.add_argument("--num-images", type=int, default=500,
                        help="需要选择的图片数量")
     parser.add_argument("--output-file", type=str, default=None,
                        help="输出 JSON 文件路径（默认: coco_train_json/coco_train_2000.json）")
