@@ -21,6 +21,11 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端
+import matplotlib.pyplot as plt
+import random
+from datetime import datetime
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -451,7 +456,9 @@ class LinearProbeTrainer:
                 'test_loss': avg_test_loss,
                 'test_r2': r2,
                 'test_mae': mae,
-                'num_epochs': train_result['num_epochs']
+                'num_epochs': train_result['num_epochs'],
+                'train_losses': train_result['train_losses'],  # 保存完整的loss历史
+                'val_losses': train_result['val_losses']  # 保存完整的loss历史
             }
 
             all_train_losses.append(train_result['train_losses'][-1])
@@ -482,7 +489,9 @@ class LinearProbeTrainer:
             print(f"  平均R²: {np.mean(test_r2s):.4f} ± {np.std(test_r2s):.4f}")
             print(f"  平均MAE: {np.mean(test_maes):.6f} ± {np.std(test_maes):.6f}")
 
-        # 保存模型
+        # 保存模型和生成可视化
+        subdir_name = None
+        save_path = None
         if save_dir is not None:
             # 从 ground_truth_dir 提取最后一级目录名
             # 例如: "train/coco_train_json/coco_train_20_generate_spp_gt_pair" -> "coco_train_20_generate_spp_gt_pair"
@@ -498,16 +507,220 @@ class LinearProbeTrainer:
                 model_path = save_path / f"{key}.pth"
                 torch.save(probe.state_dict(), model_path)
 
-            # 保存训练结果
+            # 保存训练结果（不包含完整的loss历史，只保留统计信息）
+            results_for_save = {}
+            for key, result in results.items():
+                result_copy = result.copy()
+                # 移除完整的loss历史（太大），只保留最后的值
+                if 'train_losses' in result_copy:
+                    result_copy['final_train_loss'] = result_copy['train_losses'][-1] if result_copy['train_losses'] else None
+                    result_copy['final_val_loss'] = result_copy['val_losses'][-1] if result_copy['val_losses'] else None
+                    del result_copy['train_losses']
+                    del result_copy['val_losses']
+                results_for_save[key] = result_copy
+
             results_path = save_path / "training_results.json"
             with open(results_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
+                json.dump(results_for_save, f, indent=2, ensure_ascii=False)
 
             print(f"\n模型已保存到: {save_path}")
             print(f"  基础目录: {save_dir}")
             print(f"  子目录: {subdir_name}")
 
+            # 生成loss可视化图表
+            self._plot_sample_loss_curves(results, save_path, subdir_name)
+
+            # 生成汇总文档
+            self._generate_summary_report(results, save_path, subdir_name, trained_count, no_data_count, no_valid_count)
+
         return results
+
+    def _plot_sample_loss_curves(self, results: Dict, save_path: Path, subdir_name: str):
+        """
+        从第8、16、24、32层中每层随机选择一个head，绘制loss变化折线图
+
+        Args:
+            results: 训练结果字典
+            save_path: 保存路径
+            subdir_name: 子目录名称
+        """
+        # 目标层索引（0-based，所以是7, 15, 23, 31）
+        target_layers = [7, 15, 23, 31]
+
+        # 收集每个目标层中成功训练的head
+        heads_by_layer = {layer: [] for layer in target_layers}
+        for key, result in results.items():
+            if result.get('status') == 'trained' and 'train_losses' in result:
+                # 解析key: "layer_X_head_Y"
+                parts = key.split('_')
+                layer_idx = int(parts[1])
+                if layer_idx in target_layers:
+                    heads_by_layer[layer_idx].append((key, result))
+
+        # 从每层随机选择一个head
+        selected_heads = []
+        for layer_idx in target_layers:
+            available_heads = heads_by_layer[layer_idx]
+            if len(available_heads) > 0:
+                selected_key, selected_result = random.choice(available_heads)
+                selected_heads.append((layer_idx, selected_key, selected_result))
+
+        if len(selected_heads) == 0:
+            print("  ⚠️  无法生成loss曲线图：没有找到成功训练的head")
+            return
+
+        # 创建2x2子图
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'Training Loss Curves - {subdir_name}', fontsize=16, fontweight='bold')
+
+        # 填充子图（如果不足4个，留空）
+        for idx, (layer_idx, key, result) in enumerate(selected_heads[:4]):
+            row = idx // 2
+            col = idx % 2
+            ax = axes[row, col]
+
+            train_losses = result.get('train_losses', [])
+            val_losses = result.get('val_losses', [])
+
+            if len(train_losses) > 0:
+                epochs = range(1, len(train_losses) + 1)
+                ax.plot(epochs, train_losses, label='Train Loss', linewidth=2, color='blue')
+
+                if len(val_losses) > 0 and len(val_losses) == len(train_losses):
+                    ax.plot(epochs, val_losses, label='Val Loss', linewidth=2, color='red')
+
+                ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+                ax.set_ylabel('Loss', fontsize=12, fontweight='bold')
+                head_idx = key.split('_')[3]
+                ax.set_title(f'Layer {layer_idx + 1}, Head {head_idx}', fontsize=14, fontweight='bold')
+                ax.legend(fontsize=10)
+                ax.grid(True, alpha=0.3)
+                ax.tick_params(labelsize=10)
+            else:
+                ax.text(0.5, 0.5, 'No Loss Data', ha='center', va='center', fontsize=12)
+                head_idx = key.split('_')[3]
+                ax.set_title(f'Layer {layer_idx + 1}, Head {head_idx}', fontsize=14, fontweight='bold')
+
+        # 如果不足4个，隐藏多余的子图
+        for idx in range(len(selected_heads), 4):
+            row = idx // 2
+            col = idx % 2
+            axes[row, col].axis('off')
+
+        plt.tight_layout()
+
+        # 保存图片
+        plot_path = save_path / f"{subdir_name}_loss_curves.png"
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"✓ Loss曲线图已保存到: {plot_path}")
+        selected_info = [f'Layer {l+1}, Head {k.split("_")[3]}' for l, k, _ in selected_heads[:4]]
+        print(f"  选择的head: {selected_info}")
+
+    def _generate_summary_report(self, results: Dict, save_path: Path, subdir_name: str,
+                                trained_count: int, no_data_count: int, no_valid_count: int):
+        """
+        生成训练结果汇总文档
+
+        Args:
+            results: 训练结果字典
+            save_path: 保存路径
+            subdir_name: 子目录名称（用于文档命名）
+            trained_count: 成功训练的数量
+            no_data_count: 无数据的数量
+            no_valid_count: 无有效数据的数量
+        """
+        report_path = save_path / f"{subdir_name}_training_summary.txt"
+
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\n")
+            f.write(f"Linear Probe Training Summary Report\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 80 + "\n\n")
+
+            # 训练统计
+            f.write("Training Statistics\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Total Probes: {len(self.probes)}\n")
+            f.write(f"Successfully Trained: {trained_count}/{len(self.probes)}\n")
+            f.write(f"No Data: {no_data_count}\n")
+            f.write(f"No Valid Data: {no_valid_count}\n")
+            f.write("\n")
+
+            # 测试集性能统计
+            if trained_count > 0:
+                test_losses = [r['test_loss'] for r in results.values() if r.get('status') == 'trained']
+                test_r2s = [r['test_r2'] for r in results.values() if r.get('status') == 'trained']
+                test_maes = [r['test_mae'] for r in results.values() if r.get('status') == 'trained']
+
+                f.write("Test Set Performance (All Trained Heads)\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Average MSE: {np.mean(test_losses):.6f} ± {np.std(test_losses):.6f}\n")
+                f.write(f"Average R²: {np.mean(test_r2s):.4f} ± {np.std(test_r2s):.4f}\n")
+                f.write(f"Average MAE: {np.mean(test_maes):.6f} ± {np.std(test_maes):.6f}\n")
+                f.write("\n")
+
+                # 按层统计
+                f.write("Performance by Layer\n")
+                f.write("-" * 80 + "\n")
+                layer_stats = defaultdict(lambda: {'count': 0, 'mse': [], 'r2': [], 'mae': []})
+                for key, result in results.items():
+                    if result.get('status') == 'trained':
+                        parts = key.split('_')
+                        layer_idx = int(parts[1])
+                        layer_stats[layer_idx]['count'] += 1
+                        layer_stats[layer_idx]['mse'].append(result['test_loss'])
+                        layer_stats[layer_idx]['r2'].append(result['test_r2'])
+                        layer_stats[layer_idx]['mae'].append(result['test_mae'])
+
+                # 只显示有数据的层
+                for layer_idx in sorted(layer_stats.keys()):
+                    stats = layer_stats[layer_idx]
+                    if stats['count'] > 0:
+                        f.write(f"Layer {layer_idx + 1:2d}: {stats['count']:3d} heads | "
+                               f"MSE: {np.mean(stats['mse']):.6f} ± {np.std(stats['mse']):.6f} | "
+                               f"R²: {np.mean(stats['r2']):.4f} ± {np.std(stats['r2']):.4f} | "
+                               f"MAE: {np.mean(stats['mae']):.6f} ± {np.std(stats['mae']):.6f}\n")
+                f.write("\n")
+
+                # 样本数量统计
+                f.write("Sample Size Statistics\n")
+                f.write("-" * 80 + "\n")
+                sample_sizes = [r['num_samples'] for r in results.values() if r.get('status') == 'trained']
+                if len(sample_sizes) > 0:
+                    f.write(f"Total Samples: {sum(sample_sizes)}\n")
+                    f.write(f"Average Samples per Head: {np.mean(sample_sizes):.1f} ± {np.std(sample_sizes):.1f}\n")
+                    f.write(f"Min Samples: {min(sample_sizes)}\n")
+                    f.write(f"Max Samples: {max(sample_sizes)}\n")
+                    f.write("\n")
+
+            # 训练参数
+            f.write("Training Parameters\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Device: {self.device}\n")
+            f.write(f"Data Type: {self.dtype}\n")
+            f.write(f"Input Dimension: {self.input_dim}\n")
+            if self.hidden_dim is None:
+                f.write(f"Architecture: Linear({self.input_dim}, 1) + Tanh\n")
+            else:
+                f.write(f"Architecture: Linear({self.input_dim}, {self.hidden_dim}) -> ReLU -> Dropout -> Linear({self.hidden_dim}, 1) + Tanh\n")
+            f.write("\n")
+
+            # 文件信息
+            f.write("Output Files\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Model Directory: {save_path}\n")
+            f.write(f"Training Results JSON: {save_path / 'training_results.json'}\n")
+            f.write(f"Loss Curves Plot: {save_path / f'{subdir_name}_loss_curves.png'}\n")
+            f.write(f"Summary Report: {report_path}\n")
+            f.write("\n")
+
+            f.write("=" * 80 + "\n")
+            f.write("End of Report\n")
+            f.write("=" * 80 + "\n")
+
+        print(f"✓ 训练汇总文档已保存到: {report_path}")
 
     def load_models(self, model_dir: str):
         """加载已训练的模型"""

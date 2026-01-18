@@ -117,7 +117,7 @@ class LinearProbeManager:
             head_vector: head向量 [head_dim] 或 [batch, head_dim]
 
         Returns:
-            float: 权重 lambda，范围在 [-1, 1] 之间（经过 tanh）
+            float: 处理后的 lambda 值
         """
         key = (layer_idx, head_idx)
         probe = self.probes.get(key)
@@ -133,12 +133,22 @@ class LinearProbeManager:
             head_vector = head_vector.to(self.device)
 
             # LinearProbe 输出经过 tanh，范围在 [-1, 1]
-            # 直接使用输出作为 lambda（已经是 tanh 的结果）
             output = probe(head_vector)
             if output.size(0) == 1:
                 lambda_value = output.cpu().item()
             else:
-                lambda_value = output.cpu()
+                lambda_value = output.cpu().item() if output.numel() == 1 else output.cpu()
+
+            # 对 lambda 进行转换处理
+            # 1. 如果 lambda 在 [-0.3, 0.5] 之间，直接置为 0
+            if -0.3 <= lambda_value <= 0.5:
+                lambda_value = 0.0
+            # 2. 如果 lambda > 0.5，则将 lambda 置为 2*lambda - 1
+            elif lambda_value > 0.5:
+                lambda_value = 2.0 * lambda_value - 1.0
+            # 3. 如果 lambda < -0.3，则将 lambda 置为 (1.0/0.7)*lambda + 0.43
+            elif lambda_value < -0.3:
+                lambda_value = (1.0 / 0.7) * lambda_value + 0.43
 
             return lambda_value
 
@@ -232,8 +242,9 @@ class LinearProbeManager:
                         weights = []
                         for b in range(batch_size):
                             lambda_val = self.get_weight(layer_idx, head_idx, head_vector[b])
-                            # 使用 tanh 约束 lambda 在 [-1, 1] 之间（已经在 get_weight 中完成）
-                            weight = 1.0 + lambda_val  # weight = 1 + lambda
+                            # lambda 已经经过转换处理
+                            # 将 head 的原始系数（值为 1）与 lambda 系数相减：weight = 1 - lambda
+                            weight = 1.0 - lambda_val
                             weights.append(weight)
                         weights = torch.tensor(weights, device=attn_output.device, dtype=attn_output.dtype)
                         weights = weights.view(batch_size, 1, 1)  # [batch, 1, 1] 用于广播到 [batch, seq_len, head_dim]
@@ -1028,7 +1039,11 @@ def eval_model(args):
 
         # 修改 attention 层的 forward 方法
         linear_probe_manager.patch_attention_layers(model)
-        print(f"✓ Linear Probe 已启用，权重计算方式: weight = 1 + tanh(lambda)")
+        print(f"✓ Linear Probe 已启用，权重计算方式: weight = 1 - lambda")
+        print(f"  Lambda 转换规则:")
+        print(f"    - 如果 lambda 在 [-0.3, 0.5] 之间: lambda = 0")
+        print(f"    - 如果 lambda > 0.5: lambda = 2*lambda - 1")
+        print(f"    - 如果 lambda < -0.3: lambda = (1.0/0.7)*lambda + 0.43")
 
     # 确定对话模式
     if "llama-2" in model_name.lower():
@@ -1236,6 +1251,8 @@ def main():
         "device": device,
         "coco_root": project.coco_data_path,
         "pope_file": "pope_coco/coco_pope_random.json",
+        "use_linear_probe": False,
+        "linear_probe_dir": "train/ckpt/coco_train_20_generate_spp_gt_pair",
         "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
@@ -1246,7 +1263,7 @@ def main():
         "top_p": None,
         "max_new_tokens": 10,  # POPE 只需要 Yes/No，不需要太多 tokens
         "num_beams": 1,
-        "num_samples": 0,  # 0 表示处理所有问题
+        "num_samples": 500,  # 0 表示处理所有问题
         "seed": 42
     }
 
@@ -1296,10 +1313,10 @@ def main():
                        help="允许早退的结束层索引")
 
     # Linear Probe 参数
-    parser.add_argument("--use-linear-probe", action="store_true", default=False,
+    parser.add_argument("--use-linear-probe", default=default_config["use_linear_probe"],
                        help="启用 Linear Probe 网络进行加权(默认: False)")
-    parser.add_argument("--linear-probe-dir", type=str, default=None,
-                       help="Linear Probe 模型保存目录(例如: ./train/ckpt/)")
+    parser.add_argument("--linear-probe-dir", type=str, default=default_config["linear_probe_dir"],
+                       help="Linear Probe 模型保存目录(例如: train/ckpt/)")
 
     # 其他参数
     parser.add_argument("--seed", type=int, default=default_config["seed"], help="随机种子")
