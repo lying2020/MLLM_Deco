@@ -183,23 +183,19 @@ def compute_log_probability_gain(
     2. 当prob接近0时，exp(prob) ≈ 1，不会趋向-inf
     3. 当prob接近1时，exp(prob) ≈ e，不会趋向+inf
     4. 数值范围更稳定：exp(prob) ∈ [1, e]，增益范围约为 [-1.718, 1.718]
+    5. 空集合自动处理：如果token_set为空，compute_set_probability返回0.0，
+       则exp(0) - exp(0) = 0，无需特殊判断
 
     Args:
         logits_with_head: 加入head后的logits [vocab_size]
         logits_without_head: 未加入head的logits [vocab_size]
-        token_set: token ID集合
+        token_set: token ID集合（可以为空，空集合时自动返回0.0）
 
     Returns:
         float: 概率增益（使用指数函数计算）
-        如果 token_set 为空，返回 0.0（中性假设：head 对空集合的概率增益为 0）
     """
-    # 如果 token_set 为空，返回 0（中性假设）
-    # 数学解释：空集合的概率为 0，head 对空集合的影响可以视为中性（0）
-    # 语义解释：空集合表示 head 对缺失的对比对象没有贡献（中性）
-    if len(token_set) == 0:
-        return 0.0
-
     # 计算集合概率（范围在 [0, 1]）
+    # 注意：如果token_set为空，compute_set_probability会返回0.0
     prob_with = compute_set_probability(logits_with_head, token_set)
     prob_without = compute_set_probability(logits_without_head, token_set)
 
@@ -207,6 +203,7 @@ def compute_log_probability_gain(
     # exp(prob) 的范围是 [1, e]，其中 e ≈ 2.718
     # 当 prob 接近 0 时，exp(prob) ≈ 1，不会趋向 -inf
     # 当 prob 接近 1 时，exp(prob) ≈ e，不会趋向 +inf
+    # 当 prob = 0（空集合）时，exp(0) - exp(0) = 0，自动处理空集合情况
     exp_gain = np.exp(EXP_GAIN_COEFF*prob_with) - np.exp(EXP_GAIN_COEFF*prob_without)
 
     return exp_gain
@@ -225,7 +222,11 @@ class HeadOutputExtractor:
         self.hidden_states_before = {}  # {layer_idx: hidden_state}
 
     def _make_attn_pre_hook(self, layer_idx: int):
-        """创建attention pre-hook来获取输入hidden_states"""
+        """创建attention pre-hook来获取输入hidden_states
+
+        注意：当前代码已改用手动计算head输出，不再依赖hook机制。
+        此hook保留作为备用方案，但不会产生警告信息。
+        """
         def attn_pre_hook(module, input_tuple):
             # input_tuple是forward的参数，第一个是hidden_states
             # 结构应该是: (hidden_states, attention_mask, position_ids, past_key_value, output_attentions, use_cache)
@@ -240,17 +241,10 @@ class HeadOutputExtractor:
                     # 有时候可能是嵌套的tuple
                     hidden_states = first_arg[0] if isinstance(first_arg[0], torch.Tensor) else None
 
+            # 如果成功获取hidden_states，保存它；否则静默失败（不打印警告）
             if isinstance(hidden_states, torch.Tensor):
                 self.hidden_states_before[layer_idx] = hidden_states
-            elif layer_idx == 0 and not hasattr(self, '_pre_hook_debug_printed'):
-                # 调试：打印为什么pre_hook无法获取hidden_states
-                print(f"  ⚠️  Pre-hook Layer {layer_idx}: 无法获取hidden_states")
-                print(f"      input_tuple类型: {type(input_tuple)}, 长度: {len(input_tuple) if isinstance(input_tuple, tuple) else 'N/A'}")
-                if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                    print(f"      input_tuple[0]类型: {type(input_tuple[0])}")
-                    if isinstance(input_tuple[0], torch.Tensor):
-                        print(f"      input_tuple[0]形状: {input_tuple[0].shape}")
-                self._pre_hook_debug_printed = True
+            # 注意：不再打印警告，因为代码已改用手动计算方式，不依赖hook
         return attn_pre_hook
 
     def _make_attn_hook(self, layer_idx: int):
@@ -280,18 +274,9 @@ class HeadOutputExtractor:
                     # 但attn_output是经过o_proj的，不是我们需要的
                     pass  # 不能从output获取，因为已经经过o_proj了
 
-            # 如果仍然无法获取，跳过这一层
+            # 如果仍然无法获取，跳过这一层（静默失败，不打印警告）
+            # 注意：当前代码已改用手动计算head输出，不再依赖hook机制
             if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
-                # 只在第一次失败时打印详细调试信息
-                if layer_idx == 0 and not hasattr(self, '_debug_printed'):
-                    print(f"  ⚠️  Layer {layer_idx}: 无法获取hidden_states")
-                    print(f"      input_tuple类型: {type(input_tuple)}, 长度: {len(input_tuple) if isinstance(input_tuple, tuple) else 'N/A'}")
-                    if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                        print(f"      input_tuple[0]类型: {type(input_tuple[0])}")
-                        if isinstance(input_tuple[0], torch.Tensor):
-                            print(f"      input_tuple[0]形状: {input_tuple[0].shape}")
-                    print(f"      hidden_states_before: {layer_idx in self.hidden_states_before}")
-                    self._debug_printed = True
                 return
 
             # 确保hidden_states是正确的格式
