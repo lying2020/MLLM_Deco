@@ -40,6 +40,7 @@ from PIL import Image
 import requests
 from io import BytesIO
 from transformers import set_seed
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 coco_train_json_dir = os.path.join(current_dir, "coco_train_json")
@@ -52,6 +53,7 @@ BETA = 0.0   # 偏置参数
 TOP_K = 40   # 用于构建候选池的top-K值
 
 EXP_GAIN_COEFF=2.0
+USE_NP_EXP = True  # 默认使用 np.exp，如果为 False 则使用 np.log
 
 def tanh(x):
     """Tanh函数"""
@@ -232,29 +234,36 @@ def compute_set_probability(logits: torch.Tensor, token_set: Set[int]) -> float:
 def compute_log_probability_gain(
     logits_with_head: torch.Tensor,
     logits_without_head: torch.Tensor,
-    token_set: Set[int]
+    token_set: Set[int],
+    use_np_exp: bool = None
 ) -> float:
     """
-    计算概率增益（使用指数函数，避免log计算时的数值不稳定问题）
-    原公式C2: Δlog P_u^(l,n)(B_u) = log P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)}) - log P(B_u | h_{e,t}^{(l-1)})
-    改进版本: ΔP_u^(l,n)(B_u) = exp(P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)})) - exp(P(B_u | h_{e,t}^{(l-1)}))
+    计算概率增益
 
-    优势：
-    1. 避免log(0)导致的数值不稳定问题
-    2. 当prob接近0时，exp(prob) ≈ 1，不会趋向-inf
-    3. 当prob接近1时，exp(prob) ≈ e，不会趋向+inf
-    4. 数值范围更稳定：exp(prob) ∈ [1, e]，增益范围约为 [-1.718, 1.718]
-    5. 空集合自动处理：如果token_set为空，compute_set_probability返回0.0，
-       则exp(0) - exp(0) = 0，无需特殊判断
+    支持两种计算方法：
+    1. use_np_exp=True (默认): 使用指数函数
+       ΔP_u^(l,n)(B_u) = exp(coeff*P(B_u | h_with)) - exp(coeff*P(B_u | h_without))
+       优势：避免log(0)导致的数值不稳定问题，数值范围更稳定
+    2. use_np_exp=False: 使用对数函数（原始公式）
+       Δlog P_u^(l,n)(B_u) = log P(B_u | h_with) - log P(B_u | h_without)
+       注意：当prob=0时，log(0)=-inf，需要特殊处理
 
     Args:
         logits_with_head: 加入head后的logits [vocab_size]
         logits_without_head: 未加入head的logits [vocab_size]
         token_set: token ID集合（可以为空，空集合时自动返回0.0）
+        use_np_exp: 是否使用np.exp计算（默认使用全局变量USE_NP_EXP）
 
     Returns:
-        float: 概率增益（使用指数函数计算）
+        float: 概率增益
     """
+    # 如果没有指定，使用全局变量
+    if use_np_exp is None:
+        use_np_exp = USE_NP_EXP
+
+    if token_set is None or len(token_set) == 0:
+        return 0.0
+
     # 计算集合概率（范围在 [0, 1]）
     # 注意：如果token_set为空，compute_set_probability会返回0.0
     prob_with = compute_set_probability(logits_with_head, token_set)
@@ -266,20 +275,26 @@ def compute_log_probability_gain(
     if np.isnan(prob_without) or np.isinf(prob_without):
         prob_without = 0.0
 
-    # 使用指数函数计算增益，避免log(0)的数值不稳定问题
-    # exp(prob) 的范围是 [1, e]，其中 e ≈ 2.718
-    # 当 prob 接近 0 时，exp(prob) ≈ 1，不会趋向 -inf
-    # 当 prob 接近 1 时，exp(prob) ≈ e，不会趋向 +inf
-    # 当 prob = 0（空集合）时，exp(0) - exp(0) = 0，自动处理空集合情况
-    try:
-        exp_gain = np.exp(EXP_GAIN_COEFF*prob_with) - np.exp(EXP_GAIN_COEFF*prob_without)
+    if use_np_exp:
+        # 方法1：使用指数函数计算增益
+        # exp(coeff*prob) 的范围是 [1, e^coeff]，其中 e^coeff ≈ e^2 ≈ 7.389
+        # 当 prob 接近 0 时，exp(coeff*prob) ≈ 1，不会趋向 -inf
+        # 当 prob 接近 1 时，exp(coeff*prob) ≈ e^coeff，不会趋向 +inf
+        # 当 prob = 0（空集合）时，exp(0) - exp(0) = 0，自动处理空集合情况
+        exp_gain = np.exp(EXP_GAIN_COEFF * prob_with) - np.exp(EXP_GAIN_COEFF * prob_without)
         # 检查结果是否为nan或inf
         if np.isnan(exp_gain) or np.isinf(exp_gain):
             return 0.0
         return exp_gain
-    except (OverflowError, ValueError):
-        # 如果exp计算溢出，返回0.0
-        return 0.0
+    else:
+        # 方法2：使用对数函数计算增益（原始公式）
+        # log P(B_u | h_with) - log P(B_u | h_without)
+        prob_with = max(prob_with, 1e-12)
+        prob_without = max(prob_without, 1e-12)
+
+        # 计算对数增益
+        log_gain = np.log(prob_with) - np.log(prob_without)
+        return log_gain
 
 
 class HeadOutputExtractor:
@@ -607,6 +622,25 @@ def process_case_pope(
         Q = Q.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
         K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
+
+        # 应用 Rotary Position Embedding (RoPE) - 在计算 attention scores 之前
+        if hasattr(attn_module, 'rotary_emb'):
+            # 计算 kv_seq_len（对于单次forward，通常等于seq_len_for_attn）
+            kv_seq_len = seq_len_for_attn
+
+            # 生成 cos, sin（使用 V 的形状来确定序列长度）
+            cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
+
+            # 计算 position_ids（对于完整的序列，从0到seq_len_for_attn-1）
+            # 注意：如果 position_ids 已经可用且长度匹配，可以直接使用；否则重新计算
+            if position_ids is not None and position_ids.shape[1] == seq_len_for_attn:
+                current_position_ids = position_ids
+            else:
+                # 重新计算 position_ids（从0开始）
+                current_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
+
+            # 应用 RoPE 到 Q 和 K
+            Q, K = apply_rotary_pos_emb(Q, K, cos, sin, current_position_ids)
 
         # 计算attention scores（使用完整序列）
         scale = 1.0 / (head_dim ** 0.5)
@@ -1275,6 +1309,30 @@ def process_case_chair(
             K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
             V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
 
+            # 应用 Rotary Position Embedding (RoPE) - 在计算 attention scores 之前
+            if hasattr(attn_module, 'rotary_emb'):
+                # 计算 kv_seq_len（对于单次forward，通常等于seq_len_for_attn）
+                kv_seq_len = seq_len_for_attn
+
+                # 生成 cos, sin（使用 V 的形状来确定序列长度）
+                cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
+
+                # 计算 position_ids（对于完整的序列，从0到seq_len_for_attn-1）
+                # 注意：在 process_case_chair 中，我们手动调用了 forward，current_position_ids 已在前面计算
+                # 如果 current_position_ids 存在且长度匹配，使用它；否则重新计算
+                try:
+                    if current_position_ids is not None and current_position_ids.shape[1] == seq_len_for_attn:
+                        rope_position_ids = current_position_ids
+                    else:
+                        # 重新计算 position_ids（从0开始）
+                        rope_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
+                except NameError:
+                    # current_position_ids 不在作用域内，重新计算
+                    rope_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
+
+                # 应用 RoPE 到 Q 和 K
+                Q, K = apply_rotary_pos_emb(Q, K, cos, sin, rope_position_ids)
+
             # 计算attention scores（使用完整序列）
             scale = 1.0 / (head_dim ** 0.5)
             scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
@@ -1340,6 +1398,8 @@ def process_case_chair(
                 # 同时，如果当前词汇在CHAIR的同义词组中，也应该包含同义词的token
                 # 例如：如果current_word是"people"，而CHAIR认为"people"和"person"是同义词（都映射到"person" node）
                 # 那么也应该包含"person"的token
+                # 优化：只包含常见的直接同义词（如 people/person），而不是整个同义词组的所有词
+                # 这样可以避免token数量过多（如"person"同义词组有60+个词，会产生200+个token）
                 if current_word in physical_word_to_node:
                     node_word = physical_word_to_node[current_word]
                     # 从CHAIR的synonyms_txt中查找所有属于同一个node的词汇
@@ -1349,12 +1409,20 @@ def process_case_chair(
                     # 找到包含node_word的同义词组
                     for synonym_group in synonyms:
                         if node_word.lower() in [s.lower() for s in synonym_group]:
-                            # 这个同义词组中的所有词汇都应该被包含
-                            # 但只包含那些是物理词汇的（在physical_word_to_node中的）
-                            for synonym_word in synonym_group:
-                                synonym_lower = synonym_word.lower()
-                                # 检查是否是已知的物理词汇（通过检查是否在physical_word_to_node中）
-                                # 或者直接添加到token IDs中（因为get_vocab_tokens_for_words会处理编码）
+                            # 优化：只包含常见的直接同义词（前5个最常见的同义词）
+                            # 例如：person -> person, people, man, woman, child
+                            # 这样可以避免包含整个同义词组（60+个词）导致token数量过多
+                            common_synonyms = synonym_group[:5]  # 只取前5个最常见的同义词
+
+                            # 同时，如果当前词不在前5个中，也要包含它
+                            if current_word.lower() not in [s.lower() for s in common_synonyms]:
+                                common_synonyms = [current_word] + common_synonyms[:4]
+
+                            # 只对这几个常见同义词获取token
+                            for synonym_word in common_synonyms:
+                                # 跳过已经处理过的当前词（避免重复）
+                                if synonym_word.lower() == current_word.lower():
+                                    continue
                                 synonym_tokens = get_vocab_tokens_for_words(tokenizer, [synonym_word])
                                 current_token_ids.update(synonym_tokens)
                             break
@@ -1678,9 +1746,16 @@ def main():
                        help="随机种子")
     parser.add_argument("--chair-cache", type=str, default=None,
                        help="CHAIR评估器缓存文件路径（用于加速重复运行）")
+    parser.add_argument("--use-np-exp", type=lambda x: (str(x).lower() == 'true'), default=False,
+                       help="是否使用np.exp计算概率增益（默认True，使用np.exp；False则使用np.log）")
 
     args = parser.parse_args()
     set_seed(args.seed)
+
+    # 如果通过命令行指定了use_np_exp，更新全局变量
+    global USE_NP_EXP
+    if args.use_np_exp is not None:
+        USE_NP_EXP = args.use_np_exp
 
     if args.train_file is None:
         args.train_file = os.path.join(coco_train_json_dir, f"coco_train_20.json")
@@ -1692,6 +1767,9 @@ def main():
     print(f"模型路径: {args.model_path}")
     print(f"COCO根目录: {args.coco_root}")
     print(f"设备: {args.device}")
+    print(f"概率增益计算方法: {'np.exp' if USE_NP_EXP else 'np.log'}")
+    if USE_NP_EXP:
+        print(f"指数增益系数: {EXP_GAIN_COEFF}")
     print("=" * 80)
 
     # 加载训练cases

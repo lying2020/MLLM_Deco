@@ -22,16 +22,19 @@ import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
 class HeadGroundTruthDataset(Dataset):
     """Head真值对数据集"""
 
-    def __init__(self, pairs: List[Dict]):
+    def __init__(self, pairs: List[Dict], dtype: torch.dtype = torch.float32):
         """
         Args:
             pairs: 真值对列表，每个元素包含 'head_vector' 和 'g_u'
+            dtype: 数据类型，默认 float32，可设置为 float64 用于高精度训练
         """
         self.pairs = pairs
+        self.dtype = dtype
         # 过滤掉无效数据
         self.valid_pairs = []
         for pair in pairs:
@@ -41,14 +44,15 @@ class HeadGroundTruthDataset(Dataset):
                     self.valid_pairs.append(pair)
 
         print(f"  有效样本数: {len(self.valid_pairs)}/{len(pairs)}")
+        print(f"  数据类型: {dtype}")
 
     def __len__(self):
         return len(self.valid_pairs)
 
     def __getitem__(self, idx):
         pair = self.valid_pairs[idx]
-        head_vector = torch.tensor(pair['head_vector'], dtype=torch.float32)
-        g_u = torch.tensor(pair['g_u'], dtype=torch.float32)
+        head_vector = torch.tensor(pair['head_vector'], dtype=self.dtype)
+        g_u = torch.tensor(pair['g_u'], dtype=self.dtype)
         return head_vector, g_u
 
 
@@ -97,7 +101,8 @@ class LinearProbeTrainer:
         input_dim: int = 128,
         hidden_dim: Optional[int] = None,
         use_dropout: bool = False,
-        device: str = "cuda:0"
+        device: str = "cuda:0",
+        dtype: torch.dtype = torch.float32
     ):
         """
         Args:
@@ -107,6 +112,7 @@ class LinearProbeTrainer:
             hidden_dim: 隐藏层维度（None表示使用简单线性映射）
             use_dropout: 是否使用Dropout
             device: 设备
+            dtype: 数据类型，默认 float32，可设置为 float64 用于高精度训练
         """
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -114,19 +120,24 @@ class LinearProbeTrainer:
         self.hidden_dim = hidden_dim
         self.use_dropout = use_dropout
         self.device = device
+        self.dtype = dtype
 
         # 创建1024个linear probe
         self.probes = nn.ModuleDict()
         for layer_idx in range(num_layers):
             for head_idx in range(num_heads):
                 key = f"layer_{layer_idx}_head_{head_idx}"
-                self.probes[key] = LinearProbe(
+                probe = LinearProbe(
                     input_dim=input_dim,
                     hidden_dim=hidden_dim,
                     use_dropout=use_dropout
-                ).to(device)
+                )
+                # 将模型转换为指定精度
+                probe = probe.to(dtype=dtype).to(device)
+                self.probes[key] = probe
 
         print(f"✓ 创建了 {len(self.probes)} 个linear probe")
+        print(f"  数据类型: {dtype}")
         if hidden_dim is None:
             print(f"  架构: Linear({input_dim}, 1) + Tanh")
         else:
@@ -179,7 +190,9 @@ class LinearProbeTrainer:
         lr: float = 0.001,
         weight_decay: float = 0.01,
         patience: int = 10,
-        verbose: bool = False
+        verbose: bool = False,
+        print_interval: int = 10,
+        head_key: Optional[str] = None
     ) -> Dict:
         """
         训练单个probe
@@ -193,6 +206,8 @@ class LinearProbeTrainer:
             weight_decay: L2正则化系数
             patience: 早停patience
             verbose: 是否输出详细信息
+            print_interval: 每N个epoch打印一次loss（0表示不打印）
+            head_key: head的标识符（用于打印，可选）
 
         Returns:
             Dict: 训练结果统计
@@ -202,7 +217,7 @@ class LinearProbeTrainer:
 
         # 学习率调度器
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=False
+            optimizer, mode='min', factor=0.5, patience=5
         )
 
         best_val_loss = float('inf')
@@ -217,8 +232,8 @@ class LinearProbeTrainer:
             train_count = 0
 
             for head_vector, g_u in train_loader:
-                head_vector = head_vector.to(self.device)
-                g_u = g_u.to(self.device).unsqueeze(1)  # [batch_size, 1]
+                head_vector = head_vector.to(self.device, dtype=self.dtype)
+                g_u = g_u.to(self.device, dtype=self.dtype).unsqueeze(1)  # [batch_size, 1]
 
                 optimizer.zero_grad()
                 pred = probe(head_vector)
@@ -240,8 +255,8 @@ class LinearProbeTrainer:
 
                 with torch.no_grad():
                     for head_vector, g_u in val_loader:
-                        head_vector = head_vector.to(self.device)
-                        g_u = g_u.to(self.device).unsqueeze(1)
+                        head_vector = head_vector.to(self.device, dtype=self.dtype)
+                        g_u = g_u.to(self.device, dtype=self.dtype).unsqueeze(1)
 
                         pred = probe(head_vector)
                         loss = criterion(pred, g_u)
@@ -255,6 +270,13 @@ class LinearProbeTrainer:
                 # 学习率调度
                 scheduler.step(avg_val_loss)
 
+                # 打印loss（如果启用）
+                if print_interval > 0 and (epoch + 1) % print_interval == 0:
+                    current_lr = optimizer.param_groups[0]['lr']
+                    head_info = f"[{head_key}] " if head_key else ""
+                    print(f"    {head_info}Epoch {epoch+1}/{num_epochs}: Train Loss = {avg_train_loss:.6f}, "
+                          f"Val Loss = {avg_val_loss:.6f}, LR = {current_lr:.6f}")
+
                 # 早停检查
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
@@ -262,13 +284,21 @@ class LinearProbeTrainer:
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
-                        if verbose:
-                            print(f"    早停于epoch {epoch+1}")
+                        if verbose or print_interval > 0:
+                            head_info = f"[{head_key}] " if head_key else ""
+                            print(f"    {head_info}早停于epoch {epoch+1}, best_val_loss = {best_val_loss:.6f}")
                         break
             else:
                 # 没有验证集，只使用训练损失
                 avg_val_loss = avg_train_loss
                 val_losses.append(avg_val_loss)
+
+                # 打印loss（如果启用）
+                if print_interval > 0 and (epoch + 1) % print_interval == 0:
+                    current_lr = optimizer.param_groups[0]['lr']
+                    head_info = f"[{head_key}] " if head_key else ""
+                    print(f"    {head_info}Epoch {epoch+1}/{num_epochs}: Train Loss = {avg_train_loss:.6f}, "
+                          f"LR = {current_lr:.6f}")
 
         return {
             'train_losses': train_losses,
@@ -288,7 +318,8 @@ class LinearProbeTrainer:
         lr: float = 0.001,
         weight_decay: float = 0.01,
         patience: int = 10,
-        save_dir: Optional[str] = None
+        save_dir: Optional[str] = None,
+        print_interval: int = 10
     ):
         """
         训练所有1024个linear probe
@@ -304,6 +335,7 @@ class LinearProbeTrainer:
             weight_decay: L2正则化系数
             patience: 早停patience
             save_dir: 模型保存目录（如果为None则不保存）
+            print_interval: 每N个epoch打印一次loss（0表示不打印，默认10）
         """
         # 加载数据
         data_by_probe = self.load_ground_truth_data(ground_truth_dir)
@@ -316,8 +348,12 @@ class LinearProbeTrainer:
         print(f"\n开始训练 {len(self.probes)} 个linear probe...")
         print(f"数据划分: 训练集 {train_ratio*100:.1f}%, 验证集 {val_ratio*100:.1f}%, 测试集 {test_ratio*100:.1f}%")
         print(f"训练参数: batch_size={batch_size}, lr={lr}, weight_decay={weight_decay}, patience={patience}")
+        print(f"数据类型: {self.dtype}")
+        if print_interval > 0:
+            print(f"Loss打印间隔: 每 {print_interval} 个epoch")
 
         # 训练每个probe
+        trained_count = 0
         for key, probe in tqdm(self.probes.items(), desc="训练进度"):
             pairs = data_by_probe.get(key, [])
 
@@ -328,8 +364,12 @@ class LinearProbeTrainer:
                 }
                 continue
 
-            # 创建数据集
-            dataset = HeadGroundTruthDataset(pairs)
+            # 创建数据集（使用指定的精度）
+            dataset = HeadGroundTruthDataset(pairs, dtype=self.dtype)
+
+            # 打印当前训练的 head 信息（每10个head打印一次，或第一个）
+            if trained_count == 0 or (trained_count + 1) % 10 == 0:
+                print(f"\n[{trained_count + 1}/1024] 训练 {key} (样本数: {len(dataset)})...")
 
             if len(dataset) == 0:
                 results[key] = {
@@ -363,7 +403,9 @@ class LinearProbeTrainer:
                 lr=lr,
                 weight_decay=weight_decay,
                 patience=patience,
-                verbose=False
+                verbose=False,
+                print_interval=print_interval,
+                head_key=key
             )
 
             # 评估测试集
@@ -375,8 +417,8 @@ class LinearProbeTrainer:
 
             with torch.no_grad():
                 for head_vector, g_u in test_loader:
-                    head_vector = head_vector.to(self.device)
-                    g_u = g_u.to(self.device).unsqueeze(1)
+                    head_vector = head_vector.to(self.device, dtype=self.dtype)
+                    g_u = g_u.to(self.device, dtype=self.dtype).unsqueeze(1)
 
                     pred = probe(head_vector)
                     loss = nn.MSELoss()(pred, g_u)
@@ -415,6 +457,8 @@ class LinearProbeTrainer:
             all_train_losses.append(train_result['train_losses'][-1])
             all_val_losses.append(train_result['val_losses'][-1])
 
+            trained_count += 1
+
         # 打印统计信息
         print(f"\n训练完成!")
         print(f"=" * 80)
@@ -440,7 +484,13 @@ class LinearProbeTrainer:
 
         # 保存模型
         if save_dir is not None:
-            save_path = Path(save_dir)
+            # 从 ground_truth_dir 提取最后一级目录名
+            # 例如: "train/coco_train_json/coco_train_20_generate_spp_gt_pair" -> "coco_train_20_generate_spp_gt_pair"
+            ground_truth_path = Path(ground_truth_dir)
+            subdir_name = ground_truth_path.name  # 获取最后一级目录名
+
+            # 在 save_dir 下创建子目录
+            save_path = Path(save_dir) / subdir_name
             save_path.mkdir(parents=True, exist_ok=True)
 
             # 保存所有模型
@@ -453,7 +503,9 @@ class LinearProbeTrainer:
             with open(results_path, 'w', encoding='utf-8') as f:
                 json.dump(results, f, indent=2, ensure_ascii=False)
 
-            print(f"\n模型已保存到: {save_dir}")
+            print(f"\n模型已保存到: {save_path}")
+            print(f"  基础目录: {save_dir}")
+            print(f"  子目录: {subdir_name}")
 
         return results
 
@@ -492,7 +544,7 @@ class LinearProbeTrainer:
         with torch.no_grad():
             if head_vector.dim() == 1:
                 head_vector = head_vector.unsqueeze(0)
-            head_vector = head_vector.to(self.device)
+            head_vector = head_vector.to(self.device, dtype=self.dtype)
             pred = probe(head_vector)
             return pred.cpu().item() if pred.size(0) == 1 else pred.cpu()
 
@@ -502,9 +554,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="训练1024个Linear Probe")
-    parser.add_argument("--ground-truth-dir", type=str, required=True,
+    parser.add_argument("--ground-truth-dir", type=str, default=os.path.join(current_dir, "coco_train_json/coco_train_20_generate_spp_gt_pair"),
                        help="真值对文件目录")
-    parser.add_argument("--save-dir", type=str, default=None,
+    parser.add_argument("--save-dir", type=str, default=os.path.join(current_dir, "ckpt"),
                        help="模型保存目录")
     parser.add_argument("--device", type=str, default="cuda:0",
                        help="设备")
@@ -522,8 +574,20 @@ if __name__ == "__main__":
                        help="L2正则化系数")
     parser.add_argument("--patience", type=int, default=10,
                        help="早停patience")
+    parser.add_argument("--dtype", type=str, default="float32",
+                       choices=["float32", "float64"],
+                       help="训练精度: float32 (默认) 或 float64 (高精度，适用于小数值)")
+    parser.add_argument("--print-interval", type=int, default=10,
+                       help="每N个epoch打印一次loss（0表示不打印，默认10）")
 
     args = parser.parse_args()
+
+    # 转换 dtype 字符串为 torch.dtype
+    dtype_map = {
+        "float32": torch.float32,
+        "float64": torch.float64
+    }
+    dtype = dtype_map.get(args.dtype, torch.float32)
 
     # 创建trainer
     trainer = LinearProbeTrainer(
@@ -532,7 +596,8 @@ if __name__ == "__main__":
         input_dim=128,
         hidden_dim=args.hidden_dim,
         use_dropout=args.use_dropout,
-        device=args.device
+        device=args.device,
+        dtype=dtype
     )
 
     # 训练
@@ -543,5 +608,6 @@ if __name__ == "__main__":
         num_epochs=args.num_epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
-        patience=args.patience
+        patience=args.patience,
+        print_interval=args.print_interval
     )

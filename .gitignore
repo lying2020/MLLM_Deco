@@ -29,6 +29,7 @@ var/
 wheels/
 coco_train_json/
 head_gu_statistics/
+train/ckpt/
 train/coco_train_200_head_ground_truth/
 train/coco_train_20_head_ground_truth/
 train/coco_train_500_head_ground_truth/

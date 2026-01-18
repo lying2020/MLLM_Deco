@@ -42,6 +42,7 @@ from PIL import Image
 import requests
 from io import BytesIO
 from transformers import set_seed
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 coco_train_json_dir = os.path.join(current_dir, "coco_train_json")
@@ -54,6 +55,7 @@ BETA = 0.0   # 偏置参数
 TOP_K = 40   # 用于构建候选池的top-K值
 
 EXP_GAIN_COEFF=2.0
+USE_NP_EXP = True  # 默认使用 np.exp，如果为 False 则使用 np.log
 
 # DDPM 噪声参数
 DDPM_NOISE_TIMESTEP = 300  # 30% 噪声，对应 timestep=300 (在1000步中)
@@ -333,31 +335,38 @@ def compute_set_probability(logits: torch.Tensor, token_set: Set[int]) -> float:
 def compute_log_probability_gain(
     logits_with_head: torch.Tensor,
     logits_without_head: torch.Tensor,
-    token_set: Set[int]
+    token_set: Set[int],
+    use_np_exp: bool = None
 ) -> float:
     """
-    计算概率增益（使用指数函数，避免log计算时的数值不稳定问题）
-    原公式C2: Δlog P_u^(l,n)(B_u) = log P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)}) - log P(B_u | h_{e,t}^{(l-1)})
-    改进版本: ΔP_u^(l,n)(B_u) = exp(P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)})) - exp(P(B_u | h_{e,t}^{(l-1)}))
+    计算概率增益
 
-    优势：
-    1. 避免log(0)导致的数值不稳定问题
-    2. 当prob接近0时，exp(prob) ≈ 1，不会趋向-inf
-    3. 当prob接近1时，exp(prob) ≈ e，不会趋向+inf
-    4. 数值范围更稳定：exp(prob) ∈ [1, e]，增益范围约为 [-1.718, 1.718]
-    5. 空集合自动处理：如果token_set为空，compute_set_probability返回0.0，
-       则exp(0) - exp(0) = 0，无需特殊判断
+    支持两种计算方法：
+    1. use_np_exp=True (默认): 使用指数函数
+       ΔP_u^(l,n)(B_u) = exp(coeff*P(B_u | h_with)) - exp(coeff*P(B_u | h_without))
+       优势：避免log(0)导致的数值不稳定问题，数值范围更稳定
+    2. use_np_exp=False: 使用对数函数（原始公式）
+       Δlog P_u^(l,n)(B_u) = log P(B_u | h_with) - log P(B_u | h_without)
+       注意：当prob=0时，log(0)=-inf，需要特殊处理
 
     Args:
         logits_with_head: 加入head后的logits [vocab_size]
         logits_without_head: 未加入head的logits [vocab_size]
         token_set: token ID集合（可以为空，空集合时自动返回0.0）
+        use_np_exp: 是否使用np.exp计算（默认使用全局变量USE_NP_EXP）
 
     Returns:
-        float: 概率增益（使用指数函数计算）
+        float: 概率增益
     """
+    # 如果没有指定，使用全局变量
+    if use_np_exp is None:
+        use_np_exp = USE_NP_EXP
+
+    if token_set is None or len(token_set) == 0:
+        return 0.0
+
     # 计算集合概率（范围在 [0, 1]）
-    # 注意：如果token_set为空，compute_set_probability会返回0.0
+    # 注意：如果 token_set 为空，compute_set_probability会返回0.0
     prob_with = compute_set_probability(logits_with_head, token_set)
     prob_without = compute_set_probability(logits_without_head, token_set)
 
@@ -367,21 +376,27 @@ def compute_log_probability_gain(
     if np.isnan(prob_without) or np.isinf(prob_without):
         prob_without = 0.0
 
-    # 使用指数函数计算增益，避免log(0)的数值不稳定问题
-    # exp(prob) 的范围是 [1, e]，其中 e ≈ 2.718
-    # 当 prob 接近 0 时，exp(prob) ≈ 1，不会趋向 -inf
-    # 当 prob 接近 1 时，exp(prob) ≈ e，不会趋向 +inf
-    # 当 prob = 0（空集合）时，exp(0) - exp(0) = 0，自动处理空集合情况
-    try:
-        exp_gain = np.exp(EXP_GAIN_COEFF*prob_with) - np.exp(EXP_GAIN_COEFF*prob_without)
+
+    if use_np_exp:
+        # 方法1：使用指数函数计算增益
+        # exp(coeff*prob) 的范围是 [1, e^coeff]，其中 e^coeff ≈ e^2 ≈ 7.389
+        # 当 prob 接近 0 时，exp(coeff*prob) ≈ 1，不会趋向 -inf
+        # 当 prob 接近 1 时，exp(coeff*prob) ≈ e^coeff，不会趋向 +inf
+        # 当 prob = 0（空集合）时，exp(0) - exp(0) = 0，自动处理空集合情况
+        exp_gain = np.exp(EXP_GAIN_COEFF * prob_with) - np.exp(EXP_GAIN_COEFF * prob_without)
         # 检查结果是否为nan或inf
         if np.isnan(exp_gain) or np.isinf(exp_gain):
             return 0.0
         return exp_gain
-    except (OverflowError, ValueError):
-        # 如果exp计算溢出，返回0.0
-        return 0.0
+    else:
+        # 方法2：使用对数函数计算增益（原始公式）
+        # log P(B_u | h_with) - log P(B_u | h_without)
+        prob_with = max(prob_with, 1e-12)
+        prob_without = max(prob_without, 1e-12)
 
+        # 计算对数增益
+        log_gain = np.log(prob_with) - np.log(prob_without)
+        return log_gain
 
 class HeadOutputExtractor:
     """使用hook机制提取每个head的输出"""
@@ -675,6 +690,21 @@ def process_case_pope(
     # 存储所有head的真值对
     ground_truth_pairs = []
 
+    # 获取case_id用于调试打印控制
+    case_id = case.get("question_id", case.get("image_id", "N/A"))
+
+    # 调试打印控制：每隔几个case和层打印一次
+    DEBUG_CASE_INTERVAL = 3  # 每隔3个case打印一次
+    DEBUG_LAYER_INTERVAL = 8  # 每隔8层打印一次（0, 8, 16, 24）
+    DEBUG_HEAD_INTERVAL = 8  # 每隔8个head打印一次（0, 8, 16, 24）
+
+    # 判断是否应该打印调试信息（基于case_id的数值部分）
+    try:
+        case_id_num = int(str(case_id)) if isinstance(case_id, (int, str)) else 0
+        should_debug_case = (case_id_num % DEBUG_CASE_INTERVAL == 0)
+    except:
+        should_debug_case = False
+
     # 遍历每一层，手动计算每个head的输出（与CHAIR处理一致）
     for layer_idx in range(num_layers):
         # 获取该层之前的hidden state（h_t^(l-1)）- 使用完整的序列
@@ -714,6 +744,25 @@ def process_case_pope(
         Q = Q.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
         K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
+
+        # 应用 Rotary Position Embedding (RoPE) - 在计算 attention scores 之前
+        if hasattr(attn_module, 'rotary_emb'):
+            # 计算 kv_seq_len（对于单次forward，通常等于seq_len_for_attn）
+            kv_seq_len = seq_len_for_attn
+
+            # 生成 cos, sin（使用 V 的形状来确定序列长度）
+            cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
+
+            # 计算 position_ids（对于完整的序列，从0到seq_len_for_attn-1）
+            # 注意：如果 position_ids 已经可用且长度匹配，可以直接使用；否则重新计算
+            if position_ids is not None and position_ids.shape[1] == seq_len_for_attn:
+                current_position_ids = position_ids
+            else:
+                # 重新计算 position_ids（从0开始）
+                current_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
+
+            # 应用 RoPE 到 Q 和 K
+            Q, K = apply_rotary_pos_emb(Q, K, cos, sin, current_position_ids)
 
         # 计算attention scores（使用完整序列）
         scale = 1.0 / (head_dim ** 0.5)
@@ -760,6 +809,84 @@ def process_case_pope(
             else:
                 h_with_head_processed = h_with_head_processed.to(device)
             logits_with_head = lm_head(h_with_head_processed)
+
+            # ========================================================================
+            # 调试打印：检查label与预测token的一致性，以及概率量级
+            # ========================================================================
+            should_debug_layer = (layer_idx % DEBUG_LAYER_INTERVAL == 0)
+            should_debug_head = (head_idx % DEBUG_HEAD_INTERVAL == 0)
+            should_debug = should_debug_case and should_debug_layer and should_debug_head
+
+            if should_debug:
+                # 1. 获取最大概率的token（从logits_before和logits_with_head）
+                probs_before = torch.softmax(logits_before[0], dim=-1)
+                probs_with_head = torch.softmax(logits_with_head[0], dim=-1)
+
+                max_token_id_before = torch.argmax(probs_before).item()
+                max_token_id_with_head = torch.argmax(probs_with_head).item()
+
+                # 解码token
+                max_token_text_before = tokenizer.decode([max_token_id_before], skip_special_tokens=False).strip()
+                max_token_text_with_head = tokenizer.decode([max_token_id_with_head], skip_special_tokens=False).strip()
+
+                # 检查最大概率token是否在bu_plus_tokens或bu_minus_tokens中
+                is_max_before_yes = max_token_id_before in bu_plus_tokens if is_yes else max_token_id_before in bu_minus_tokens
+                is_max_before_no = max_token_id_before in bu_minus_tokens if is_yes else max_token_id_before in bu_plus_tokens
+                is_max_with_head_yes = max_token_id_with_head in bu_plus_tokens if is_yes else max_token_id_with_head in bu_minus_tokens
+                is_max_with_head_no = max_token_id_with_head in bu_minus_tokens if is_yes else max_token_id_with_head in bu_plus_tokens
+
+                # 2. 计算prob_without和prob_with（集合概率）
+                prob_without_plus = compute_set_probability(logits_before[0], bu_plus_tokens)
+                prob_without_minus = compute_set_probability(logits_before[0], bu_minus_tokens)
+                prob_with_plus = compute_set_probability(logits_with_head[0], bu_plus_tokens)
+                prob_with_minus = compute_set_probability(logits_with_head[0], bu_minus_tokens)
+
+                # 3. 检查是否出现不一致的情况（label是yes但预测是no，或相反）
+                label_mismatch_before = (is_yes and is_max_before_no) or (not is_yes and is_max_before_yes)
+                label_mismatch_with_head = (is_yes and is_max_with_head_no) or (not is_yes and is_max_with_head_yes)
+
+                # 4. 打印调试信息
+                print(f"\n{'='*80}")
+                print(f"[调试] Case #{case_id}, Layer {layer_idx}, Head {head_idx}")
+                print(f"  Label: '{label}' (is_yes={is_yes})")
+                print(f"  Bu^+ tokens: {list(bu_plus_tokens)[:5]}... (共{len(bu_plus_tokens)}个)")
+                print(f"  Bu^- tokens: {list(bu_minus_tokens)[:5]}... (共{len(bu_minus_tokens)}个)")
+                print(f"\n  [logits_before] 最大概率token:")
+                print(f"    Token ID: {max_token_id_before}, Text: '{max_token_text_before}'")
+                print(f"    概率: {probs_before[max_token_id_before].item():.6f}")
+                print(f"    是否匹配label: {'✓' if not label_mismatch_before else '✗ (不一致!)'}")
+                print(f"    P(Bu^+) = {prob_without_plus:.6e}, P(Bu^-) = {prob_without_minus:.6e}")
+                print(f"\n  [logits_with_head] 最大概率token:")
+                print(f"    Token ID: {max_token_id_with_head}, Text: '{max_token_text_with_head}'")
+                print(f"    概率: {probs_with_head[max_token_id_with_head].item():.6f}")
+                print(f"    是否匹配label: {'✓' if not label_mismatch_with_head else '✗ (不一致!)'}")
+                print(f"    P(Bu^+) = {prob_with_plus:.6e}, P(Bu^-) = {prob_with_minus:.6e}")
+                method_name = "np.exp" if USE_NP_EXP else "np.log"
+                print(f"\n  [概率增益] (方法: {method_name}):")
+                delta_log_p_plus = compute_log_probability_gain(
+                    logits_with_head[0], logits_before[0], bu_plus_tokens
+                )
+                delta_log_p_minus = compute_log_probability_gain(
+                    logits_with_head[0], logits_before[0], bu_minus_tokens
+                )
+                print(f"    ΔP(Bu^+) = {delta_log_p_plus:.6e}")
+                print(f"    ΔP(Bu^-) = {delta_log_p_minus:.6e}")
+                print(f"{'='*80}\n")
+
+            # 检查是否出现不一致的情况（即使不在调试间隔，也要记录）
+            if not should_debug:
+                # 快速检查：只检查第一个head和特定层，避免过多计算
+                if head_idx == 0 and layer_idx in [0, 8, 16, 24, 31]:
+                    probs_with_head = torch.softmax(logits_with_head[0], dim=-1)
+                    max_token_id_with_head = torch.argmax(probs_with_head).item()
+                    is_max_with_head_yes = max_token_id_with_head in bu_plus_tokens if is_yes else max_token_id_with_head in bu_minus_tokens
+                    is_max_with_head_no = max_token_id_with_head in bu_minus_tokens if is_yes else max_token_id_with_head in bu_plus_tokens
+                    label_mismatch_with_head = (is_yes and is_max_with_head_no) or (not is_yes and is_max_with_head_yes)
+
+                    if label_mismatch_with_head:
+                        max_token_text_with_head = tokenizer.decode([max_token_id_with_head], skip_special_tokens=False).strip()
+                        print(f"  ⚠️  [不一致检测] Case #{case_id}, Layer {layer_idx}, Head {head_idx}: "
+                              f"Label='{label}' 但最大概率token='{max_token_text_with_head}' (ID={max_token_id_with_head})")
 
             # 计算概率增益（使用指数函数，避免log计算时的数值不稳定问题）
             delta_log_p_plus = compute_log_probability_gain(
@@ -1382,6 +1509,30 @@ def process_case_chair(
             K = K.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
             V = V.view(batch_size, seq_len_for_attn, num_heads, head_dim).transpose(1, 2)
 
+            # 应用 Rotary Position Embedding (RoPE) - 在计算 attention scores 之前
+            if hasattr(attn_module, 'rotary_emb'):
+                # 计算 kv_seq_len（对于单次forward，通常等于seq_len_for_attn）
+                kv_seq_len = seq_len_for_attn
+
+                # 生成 cos, sin（使用 V 的形状来确定序列长度）
+                cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
+
+                # 计算 position_ids（对于完整的序列，从0到seq_len_for_attn-1）
+                # 注意：在 process_case_chair 中，我们手动调用了 forward，current_position_ids 已在前面计算
+                # 如果 current_position_ids 存在且长度匹配，使用它；否则重新计算
+                try:
+                    if current_position_ids is not None and current_position_ids.shape[1] == seq_len_for_attn:
+                        rope_position_ids = current_position_ids
+                    else:
+                        # 重新计算 position_ids（从0开始）
+                        rope_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
+                except NameError:
+                    # current_position_ids 不在作用域内，重新计算
+                    rope_position_ids = torch.arange(seq_len_for_attn, device=device, dtype=torch.long).unsqueeze(0)
+
+                # 应用 RoPE 到 Q 和 K
+                Q, K = apply_rotary_pos_emb(Q, K, cos, sin, rope_position_ids)
+
             # 计算attention scores（使用完整序列）
             scale = 1.0 / (head_dim ** 0.5)
             scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
@@ -1754,12 +1905,19 @@ def main():
                        help="随机种子")
     parser.add_argument("--chair-cache", type=str, default=None,
                        help="CHAIR评估器缓存文件路径（用于加速重复运行）")
+    parser.add_argument("--use-np-exp", type=lambda x: (str(x).lower() == 'true'), default=None,
+                       help="是否使用np.exp计算概率增益（默认True，使用np.exp；False则使用np.log）")
 
     args = parser.parse_args()
     set_seed(args.seed)
 
+    # 如果通过命令行指定了use_np_exp，更新全局变量
+    global USE_NP_EXP
+    if args.use_np_exp is not None:
+        USE_NP_EXP = args.use_np_exp
+
     if args.train_file is None:
-        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_20.json")
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_200.json")
 
     print("=" * 80)
     print("生成 Head 级别真值对 (VPP版本)")
@@ -1768,6 +1926,9 @@ def main():
     print(f"模型路径: {args.model_path}")
     print(f"COCO根目录: {args.coco_root}")
     print(f"设备: {args.device}")
+    print(f"概率增益计算方法: {'np.exp' if USE_NP_EXP else 'np.log'}")
+    if USE_NP_EXP:
+        print(f"指数增益系数: {EXP_GAIN_COEFF}")
     print("=" * 80)
 
     # 加载训练cases

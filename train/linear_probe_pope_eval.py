@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-CHAIR 评估脚本 - 生成图像描述并保存为 JSONL 格式
-参考 run_pope_eval.py 的实现, 针对 CHAIR benchmark 优化
-自动检测数据集和模型, 使用默认参数, 无需输入参数即可运行
+POPE 评估脚本 - 使用 Linear Probe 进行 POPE 基准测试
+支持使用或不使用 linear probe 网络进行对比评估
 
-CHAIR 评估需要:
-1. COCO 2014 val2014 图像目录
-2. 生成的描述文件(JSONL 格式): {"image_id": int, "caption": str}
-3. COCO annotations 目录(用于后续的 chair.py 评估)
+POPE 评估需要:
+1. POPE 测试文件 (JSONL 格式): {"question_id": int, "image": str, "text": str, "label": "yes"/"no"}
+2. COCO 2014 val2014 图像目录
+3. 生成的答案文件(JSONL 格式): {"question_id": int, "text": str, ...}
 
 使用步骤:
-1. 运行此脚本生成描述文件:
-   python run_chair_eval.py --coco-root /path/to/coco --output-file results/chair/captions.jsonl
+1. 运行此脚本生成答案文件:
+   python train/linear_probe_pope_eval.py --pope-file pope_coco/coco_pope_random.json --use-linear-probe --linear-probe-dir train/ckpt
 
-2. 使用 chair.py 计算 CHAIR 指标:
-   python chair.py --cap_file results/chair/captions.jsonl --image_id_key image_id --caption_key caption \
-                   --coco_path /path/to/coco/annotations_trainval2014/annotations/
+2. 脚本会自动计算 POPE 指标 (accuracy, precision, recall, F1)
 """
 
 import argparse
@@ -51,8 +48,9 @@ from PIL import Image
 import requests
 from io import BytesIO
 from transformers import set_seed
-from eval_tool.chair import evaluate_chair
+from eval_tool.eval_pope import evaluate_pope
 from train.linear_probe_trainer import LinearProbeTrainer, LinearProbe
+import re
 
 
 class LinearProbeManager:
@@ -305,59 +303,75 @@ def load_image(image_file):
     return image
 
 
-def get_coco_val2014_images(coco_root: str, image_id_list: Optional[List[int]] = None, max_images: int = 0):
+def load_pope_questions(pope_file: str, coco_root: str) -> List[Dict]:
     """
-    获取 COCO val2014 图像列表
+    从 POPE JSONL 文件加载测试用例
 
     Args:
-        coco_root: COCO 数据集根目录(包含 val2014 子目录)
-        image_id_list: 可选的图像 ID 列表, 如果提供则只返回这些图像
-        max_images: 最大图像数量(0 表示全部)
+        pope_file: POPE 测试文件路径 (JSONL 格式)
+        coco_root: COCO 数据集根目录
 
     Returns:
-        List[Dict]: 包含 image_id 和 image_path 的字典列表
+        List[Dict]: 测试用例列表，每个包含 question_id, image, text, label
     """
+    pope_file = Path(pope_file)
     coco_root = Path(coco_root)
-    val2014_dir = coco_root / "val2014"
 
-    if not val2014_dir.exists():
-        raise FileNotFoundError(f"COCO val2014 目录不存在: {val2014_dir}")
+    if not pope_file.exists():
+        raise FileNotFoundError(f"POPE 文件不存在: {pope_file}")
 
-    images = []
+    questions = []
+    with open(pope_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                case = json.loads(line)
+                # 处理图像路径
+                image_path = case.get("image", "")
+                if image_path.startswith("val2014/"):
+                    # 相对路径，需要拼接 coco_root
+                    image_path = coco_root / image_path
+                elif not os.path.isabs(image_path):
+                    # 相对路径，尝试拼接
+                    image_path = coco_root / "val2014" / os.path.basename(image_path)
+                else:
+                    # 绝对路径，直接使用
+                    image_path = Path(image_path)
 
-    if image_id_list is not None:
-        # 如果提供了图像 ID 列表, 只处理这些图像
-        for image_id in image_id_list:
-            image_filename = f"COCO_val2014_{str(image_id).zfill(12)}.jpg"
-            image_path = val2014_dir / image_filename
-            if image_path.exists():
-                images.append({
-                    "image_id": image_id,
-                    "image_path": str(image_path)
-                })
-            else:
-                print(f"⚠️  警告: 图像文件不存在: {image_path}")
+                # 确保图像文件存在
+                if not image_path.exists():
+                    print(f"⚠️  警告: 图像文件不存在: {image_path}")
+                    continue
+
+                case["image_path"] = str(image_path)
+                questions.append(case)
+            except json.JSONDecodeError as e:
+                print(f"⚠️  警告: 无法解析 JSON 行: {line[:100]}... 错误: {e}")
+                continue
+
+    print(f"✓ 从 {pope_file} 加载了 {len(questions)} 个测试用例")
+    return questions
+
+
+def recorder(out):
+    """将输出转换为 Yes/No"""
+    if not out or not out.strip():
+        return "No"
+
+    out_lower = out.lower().strip()
+    word_list = re.split(r'[^\w]+', out_lower)
+
+    # 检查是否包含 "yes"
+    if "yes" in word_list:
+        return "Yes"
+    # 检查是否包含 "no"
+    elif "no" in word_list:
+        return "No"
     else:
-        # 扫描 val2014 目录中的所有图像
-        image_files = sorted(val2014_dir.glob("COCO_val2014_*.jpg"))
-        for image_file in image_files:
-            # 从文件名提取 image_id
-            # 格式: COCO_val2014_000000123456.jpg
-            filename = image_file.stem  # 去掉 .jpg
-            image_id = int(filename.split("_")[-1])
-            images.append({
-                "image_id": image_id,
-                "image_path": str(image_file)
-            })
-
-    # 限制图像数量
-    if max_images > 0:
-        images = images[:max_images]
-
-    # 按 image_id 排序
-    images.sort(key=lambda x: x['image_id'])
-
-    return images
+        # 如果既没有 "yes" 也没有 "no"，默认返回 "No"
+        return "No"
 
 
 def prepare_inputs(model, tokenizer, image_processor, image_file: str, prompt: str, conv_mode: str, device: str, verbose: bool = False):
@@ -377,11 +391,14 @@ def prepare_inputs(model, tokenizer, image_processor, image_file: str, prompt: s
         print(f"    - 图像尺寸: {image.size}")
         print(f"    - 图像张量形状: {image_tensor.shape}")
 
-    # 准备文本输入
+    # 准备文本输入（POPE 风格）
     if model.config.mm_use_im_start_end:
         qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + prompt
     else:
         qs = DEFAULT_IMAGE_TOKEN + '\n' + prompt
+
+    # 对于 Yes/No 问题，添加明确的输出格式说明
+    qs = qs + " Please answer with Yes or No only."
 
     conv = conv_templates[conv_mode].copy()
     conv.append_message(conv.roles[0], qs)
@@ -858,24 +875,21 @@ def print_comparison_table(deco_results, vanilla_results):
     print("=" * 80)
 
 
-def save_summary_to_file(summary_file, args, output_file, chair_results_file=None,
-                         chair_errors_file=None, results=None, model_name=None, error=None):
+def save_summary_to_file(summary_file, args, output_file, pope_results=None, model_name=None, error=None):
     """
-    保存 CHAIR 评估结果总结到txt文件
+    保存 POPE 评估结果总结到txt文件
 
     Args:
         summary_file: 总结文件路径
         args: 命令行参数
-        output_file: 输出描述文件路径
-        chair_results_file: CHAIR 详细结果文件路径(可选)
-        chair_errors_file: CHAIR 错误样本文件路径(可选)
-        results: 评估结果字典(如果评估成功)
+        output_file: 输出答案文件路径
+        pope_results: POPE 评估结果字典(如果评估成功)
         model_name: 模型名称
         error: 错误信息(如果评估失败)
     """
     with open(summary_file, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
-        f.write("CHAIR 评估结果总结\n")
+        f.write("POPE 评估结果总结\n")
         f.write("=" * 80 + "\n\n")
 
         # 基本信息
@@ -887,7 +901,16 @@ def save_summary_to_file(summary_file, args, output_file, chair_results_file=Non
             f.write(f"模型名称: {model_name}\n")
         f.write(f"设备: {args.device}\n")
         f.write(f"COCO 根目录: {args.coco_root}\n")
+        f.write(f"POPE 测试文件: {args.pope_file}\n")
         f.write(f"评测样本数: {args.num_samples if args.num_samples > 0 else '全部'}\n")
+        f.write("\n")
+
+        # Linear Probe 配置
+        f.write("【Linear Probe 配置】\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"使用 Linear Probe: {'是' if args.use_linear_probe else '否'}\n")
+        if args.use_linear_probe:
+            f.write(f"  - Linear Probe 目录: {args.linear_probe_dir}\n")
         f.write("\n")
 
         # Deco配置
@@ -914,37 +937,31 @@ def save_summary_to_file(summary_file, args, output_file, chair_results_file=Non
         # 文件路径
         f.write("【文件路径】\n")
         f.write("-" * 80 + "\n")
-        f.write(f"输出描述文件: {output_file}\n")
-        if chair_results_file:
-            f.write(f"CHAIR 详细结果文件: {chair_results_file}\n")
-        if chair_errors_file:
-            f.write(f"CHAIR 错误样本文件: {chair_errors_file}\n")
+        f.write(f"输出答案文件: {output_file}\n")
         f.write(f"总结文件: {summary_file}\n")
         f.write("\n")
 
         # 评估结果
         f.write("【评估结果】\n")
         f.write("-" * 80 + "\n")
-        if results is not None:
-            if 'overall_metrics' in results:
-                metrics = results['overall_metrics']
-                f.write(f"CHAIRs (句子级别): {metrics.get('CHAIRs', 0):.4f}\n")
-                f.write(f"CHAIRi (实例级别): {metrics.get('CHAIRi', 0):.4f}\n")
-                f.write(f"Recall (召回率):   {metrics.get('Recall', 0):.4f}\n")
-                f.write(f"Len (平均长度):    {metrics.get('Len', 0):.4f}\n")
+        if pope_results is not None:
+            if 'metrics' in pope_results:
+                metrics = pope_results['metrics']
+                f.write(f"Accuracy (准确率):    {metrics.get('accuracy', 0):.4f}\n")
+                f.write(f"Precision (精确率):   {metrics.get('precision', 0):.4f}\n")
+                f.write(f"Recall (召回率):      {metrics.get('recall', 0):.4f}\n")
+                f.write(f"F1 Score:             {metrics.get('f1', 0):.4f}\n")
+                f.write(f"Yes Proportion:       {metrics.get('yes_proportion', 0):.4f}\n")
 
-            # 统计错误样本
-            if 'sentences' in results:
-                total_samples = len(results['sentences'])
-                error_samples = [
-                    s for s in results['sentences']
-                    if s.get('metrics', {}).get('CHAIRs', 0) > 0
-                ]
-                error_count = len(error_samples)
-                f.write(f"\n总样本数: {total_samples}\n")
-                f.write(f"包含幻觉的样本数: {error_count}\n")
-                if total_samples > 0:
-                    f.write(f"幻觉样本比例: {error_count / total_samples * 100:.2f}%\n")
+            # 统计信息
+            if 'statistics' in pope_results:
+                stats = pope_results['statistics']
+                f.write(f"\n详细统计:\n")
+                f.write(f"  总问题数: {stats.get('total_questions', 0)}\n")
+                f.write(f"  True Positives (TP):  {stats.get('true_positives', 0)}\n")
+                f.write(f"  True Negatives (TN):  {stats.get('true_negatives', 0)}\n")
+                f.write(f"  False Positives (FP): {stats.get('false_positives', 0)}\n")
+                f.write(f"  False Negatives (FN): {stats.get('false_negatives', 0)}\n")
         elif error:
             f.write(f"评估失败: {error}\n")
         else:
@@ -958,9 +975,9 @@ def save_summary_to_file(summary_file, args, output_file, chair_results_file=Non
 
 
 def eval_model(args):
-    """评估模型, 生成图像描述"""
+    """评估模型, 生成 POPE 答案"""
     print("=" * 80)
-    print("CHAIR 评估 - 生成图像描述")
+    print("POPE 评估 - 生成 Yes/No 答案")
     print("=" * 80)
     print(f"模型路径: {args.model_path}")
     print(f"设备: {args.device}")
@@ -1023,79 +1040,19 @@ def eval_model(args):
     else:
         conv_mode = "llava_v0"
 
-    # 获取图像列表
-    print(f"\n[2/3] 正在获取图像列表...")
+    # 加载 POPE 测试用例
+    print(f"\n[2/3] 正在加载 POPE 测试用例...")
+    if not args.pope_file:
+        raise ValueError("必须指定 --pope-file 参数（例如: pope_coco/coco_pope_random.json）")
 
-    # 如果提供了图像 ID 列表文件, 读取它
-    image_id_list = None
-    if args.image_id_list_file:
-        image_id_list_file = os.path.expanduser(args.image_id_list_file)
-        if not os.path.exists(image_id_list_file):
-            raise FileNotFoundError(f"图像 ID 列表文件不存在: {image_id_list_file}")
+    questions = load_pope_questions(args.pope_file, args.coco_root)
+    if len(questions) == 0:
+        raise ValueError(f"从 {args.pope_file} 加载的测试用例为空")
 
-        # 检测文件格式: JSON 数组或文本文件(每行一个 ID)
-        with open(image_id_list_file, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-
-        # 尝试解析为 JSON(支持 JSON 数组格式, 如 ["COCO_val2014_000000001171.jpg", ...])
-        if content.startswith('[') and content.endswith(']'):
-            # JSON 数组格式
-            image_names = json.loads(content)
-            image_id_list = []
-            for name in image_names:
-                if isinstance(name, str):
-                    # 从文件名提取 image_id
-                    # 格式: "COCO_val2014_000000001171.jpg" 或 "COCO_val2014_000000001171"
-                    if name.endswith('.jpg'):
-                        name = name[:-4]  # 移除 .jpg 后缀
-                    # 提取最后的数字部分
-                    parts = name.split('_')
-                    if len(parts) > 0:
-                        try:
-                            image_id = int(parts[-1])
-                            image_id_list.append(image_id)
-                        except ValueError:
-                            print(f"⚠️  警告: 无法从文件名提取 image_id: {name}")
-                elif isinstance(name, int):
-                    # 直接是数字 ID
-                    image_id_list.append(name)
-                else:
-                    print(f"⚠️  警告: 无法处理的数据类型: {type(name)}, 值: {name}")
-            print(f"✓ 从 JSON 文件读取了 {len(image_id_list)} 个图像 ID")
-        else:
-            # 文本文件格式(每行一个 ID)
-            with open(image_id_list_file, 'r', encoding='utf-8') as f:
-                image_id_list = []
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    # 尝试解析为整数
-                    try:
-                        image_id = int(line)
-                        image_id_list.append(image_id)
-                    except ValueError:
-                        # 如果不是数字, 尝试从文件名格式提取
-                        if 'COCO_val2014_' in line:
-                            if line.endswith('.jpg'):
-                                line = line[:-4]
-                            parts = line.split('_')
-                            if len(parts) > 0:
-                                try:
-                                    image_id = int(parts[-1])
-                                    image_id_list.append(image_id)
-                                except ValueError:
-                                    print(f"⚠️  警告: 无法从行提取 image_id: {line}")
-                        else:
-                            print(f"⚠️  警告: 无法解析行: {line}")
-            print(f"✓ 从文本文件读取了 {len(image_id_list)} 个图像 ID")
-
-    images = get_coco_val2014_images(
-        coco_root=args.coco_root,
-        image_id_list=image_id_list,
-        max_images=args.num_samples if args.num_samples > 0 else 0
-    )
-    print(f"✓ 找到 {len(images)} 个图像")
+    # 限制问题数量（如果指定）
+    if args.num_samples > 0:
+        questions = questions[:args.num_samples]
+        print(f"✓ 限制为前 {len(questions)} 个测试用例")
 
     # 准备输出文件
     output_file = os.path.expanduser(args.output_file)
@@ -1107,15 +1064,13 @@ def eval_model(args):
     if args.use_deco:
         early_exit_layers = [i for i in range(args.start_layer, args.end_layer)]
 
-    # 处理每个图像
-    print(f"\n[3/3] 开始生成描述...")
-    # prompt = "Please describe this image in detail."
-    prompt = "Please help me describe the image in detail."
+    # 处理每个测试用例
+    print(f"\n[3/3] 开始生成答案...")
 
 
     # 计算需要输出详细信息的样本索引(如果启用debug模式)
     debug_mode = getattr(args, 'debug', False)
-    total_samples = len(images)
+    total_samples = len(questions)
     debug_indices = set()
 
     if debug_mode:
@@ -1137,22 +1092,26 @@ def eval_model(args):
             if len(debug_indices) > 0:
                 print(f"将输出 {len(debug_indices)} 个样本的详细信息用于调试(样本索引: {sorted(debug_indices)})")
 
-    for sample_idx, image_info in enumerate(tqdm(images, desc="处理进度")):
-        image_id = image_info["image_id"]
-        image_file = image_info["image_path"]
+    for sample_idx, question in enumerate(tqdm(questions, desc="处理进度")):
+        question_id = question["question_id"]
+        image_file = question["image_path"]
+        prompt_text = question["text"]
+        gt_label = question.get("label", "")
 
         # 判断是否需要输出详细信息(debug模式或选中的样本)
         verbose = sample_idx in debug_indices
 
         if verbose:
             print("\n" + "=" * 80)
-            print(f"[样本 {sample_idx + 1}/{total_samples}] Image ID: {image_id}")
+            print(f"[样本 {sample_idx + 1}/{total_samples}] Question ID: {question_id}")
             print("=" * 80)
             print(f"图像: {image_file}")
+            print(f"问题: {prompt_text}")
+            print(f"真值标签: {gt_label}")
 
         # 准备输入
         input_ids, image_tensor, stopping_criteria, stop_str = prepare_inputs(
-            model, tokenizer, image_processor, image_file, prompt, conv_mode, device, verbose=verbose
+            model, tokenizer, image_processor, image_file, prompt_text, conv_mode, device, verbose=verbose
         )
 
         # 生成回答
@@ -1175,117 +1134,74 @@ def eval_model(args):
             outputs = outputs[:-len(stop_str)]
         outputs = outputs.strip()
 
+        # 转换为 Yes/No 格式
+        answer = recorder(outputs)
+
         # 如果输出为空, 记录警告
         if not outputs:
             if verbose:
-                print(f"\n  [Warning] 图像 {image_id} 生成结果为空, output_token_len={output_token_len}")
+                print(f"\n  [Warning] Question {question_id} 生成结果为空, output_token_len={output_token_len}")
             else:
-                print(f"  [Warning] 图像 {image_id} 生成结果为空, output_token_len={output_token_len}")
+                print(f"  [Warning] Question {question_id} 生成结果为空, output_token_len={output_token_len}")
 
         if verbose:
-            print(f"\n  [生成结果] 描述:")
-            print(f"    - 输出长度: {len(outputs)} 字符")
-            print(f"    - 描述预览: {outputs[:200]}...")
+            print(f"\n  [生成结果] 答案:")
+            print(f"    - 原始输出: {outputs}")
+            print(f"    - 转换后答案: {answer}")
+            print(f"    - 真值标签: {gt_label}")
+            print(f"    - 是否正确: {answer.lower() == gt_label.lower()}")
             print("=" * 80)
 
-        # 保存结果(CHAIR 格式: image_id 和 caption)
+        # 保存结果(POPE 格式)
         result = {
-            "image_id": image_id,
-            "caption": outputs
+            "question_id": question_id,
+            "text": answer,
+            "prompt": prompt_text,
+            "image": question.get("image", ""),
+            "model_id": get_model_name_from_path(args.model_path),
+            "metadata": {
+                "raw_output": outputs,
+                "gt_label": gt_label
+            }
         }
         output_f.write(json.dumps(result, ensure_ascii=False) + "\n")
         output_f.flush()
 
     output_f.close()
-    print(f"\n✓ 描述生成完成！结果已保存到: {output_file}")
+    print(f"\n✓ 答案生成完成！结果已保存到: {output_file}")
 
     # 如果使用了 linear probe，恢复原始的 forward 方法
     if linear_probe_manager is not None and linear_probe_manager.is_patched:
         linear_probe_manager.unpatch_attention_layers(model)
 
-    # 自动计算 CHAIR 指标(默认启用)
+    # 自动计算 POPE 指标(默认启用)
     auto_evaluate = getattr(args, 'auto_evaluate', True)  # 默认为 True
     if auto_evaluate:
-        # 构建 annotations 路径
-        coco_annotations_path = os.path.join(args.coco_root, "annotations_trainval2014", "annotations")
-        if not os.path.exists(coco_annotations_path):
-            # 尝试使用 project 中的路径
-            if hasattr(project, 'coco_annotations_path'):
-                coco_annotations_path = project.coco_annotations_path
-            else:
-                raise FileNotFoundError(f"找不到 COCO annotations 目录: {coco_annotations_path}")
-
         print("\n" + "=" * 80)
-        print("自动计算 CHAIR 指标...")
+        print("自动计算 POPE 指标...")
         print("=" * 80)
 
-        # 生成结果文件路径(参考run_pope_eval.py的路径结构)
+        # 生成结果文件路径
         results_dir = os.path.dirname(output_file)
-        # 保存详细结果(包含所有中间信息)
-        chair_results_file = output_file.replace('.jsonl', '_chair_results.json')
         # 保存错误样本(如果有)
-        chair_errors_file = output_file.replace('.jsonl', '_chair_errors.json')
+        pope_errors_file = output_file.replace('.jsonl', '_pope_errors.json')
         # 生成总结文件路径
         summary_file = output_file.replace('.jsonl', '_summary.txt')
 
-        # 计算需要输出详细信息的样本索引(如果启用debug模式)
-        debug_indices = None
-        if getattr(args, 'debug', False):
-            # 读取生成的描述文件, 确定样本数量
-            with open(output_file, 'r', encoding='utf-8') as f:
-                total_samples = sum(1 for _ in f)
-
-            if total_samples > 0:
-                # 如果样本数少于等于10个, 全部输出详细信息
-                if total_samples <= 10:
-                    debug_indices = set(range(total_samples))
-                else:
-                    # 均匀分布选择样本(最多10个)
-                    max_debug_samples = min(10, total_samples)
-                    step = total_samples / max_debug_samples
-                    debug_indices = set()
-                    for i in range(max_debug_samples):
-                        idx = int(i * step)
-                        debug_indices.add(idx)
-
-                print(f"Debug模式: 将输出 {len(debug_indices)} 个样本的详细信息(样本索引: {sorted(debug_indices)})")
-
-        # 调用 evaluate_chair 函数
-        results = evaluate_chair(
-            cap_file=output_file,
-            coco_path=coco_annotations_path,
-            image_id_key="image_id",
-            caption_key="caption",
-            cache_file=os.path.join(results_dir, "chair_evaluator.pkl"),
-            use_cache=True,
-            save_path=chair_results_file,
-            verbose=True,
-            debug=getattr(args, 'debug', False),
-            debug_indices=debug_indices
+        # 调用 evaluate_pope 函数
+        results = evaluate_pope(
+            gt_files_path=args.pope_file,
+            gen_files_path=output_file,
+            output_errors_path=pope_errors_file,
+            verbose=True
         )
 
         print("\n" + "=" * 80)
-        print("✓ CHAIR 指标计算完成！")
+        print("✓ POPE 指标计算完成！")
         print("=" * 80)
-        print(f"详细结果文件: {chair_results_file}")
         print(f"输出文件: {output_file}")
-
-        # 保存错误样本(包含幻觉的样本)
-        error_count = 0
-        if results and 'sentences' in results:
-            error_samples = [
-                s for s in results['sentences']
-                if s.get('metrics', {}).get('CHAIRs', 0) > 0
-            ]
-            error_count = len(error_samples)
-            if error_samples:
-                with open(chair_errors_file, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'error_count': len(error_samples),
-                        'total_samples': len(results['sentences']),
-                        'error_samples': error_samples
-                    }, f, indent=2, ensure_ascii=False)
-                print(f"错误样本文件: {chair_errors_file} ({len(error_samples)} 个包含幻觉的样本)")
+        if os.path.exists(pope_errors_file):
+            print(f"错误样本文件: {pope_errors_file}")
 
         # 保存总结到txt文件
         model_name = get_model_name_from_path(args.model_path)
@@ -1293,16 +1209,13 @@ def eval_model(args):
             summary_file=summary_file,
             args=args,
             output_file=output_file,
-            chair_results_file=chair_results_file,
-            chair_errors_file=chair_errors_file if error_count > 0 else None,
-            results=results,
+            pope_results=results,
             model_name=model_name
         )
         print(f"\n✓ 结果总结已保存到: {summary_file}")
     else:
-        print(f"\n下一步: 使用 chair.py 计算 CHAIR 指标")
-        print(f"  python chair.py --cap_file {output_file} --image_id_key image_id --caption_key caption \\")
-        print(f"                  --coco_path {args.coco_root}/annotations_trainval2014/annotations/")
+        print(f"\n下一步: 使用 eval_pope.py 计算 POPE 指标")
+        print(f"  python eval_tool/eval_pope.py --gt_files {args.pope_file} --gen_files {output_file}")
 
 
 def main():
@@ -1321,9 +1234,9 @@ def main():
     default_config = {
         "model_path": project.llava_v15_7b_path,
         "device": device,
-        "coco_root": project.coco_data_path,  # 需要根据实际情况修改
-        "image_id_list_file": "pope_coco/coco_baseline_500.json",
-        "use_deco": True,
+        "coco_root": project.coco_data_path,
+        "pope_file": "pope_coco/coco_pope_random.json",
+        "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
@@ -1331,22 +1244,22 @@ def main():
         "end_layer": 29,
         "temperature": -1,
         "top_p": None,
-        "max_new_tokens": 512,  # CHAIR 需要详细描述
-        "num_beams": 10,
-        "num_samples": 0,  # 0 表示处理所有图像
+        "max_new_tokens": 10,  # POPE 只需要 Yes/No，不需要太多 tokens
+        "num_beams": 1,
+        "num_samples": 0,  # 0 表示处理所有问题
         "seed": 42
     }
 
     # 解析参数(所有参数都有默认值)
-    parser = argparse.ArgumentParser(description="CHAIR 评估 - 生成图像描述(所有参数可选)")
+    parser = argparse.ArgumentParser(description="POPE 评估 - 生成 Yes/No 答案(所有参数可选)")
 
     # 数据集参数
     parser.add_argument("--coco-root", type=str, default=default_config["coco_root"],
                        help="COCO 数据集根目录路径(包含 val2014 子目录)")
-    parser.add_argument("--image_id_list_file", type=str, default=default_config["image_id_list_file"],
-                       help="图像 ID 列表文件, 支持两种格式: 1) JSON 数组格式(如 [\"COCO_val2014_000000001171.jpg\", ...]);2) 文本文件(每行一个 image_id 或图像文件名)。如果提供则只处理这些图像")
+    parser.add_argument("--pope-file", type=str, default=default_config["pope_file"],
+                       help="POPE 测试文件路径 (JSONL 格式, 例如: pope_coco/coco_pope_random.json)")
     parser.add_argument("--num-samples", type=int, default=default_config["num_samples"],
-                       help="处理图像数量(0表示处理所有图像, 非零表示只处理前N个)")
+                       help="处理问题数量(0表示处理所有问题, 非零表示只处理前N个)")
 
     # 模型参数
     parser.add_argument("--model-path", type=str, default=default_config["model_path"],
@@ -1364,9 +1277,9 @@ def main():
                        help="生成温度(-1表示贪婪生成)")
     parser.add_argument("--top-p", type=float, default=default_config["top_p"], help="Top-p采样")
     parser.add_argument("--max-new-tokens", type=int, default=default_config["max_new_tokens"],
-                       help="最大生成 token 数")
+                       help="最大生成 token 数 (POPE 通常只需要 1-2 个 token)")
     parser.add_argument("--num-beams", type=int, default=default_config["num_beams"],
-                       help="Beam search 的 beam 数量")
+                       help="Beam search 的 beam 数量 (POPE 通常使用 1)")
 
     # Deco 参数(默认不使用 Deco, 只使用原生 LLaVA 模型)
     parser.add_argument("--use-deco", action="store_true", default=default_config["use_deco"],
@@ -1391,7 +1304,7 @@ def main():
     # 其他参数
     parser.add_argument("--seed", type=int, default=default_config["seed"], help="随机种子")
     parser.add_argument("--no-auto-evaluate", action="store_true", default=False,
-                       help="禁用自动计算 CHAIR 指标(默认会自动计算)")
+                       help="禁用自动计算 POPE 指标(默认会自动计算)")
     parser.add_argument("--debug", action="store_true", default=False,
                        help="启用debug模式, 输出每个样本的详细处理过程")
 
@@ -1403,93 +1316,104 @@ def main():
 
     # 自动生成输出文件路径(如果未指定)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(project_root, "results", "chair")
+    output_dir = os.path.join(project_root, "results", "pope")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 如果使用 Deco, 需要同时运行 vanilla 版本进行对比
+    # 如果使用 Linear Probe, 需要同时运行 vanilla 版本进行对比
     vanilla_output_file = None
     vanilla_results = None
 
-    if args.use_deco:
+    if args.use_linear_probe:
         print("\n" + "=" * 80)
-        print("检测到使用 Deco, 将同时运行 Vanilla 版本进行对比")
+        print("检测到使用 Linear Probe, 将同时运行 Vanilla 版本进行对比")
         print("=" * 80)
 
-        # 先运行 Vanilla 版本
+        # 先运行 Vanilla 版本（不使用 linear probe）
         print("\n" + "-" * 80)
-        print("[1/2] 运行 Vanilla 版本")
+        print("[1/2] 运行 Vanilla 版本（不使用 Linear Probe）")
         print("-" * 80)
         vanilla_args = argparse.Namespace(**vars(args))
-        vanilla_args.use_deco = False
-        vanilla_args.output_file = os.path.join(output_dir, f"chair_captions_vanilla_{timestamp}.jsonl")
-        vanilla_args.auto_evaluate = args.auto_evaluate  # 保持相同的 auto_evaluate 设置
+        vanilla_args.use_linear_probe = False
+        # 从 pope_file 提取 split 名称（例如: coco_pope_random.json -> random）
+        pope_basename = os.path.basename(args.pope_file)
+        if 'random' in pope_basename:
+            split_name = 'random'
+        elif 'popular' in pope_basename:
+            split_name = 'popular'
+        elif 'adversarial' in pope_basename:
+            split_name = 'adversarial'
+        else:
+            split_name = 'unknown'
+        vanilla_args.output_file = os.path.join(output_dir, f"pope_{split_name}_vanilla_{timestamp}.jsonl")
+        vanilla_args.auto_evaluate = args.auto_evaluate
 
         eval_model(vanilla_args)
         vanilla_output_file = vanilla_args.output_file
 
-        # 然后运行 Deco 版本
+        # 然后运行 Linear Probe 版本
         print("\n" + "-" * 80)
-        print("[2/2] 运行 Deco 版本")
+        print("[2/2] 运行 Linear Probe 版本")
         print("-" * 80)
         if args.output_file is None:
-            args.output_file = os.path.join(output_dir, f"chair_captions_deco_{timestamp}.jsonl")
+            args.output_file = os.path.join(output_dir, f"pope_{split_name}_linear_probe_{timestamp}.jsonl")
 
         eval_model(args)
 
         # 如果两个版本都完成了评估, 进行对比
         if vanilla_args.auto_evaluate and args.auto_evaluate:
             print("\n" + "=" * 80)
-            print("对比 Deco vs Vanilla")
+            print("对比 Linear Probe vs Vanilla")
             print("=" * 80)
 
             # 加载两个版本的结果
-            vanilla_results_file = vanilla_output_file.replace('.jsonl', '_chair_results.json')
-            deco_results_file = args.output_file.replace('.jsonl', '_chair_results.json')
+            vanilla_results_file = vanilla_output_file.replace('.jsonl', '_summary.txt')
+            linear_probe_results_file = args.output_file.replace('.jsonl', '_summary.txt')
 
-            if os.path.exists(vanilla_results_file) and os.path.exists(deco_results_file):
-                with open(vanilla_results_file, 'r', encoding='utf-8') as f:
-                    vanilla_results = json.load(f)
-                with open(deco_results_file, 'r', encoding='utf-8') as f:
-                    deco_results = json.load(f)
+            # 重新评估以获取详细结果
+            vanilla_results = evaluate_pope(
+                gt_files_path=args.pope_file,
+                gen_files_path=vanilla_output_file,
+                output_errors_path=None,
+                verbose=False
+            )
 
-                # 生成对比 JSON 文件(CHAIRs/CHAIRi 不一致的 case)
-                comparison_file = args.output_file.replace('.jsonl', '_comparison.json')
-                comparison_result = compare_deco_vs_vanilla(
-                    deco_results=deco_results,
-                    vanilla_results=vanilla_results,
-                    deco_captions_file=args.output_file,
-                    vanilla_captions_file=vanilla_output_file,
-                    output_file=comparison_file
-                )
+            linear_probe_results = evaluate_pope(
+                gt_files_path=args.pope_file,
+                gen_files_path=args.output_file,
+                output_errors_path=None,
+                verbose=False
+            )
 
-                # 保存两个方法都出现幻视的 error 例子
-                both_hallucinated_file = args.output_file.replace('.jsonl', '_both_hallucinated_errors.json')
-                both_hallucinated_result = save_both_hallucinated_errors(
-                    deco_results=deco_results,
-                    vanilla_results=vanilla_results,
-                    deco_captions_file=args.output_file,
-                    vanilla_captions_file=vanilla_output_file,
-                    output_file=both_hallucinated_file
-                )
+            # 打印对比表格
+            print("\n" + "=" * 80)
+            print("Linear Probe vs Vanilla 对比")
+            print("=" * 80)
+            print(f"{'指标':<20} {'Vanilla':<12} {'Linear Probe':<12} {'差异':<12} {'变化':<10}")
+            print("-" * 80)
 
-                # 打印对比表格
-                print_comparison_table(deco_results=deco_results, vanilla_results=vanilla_results)
+            metrics_list = ['accuracy', 'precision', 'recall', 'f1']
+            for metric_name in metrics_list:
+                vanilla_val = vanilla_results.get('metrics', {}).get(metric_name, 0)
+                lp_val = linear_probe_results.get('metrics', {}).get(metric_name, 0)
+                diff = lp_val - vanilla_val
+                change_symbol = "↑" if diff > 0 else "↓" if diff < 0 else "="
+                print(f"{metric_name.capitalize():<20} {vanilla_val:<12.4f} {lp_val:<12.4f} {diff:<12.4f} {change_symbol}")
 
-                print(f"\n✓ 对比结果已保存到: {comparison_file}")
-                print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
-                print(f"  - CHAIRs/CHAIRi 不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
-                print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
-
-                print(f"\n✓ 两个方法都出现幻视的错误例子已保存到: {both_hallucinated_file}")
-                print(f"  - 总样本数: {both_hallucinated_result['summary']['total_cases']}")
-                print(f"  - 都出现幻视的样本数: {both_hallucinated_result['summary']['both_hallucinated_cases']}")
-                print(f"  - 都出现幻视的比例: {both_hallucinated_result['summary']['both_hallucinated_rate']:.2%}")
-            else:
-                print("⚠️  无法找到评估结果文件, 跳过对比")
+            print("=" * 80)
     else:
-        # 不使用 Deco, 正常处理
+        # 不使用 Linear Probe, 正常处理
         if args.output_file is None:
-            args.output_file = os.path.join(output_dir, f"chair_captions_vanilla_{timestamp}.jsonl")
+            # 从 pope_file 提取 split 名称
+            pope_basename = os.path.basename(args.pope_file)
+            if 'random' in pope_basename:
+                split_name = 'random'
+            elif 'popular' in pope_basename:
+                split_name = 'popular'
+            elif 'adversarial' in pope_basename:
+                split_name = 'adversarial'
+            else:
+                split_name = 'unknown'
+            args.output_file = os.path.join(output_dir, f"pope_{split_name}_vanilla_{timestamp}.jsonl")
 
         # 运行评估
         eval_model(args)
