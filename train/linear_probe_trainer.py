@@ -6,8 +6,8 @@ Linear Probe Trainer - 训练1024个linear probe网络
 
 架构：
 - 输入: head_vector (128维)
-- 输出: g_u (标量，0-1之间)
-- 模型: Linear(128, 1) + Sigmoid
+- 输出: g_u (标量，-1到1之间)
+- 模型: Linear(128, 1) + Tanh
 """
 
 import torch
@@ -65,26 +65,26 @@ class LinearProbe(nn.Module):
         super(LinearProbe, self).__init__()
 
         if hidden_dim is None:
-            # 简单线性映射: Linear(128, 1) + Sigmoid
+            # 简单线性映射: Linear(128, 1) + Tanh
             self.linear = nn.Linear(input_dim, 1)
-            self.sigmoid = nn.Sigmoid()
+            self.tanh = nn.Tanh()
             self.use_hidden = False
         else:
-            # 单隐藏层: Linear(128, hidden_dim) -> ReLU -> Dropout -> Linear(hidden_dim, 1) -> Sigmoid
+            # 单隐藏层: Linear(128, hidden_dim) -> ReLU -> Dropout -> Linear(hidden_dim, 1) -> Tanh
             self.fc1 = nn.Linear(input_dim, hidden_dim)
             self.relu = nn.ReLU()
             self.dropout = nn.Dropout(0.2) if use_dropout else nn.Identity()
             self.fc2 = nn.Linear(hidden_dim, 1)
-            self.sigmoid = nn.Sigmoid()
+            self.tanh = nn.Tanh()
             self.use_hidden = True
 
     def forward(self, x):
         if self.use_hidden:
             h = self.relu(self.fc1(x))
             h = self.dropout(h)
-            return self.sigmoid(self.fc2(h))
+            return self.tanh(self.fc2(h))
         else:
-            return self.sigmoid(self.linear(x))
+            return self.tanh(self.linear(x))
 
 
 class LinearProbeTrainer:
@@ -128,9 +128,9 @@ class LinearProbeTrainer:
 
         print(f"✓ 创建了 {len(self.probes)} 个linear probe")
         if hidden_dim is None:
-            print(f"  架构: Linear({input_dim}, 1) + Sigmoid")
+            print(f"  架构: Linear({input_dim}, 1) + Tanh")
         else:
-            print(f"  架构: Linear({input_dim}, {hidden_dim}) -> ReLU -> Dropout -> Linear({hidden_dim}, 1) -> Sigmoid")
+            print(f"  架构: Linear({input_dim}, {hidden_dim}) -> ReLU -> Dropout -> Linear({hidden_dim}, 1) -> Tanh")
 
     def load_ground_truth_data(self, ground_truth_dir: str) -> Dict[str, List[Dict]]:
         """
@@ -508,7 +508,7 @@ if __name__ == "__main__":
                        help="模型保存目录")
     parser.add_argument("--device", type=str, default="cuda:0",
                        help="设备")
-    parser.add_argument("--hidden-dim", type=int, default=None,
+    parser.add_argument("--hidden-dim", type=int, default=16,
                        help="隐藏层维度（None表示使用简单线性映射）")
     parser.add_argument("--use-dropout", action="store_true",
                        help="使用Dropout")

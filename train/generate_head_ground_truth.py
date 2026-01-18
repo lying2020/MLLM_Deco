@@ -4,9 +4,9 @@
 用于训练 1024 个 linear probe（32层 x 32个head）
 
 根据截图中的公式：
-1. 计算每个head的对数概率增益（公式C2）
+1. 计算每个head的概率增益（使用指数函数，避免log计算时的数值不稳定问题）
 2. 计算语义先验偏置分数（公式C3）
-3. 计算SPP输出g（公式D1，alpha=2, beta=0）
+3. 计算SPP输出g（公式D1，alpha=1.0, beta=0.0）
 """
 
 import argparse
@@ -51,6 +51,7 @@ ALPHA = 1.0  # 温度/尺度参数
 BETA = 0.0   # 偏置参数
 TOP_K = 40   # 用于构建候选池的top-K值
 
+EXP_GAIN_COEFF=2.0
 
 def tanh(x):
     """Tanh函数"""
@@ -173,8 +174,15 @@ def compute_log_probability_gain(
     token_set: Set[int]
 ) -> float:
     """
-    计算对数概率增益（公式C2）
-    Δlog P_u^(l,n)(B_u) = log P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)}) - log P(B_u | h_{e,t}^{(l-1)})
+    计算概率增益（使用指数函数，避免log计算时的数值不稳定问题）
+    原公式C2: Δlog P_u^(l,n)(B_u) = log P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)}) - log P(B_u | h_{e,t}^{(l-1)})
+    改进版本: ΔP_u^(l,n)(B_u) = exp(P(B_u | h_{e,t}^{(l-1)} + H_{e,t}^{(l,n)})) - exp(P(B_u | h_{e,t}^{(l-1)}))
+
+    优势：
+    1. 避免log(0)导致的数值不稳定问题
+    2. 当prob接近0时，exp(prob) ≈ 1，不会趋向-inf
+    3. 当prob接近1时，exp(prob) ≈ e，不会趋向+inf
+    4. 数值范围更稳定：exp(prob) ∈ [1, e]，增益范围约为 [-1.718, 1.718]
 
     Args:
         logits_with_head: 加入head后的logits [vocab_size]
@@ -182,7 +190,7 @@ def compute_log_probability_gain(
         token_set: token ID集合
 
     Returns:
-        float: 对数概率增益
+        float: 概率增益（使用指数函数计算）
         如果 token_set 为空，返回 0.0（中性假设：head 对空集合的概率增益为 0）
     """
     # 如果 token_set 为空，返回 0（中性假设）
@@ -191,18 +199,17 @@ def compute_log_probability_gain(
     if len(token_set) == 0:
         return 0.0
 
-    # 计算集合概率
+    # 计算集合概率（范围在 [0, 1]）
     prob_with = compute_set_probability(logits_with_head, token_set)
     prob_without = compute_set_probability(logits_without_head, token_set)
 
-    # 避免log(0)
-    prob_with = max(prob_with, 1e-10)
-    prob_without = max(prob_without, 1e-10)
+    # 使用指数函数计算增益，避免log(0)的数值不稳定问题
+    # exp(prob) 的范围是 [1, e]，其中 e ≈ 2.718
+    # 当 prob 接近 0 时，exp(prob) ≈ 1，不会趋向 -inf
+    # 当 prob 接近 1 时，exp(prob) ≈ e，不会趋向 +inf
+    exp_gain = np.exp(EXP_GAIN_COEFF*prob_with) - np.exp(EXP_GAIN_COEFF*prob_without)
 
-    # 计算对数概率增益
-    log_gain = np.log(prob_with) - np.log(prob_without)
-
-    return log_gain
+    return exp_gain
 
 
 class HeadOutputExtractor:
@@ -589,7 +596,7 @@ def process_case_pope(
                 h_with_head_processed = h_with_head_processed.to(device)
             logits_with_head = lm_head(h_with_head_processed)
 
-            # 计算对数概率增益
+            # 计算概率增益（使用指数函数，避免log计算时的数值不稳定问题）
             delta_log_p_plus = compute_log_probability_gain(
                 logits_with_head[0], logits_before[0], bu_plus_tokens
             )
@@ -598,7 +605,8 @@ def process_case_pope(
             )
 
             # 计算语义先验偏置分数（公式C3）
-            # s_u^(l,n) = Δlog P_u^(l,n)(B_u^-) - Δlog P_u^(l,n)(B_u^+)
+            # s_u^(l,n) = ΔP_u^(l,n)(B_u^-) - ΔP_u^(l,n)(B_u^+)
+            # 注意：这里使用的是指数函数计算的概率增益，而不是对数概率增益
             s_u = delta_log_p_minus - delta_log_p_plus
 
             # 计算SPP输出g（公式D1）
@@ -1266,14 +1274,15 @@ def process_case_chair(
                 # 1. 目标：计算语义先验偏置分数 s_u，用于衡量head对幻视/真实实例的贡献
                 #    s_u = delta_log_p_minus - delta_log_p_plus
                 #    其中：
-                #    - delta_log_p_plus = log P(Bu^+ | h_with_head) - log P(Bu^+ | h_without_head)
-                #    - delta_log_p_minus = log P(Bu^- | h_with_head) - log P(Bu^- | h_without_head)
+                #    - delta_log_p_plus = exp(P(Bu^+ | h_with_head)) - exp(P(Bu^+ | h_without_head))
+                #    - delta_log_p_minus = exp(P(Bu^- | h_with_head)) - exp(P(Bu^- | h_without_head))
                 #    - P(Bu) = Σ_{b∈Bu} P(b)，即集合中所有token的概率和
+                #    注意：使用指数函数而不是对数函数，避免log(0)导致的数值不稳定问题
                 #
                 # 2. 为什么需要同时有 Bu^+ 和 Bu^-？
-                #    - 如果 Bu^+ 为空：P(Bu^+) = 0，log(0) = -inf，无法计算 delta_log_p_plus
-                #    - 如果 Bu^- 为空：P(Bu^-) = 0，log(0) = -inf，无法计算 delta_log_p_minus
-                #    - 因此，必须同时有 Bu^+ 和 Bu^- 才能计算 s_u
+                #    - 如果 Bu^+ 为空：P(Bu^+) = 0，exp(0) = 1，delta_log_p_plus = 0（中性假设）
+                #    - 如果 Bu^- 为空：P(Bu^-) = 0，exp(0) = 1，delta_log_p_minus = 0（中性假设）
+                #    - 因此，即使单个集合为空，也可以计算 s_u（使用中性假设）
                 #
                 # 3. 构建规则：
                 #    - 如果当前推理步是真实词汇（Grounded）：
@@ -1446,9 +1455,9 @@ def process_case_chair(
                     step_processed_count[step_idx] = 0
                 step_processed_count[step_idx] += 1
 
-                # 计算对数概率增益
+                # 计算概率增益（使用指数函数，避免log计算时的数值不稳定问题）
                 # 注意：如果 Bu 为空集合，compute_log_probability_gain 会自动返回 0（中性假设）
-                # 需要分别把Bu^+和Bu^-中所有词汇的对数概率加起来
+                # 需要分别把Bu^+和Bu^-中所有词汇的概率加起来，然后使用指数函数计算增益
                 delta_log_p_plus = compute_log_probability_gain(
                     logits_with_head[0], logits_before[0], step_bu_plus_tokens
                 )
@@ -1542,8 +1551,6 @@ def main():
                        help="模型路径")
     parser.add_argument("--coco-root", type=str, default=project.coco_data_path,
                        help="COCO数据集根目录")
-    parser.add_argument("--output-file", type=str, default=None,
-                       help="输出文件路径")
     parser.add_argument("--device", type=str, default="cuda:0",
                        help="设备")
     parser.add_argument("--num-samples", type=int, default=0,
@@ -1725,13 +1732,8 @@ def main():
 
     # 保存结果（按layer和head分文件保存）
     print(f"\n[5/5] 保存结果...")
-    train_file_name = Path(args.train_file).stem
-    if args.output_file is None:
-        output_dir = f"train/{train_file_name}_head_ground_truth"
-    else:
-        # 如果指定了输出文件，在输出目录中包含train_file的名称
-        output_dir = str(Path(args.output_file).parent / f"{train_file_name}_head_ground_truth")
-
+    train_file_name = os.path.basename(args.train_file).split(".")[0]
+    output_dir = os.path.join(coco_train_json_dir, f"{train_file_name}_head_ground_truth")
     os.makedirs(output_dir, exist_ok=True)
     print(f"✓ 输出目录: {output_dir}")
 

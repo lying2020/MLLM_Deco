@@ -22,6 +22,7 @@ import argparse
 import torch
 import os
 import json
+import numpy as np
 from tqdm import tqdm
 import sys
 from pathlib import Path
@@ -51,6 +52,245 @@ import requests
 from io import BytesIO
 from transformers import set_seed
 from eval_tool.chair import evaluate_chair
+from train.linear_probe_trainer import LinearProbeTrainer, LinearProbe
+
+
+class LinearProbeManager:
+    """管理所有 linear probe 网络，用于在生成时应用权重"""
+
+    def __init__(self, model_dir: str, num_layers: int = 32, num_heads: int = 32,
+                 input_dim: int = 128, device: str = "cuda:0"):
+        """
+        Args:
+            model_dir: linear probe 模型保存目录
+            num_layers: 模型层数
+            num_heads: 每层的head数
+            input_dim: head维度
+            device: 设备
+        """
+        self.model_dir = model_dir
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.input_dim = input_dim
+        self.device = device
+        self.probes = {}
+        self.original_forwards = {}  # 保存原始的forward方法
+        self.is_patched = False
+
+        # 加载所有 linear probe
+        self._load_probes()
+
+    def _load_probes(self):
+        """加载所有 linear probe 模型"""
+        from pathlib import Path
+        model_dir = Path(self.model_dir)
+
+        loaded_count = 0
+        for layer_idx in range(self.num_layers):
+            for head_idx in range(self.num_heads):
+                key = f"layer_{layer_idx}_head_{head_idx}"
+                model_path = model_dir / f"{key}.pth"
+
+                if model_path.exists():
+                    probe = LinearProbe(input_dim=self.input_dim, hidden_dim=None, use_dropout=False)
+                    probe.load_state_dict(torch.load(model_path, map_location=self.device))
+                    probe.to(self.device)
+                    probe.eval()
+                    self.probes[(layer_idx, head_idx)] = probe
+                    loaded_count += 1
+                else:
+                    # 如果模型不存在，创建一个默认的probe（输出0，即权重为1）
+                    probe = LinearProbe(input_dim=self.input_dim, hidden_dim=None, use_dropout=False)
+                    probe.to(self.device)
+                    probe.eval()
+                    self.probes[(layer_idx, head_idx)] = probe
+
+        print(f"✓ 加载了 {loaded_count}/{self.num_layers * self.num_heads} 个 linear probe 模型")
+        if loaded_count < self.num_layers * self.num_heads:
+            print(f"  ⚠️  警告: 部分 linear probe 模型不存在，将使用默认权重（1.0）")
+
+    def get_weight(self, layer_idx: int, head_idx: int, head_vector: torch.Tensor) -> float:
+        """
+        获取指定 head 的权重
+
+        Args:
+            layer_idx: 层索引
+            head_idx: head索引
+            head_vector: head向量 [head_dim] 或 [batch, head_dim]
+
+        Returns:
+            float: 权重 lambda，范围在 [-1, 1] 之间（经过 tanh）
+        """
+        key = (layer_idx, head_idx)
+        probe = self.probes.get(key)
+
+        if probe is None:
+            # 如果没有对应的probe，返回0（即权重为1.0）
+            return 0.0
+
+        probe.eval()
+        with torch.no_grad():
+            if head_vector.dim() == 1:
+                head_vector = head_vector.unsqueeze(0)
+            head_vector = head_vector.to(self.device)
+
+            # LinearProbe 输出经过 tanh，范围在 [-1, 1]
+            # 直接使用输出作为 lambda（已经是 tanh 的结果）
+            output = probe(head_vector)
+            if output.size(0) == 1:
+                lambda_value = output.cpu().item()
+            else:
+                lambda_value = output.cpu()
+
+            return lambda_value
+
+    def patch_attention_layers(self, model):
+        """修改 attention 层的 forward 方法，应用 linear probe 权重"""
+        if self.is_patched:
+            return
+
+        lang_model = model.get_model()
+        if not hasattr(lang_model, 'layers'):
+            raise ValueError("模型没有layers属性")
+
+        # 为每一层创建修改后的 forward 方法
+        for layer_idx in range(self.num_layers):
+            if layer_idx >= len(lang_model.layers):
+                continue
+
+            layer = lang_model.layers[layer_idx]
+            if not hasattr(layer, 'self_attn'):
+                continue
+
+            attn_module = layer.self_attn
+            original_forward = attn_module.forward
+
+            # 保存原始的forward方法
+            self.original_forwards[layer_idx] = original_forward
+
+            # 创建修改后的forward方法
+            def make_patched_forward(layer_idx, original_forward):
+                def patched_forward(
+                    hidden_states,
+                    attention_mask=None,
+                    position_ids=None,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                ):
+                    # 获取attention层参数
+                    batch_size, seq_len, hidden_size = hidden_states.shape
+                    num_heads = self.num_heads
+                    head_dim = hidden_size // num_heads
+
+                    # 计算Q, K, V
+                    Q = attn_module.q_proj(hidden_states)  # [batch, seq_len, hidden_size]
+                    K = attn_module.k_proj(hidden_states)
+                    V = attn_module.v_proj(hidden_states)
+
+                    # 重塑为多头格式
+                    Q = Q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
+                    K = K.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+                    V = V.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+
+                    # 处理past_key_value（如果使用缓存）
+                    if past_key_value is not None:
+                        past_key, past_value = past_key_value
+                        K = torch.cat([past_key, K], dim=-2)
+                        V = torch.cat([past_value, V], dim=-2)
+
+                    # 计算attention scores
+                    scale = 1.0 / (head_dim ** 0.5)
+                    scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
+
+                    # 应用causal mask（如果需要）
+                    if attention_mask is not None:
+                        scores = scores + attention_mask
+                    elif past_key_value is None:  # 只在第一次forward时应用causal mask
+                        # 创建causal mask
+                        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=scores.device, dtype=scores.dtype), diagonal=1)
+                        causal_mask = causal_mask.masked_fill(causal_mask == 1, float('-inf'))
+                        scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)
+
+                    # 应用softmax
+                    attn_weights = torch.softmax(scores, dim=-1)
+
+                    # 应用attention到V
+                    attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
+
+                    # 对每个head应用linear probe权重
+                    # 对于每个token位置，使用该位置的head向量预测权重
+                    # 为了效率，我们只对最后一个token（新生成的token）计算权重，并应用到所有token
+                    # 或者，对每个token分别计算权重（更准确但更慢）
+                    weighted_attn_output = torch.zeros_like(attn_output)
+
+                    # 方法：对每个head，使用最后一个token的head向量预测权重，然后应用到所有token
+                    last_token_idx = seq_len - 1
+                    for head_idx in range(num_heads):
+                        # 获取最后一个token的head向量（用于预测权重）
+                        head_vector = attn_output[:, head_idx, last_token_idx, :]  # [batch, head_dim]
+
+                        # 获取权重（对batch中的每个样本）
+                        weights = []
+                        for b in range(batch_size):
+                            lambda_val = self.get_weight(layer_idx, head_idx, head_vector[b])
+                            # 使用 tanh 约束 lambda 在 [-1, 1] 之间（已经在 get_weight 中完成）
+                            weight = 1.0 + lambda_val  # weight = 1 + lambda
+                            weights.append(weight)
+                        weights = torch.tensor(weights, device=attn_output.device, dtype=attn_output.dtype)
+                        weights = weights.view(batch_size, 1, 1)  # [batch, 1, 1] 用于广播到 [batch, seq_len, head_dim]
+
+                        # 应用权重到该head的所有token
+                        weighted_attn_output[:, head_idx, :, :] = attn_output[:, head_idx, :, :] * weights
+
+                    # 重塑并concat所有head
+                    weighted_attn_output = weighted_attn_output.transpose(1, 2)  # [batch, seq_len, num_heads, head_dim]
+                    weighted_attn_output = weighted_attn_output.contiguous().view(batch_size, seq_len, hidden_size)
+
+                    # 应用o_proj
+                    output = attn_module.o_proj(weighted_attn_output)
+
+                    # 处理past_key_value（如果使用缓存）
+                    if use_cache:
+                        past_key_value = (K, V)
+                    else:
+                        past_key_value = None
+
+                    if output_attentions:
+                        return output, attn_weights, past_key_value
+                    else:
+                        return output, None, past_key_value
+
+                return patched_forward
+
+            # 替换forward方法
+            attn_module.forward = make_patched_forward(layer_idx, original_forward)
+
+        self.is_patched = True
+        print(f"✓ 已修改 {self.num_layers} 个 attention 层的 forward 方法")
+
+    def unpatch_attention_layers(self, model):
+        """恢复原始的 attention 层 forward 方法"""
+        if not self.is_patched:
+            return
+
+        lang_model = model.get_model()
+        if not hasattr(lang_model, 'layers'):
+            return
+
+        for layer_idx in range(self.num_layers):
+            if layer_idx >= len(lang_model.layers):
+                continue
+
+            layer = lang_model.layers[layer_idx]
+            if not hasattr(layer, 'self_attn'):
+                continue
+
+            if layer_idx in self.original_forwards:
+                layer.self_attn.forward = self.original_forwards[layer_idx]
+
+        self.is_patched = False
+        print(f"✓ 已恢复 {self.num_layers} 个 attention 层的原始 forward 方法")
 
 
 def load_image(image_file):
@@ -166,7 +406,8 @@ def prepare_inputs(model, tokenizer, image_processor, image_file: str, prompt: s
 def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criteria,
                      temperature, top_p, max_new_tokens, device,
                      use_deco=False, alpha=None, threshold_top_p=None,
-                     threshold_top_k=None, early_exit_layers=None, num_beams=1, verbose: bool = False):
+                     threshold_top_k=None, early_exit_layers=None, num_beams=1, verbose: bool = False,
+                     use_linear_probe=False, linear_probe_manager=None):
     """
     生成回答
 
@@ -729,6 +970,10 @@ def eval_model(args):
         print(f"Deco 参数: use_deco={args.use_deco}, alpha={args.alpha}, layers={args.start_layer}-{args.end_layer}")
     else:
         print(f"使用原生 LLaVA 模型(Deco 已禁用)")
+    if args.use_linear_probe if hasattr(args, 'use_linear_probe') else False:
+        print(f"Linear Probe: 已启用, 模型目录={args.linear_probe_dir}")
+    else:
+        print(f"Linear Probe: 已禁用")
     print("=" * 80)
 
     # 加载模型
@@ -742,6 +987,31 @@ def eval_model(args):
         model_path, args.model_base, model_name, device=device
     )
     print(f"✓ 模型加载完成: {model_name}")
+
+    # 加载 linear probe（如果启用）
+    linear_probe_manager = None
+    if args.use_linear_probe:
+        print(f"\n[1.5/3] 正在加载 Linear Probe 网络...")
+        if not args.linear_probe_dir:
+            raise ValueError("使用 --use-linear-probe 时必须指定 --linear-probe-dir")
+
+        # 获取模型配置
+        num_layers = model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else 32
+        num_heads = model.config.num_attention_heads if hasattr(model.config, 'num_attention_heads') else 32
+        hidden_size = model.config.hidden_size if hasattr(model.config, 'hidden_size') else 4096
+        head_dim = hidden_size // num_heads
+
+        linear_probe_manager = LinearProbeManager(
+            model_dir=args.linear_probe_dir,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            input_dim=head_dim,
+            device=device
+        )
+
+        # 修改 attention 层的 forward 方法
+        linear_probe_manager.patch_attention_layers(model)
+        print(f"✓ Linear Probe 已启用，权重计算方式: weight = 1 + tanh(lambda)")
 
     # 确定对话模式
     if "llama-2" in model_name.lower():
@@ -895,7 +1165,9 @@ def eval_model(args):
             threshold_top_k=args.threshold_top_k,
             early_exit_layers=early_exit_layers,
             num_beams=args.num_beams,
-            verbose=verbose
+            verbose=verbose,
+            use_linear_probe=args.use_linear_probe if hasattr(args, 'use_linear_probe') else False,
+            linear_probe_manager=linear_probe_manager
         )
 
         # 移除停止字符串
@@ -926,6 +1198,10 @@ def eval_model(args):
 
     output_f.close()
     print(f"\n✓ 描述生成完成！结果已保存到: {output_file}")
+
+    # 如果使用了 linear probe，恢复原始的 forward 方法
+    if linear_probe_manager is not None and linear_probe_manager.is_patched:
+        linear_probe_manager.unpatch_attention_layers(model)
 
     # 自动计算 CHAIR 指标(默认启用)
     auto_evaluate = getattr(args, 'auto_evaluate', True)  # 默认为 True
@@ -1105,6 +1381,12 @@ def main():
                        help="允许早退的起始层索引")
     parser.add_argument("--end-layer", type=int, default=default_config["end_layer"],
                        help="允许早退的结束层索引")
+
+    # Linear Probe 参数
+    parser.add_argument("--use-linear-probe", action="store_true", default=False,
+                       help="启用 Linear Probe 网络进行加权(默认: False)")
+    parser.add_argument("--linear-probe-dir", type=str, default=None,
+                       help="Linear Probe 模型保存目录(例如: ./train/ckpt/)")
 
     # 其他参数
     parser.add_argument("--seed", type=int, default=default_config["seed"], help="随机种子")
