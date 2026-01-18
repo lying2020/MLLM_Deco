@@ -353,6 +353,27 @@ class LlamaAttention(nn.Module):
                 f" {attn_output.size()}"
             )
 
+        # 如果提供了 head_weights，在 reshape 之前应用权重
+        # head_weights 的形状应该是 [num_heads] 或 [batch, num_heads] 或 [batch, num_heads, 1, 1]
+        if head_weights is not None:
+            if head_weights.dim() == 1:
+                # [num_heads] -> [1, num_heads, 1, 1] 用于广播
+                head_weights = head_weights.view(1, self.num_heads, 1, 1)
+            elif head_weights.dim() == 2:
+                # [batch, num_heads] -> [batch, num_heads, 1, 1] 用于广播
+                head_weights = head_weights.view(bsz, self.num_heads, 1, 1)
+            elif head_weights.dim() == 4:
+                # [batch, num_heads, 1, 1] 已经是正确的形状
+                pass
+            else:
+                raise ValueError(
+                    f"head_weights should have 1, 2, or 4 dimensions, but got {head_weights.dim()}"
+                )
+            # 确保 head_weights 在正确的设备和数据类型上
+            head_weights = head_weights.to(device=attn_output.device, dtype=attn_output.dtype)
+            # 应用权重：attn_output 形状是 [batch, num_heads, seq_len, head_dim]
+            attn_output = attn_output * head_weights
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
@@ -653,7 +674,7 @@ class LlamaModel(LlamaPreTrainedModel):
         attention_mask = self._prepare_decoder_attention_mask(
             attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
         )
-        
+
         # 初始的hidden_states[0] 为 input_embeds
         hidden_states = inputs_embeds
 
@@ -833,7 +854,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             else:
                 logits = self.lm_head(hidden_states)
             logits = logits.float()
-            
+
             if labels is not None:
                 # Shift so that tokens < n predict n
                 shift_logits = logits[..., :-1, :].contiguous()
@@ -846,7 +867,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 shift_labels = shift_labels.to(shift_logits.device)
                 loss = loss_fct(shift_logits, shift_labels)
                     # loss_dict[early_exit_layer] = loss
-                
+
             final_outputs = CausalLMOutputWithPast(
                 loss=loss,
                 logits=logits,

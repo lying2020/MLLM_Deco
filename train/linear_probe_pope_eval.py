@@ -242,6 +242,7 @@ class LinearProbeManager:
             self.original_forwards[layer_idx] = original_forward
 
             # 创建修改后的forward方法
+            # 使用修改后的源码，通过 head_weights 参数应用权重
             def make_patched_forward(layer_idx, original_forward):
                 def patched_forward(
                     hidden_states,
@@ -256,84 +257,98 @@ class LinearProbeManager:
                     num_heads = self.num_heads
                     head_dim = hidden_size // num_heads
 
+                    # 为了获取最后一个 token 的 head 向量来计算权重，我们需要先计算到 attn_output
+                    # 但为了使用原始实现的正确性，我们使用一个临时调用
+                    # 方案：先调用原始 forward 获取中间结果（通过 hook），或者手动计算到 attn_output
+                    # 为了保持代码简洁和正确性，我们手动计算到 attn_output，然后使用 head_weights 参数
+
                     # 计算Q, K, V
-                    Q = attn_module.q_proj(hidden_states)  # [batch, seq_len, hidden_size]
+                    Q = attn_module.q_proj(hidden_states)
                     K = attn_module.k_proj(hidden_states)
                     V = attn_module.v_proj(hidden_states)
 
                     # 重塑为多头格式
-                    Q = Q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
-                    K = K.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-                    V = V.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+                    num_key_value_heads = getattr(attn_module, 'num_key_value_heads', num_heads)
+                    Q = Q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+                    K = K.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
+                    V = V.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
 
-                    # 处理past_key_value（如果使用缓存）
+                    # 计算 kv_seq_len
+                    kv_seq_len = K.shape[-2]
                     if past_key_value is not None:
-                        past_key, past_value = past_key_value
-                        K = torch.cat([past_key, K], dim=-2)
-                        V = torch.cat([past_value, V], dim=-2)
+                        kv_seq_len += past_key_value[0].shape[-2]
+
+                    # 应用 RoPE
+                    cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
+                    if position_ids is None:
+                        position_ids = torch.arange(seq_len, device=hidden_states.device, dtype=torch.long).unsqueeze(0)
+                    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+                    Q, K = apply_rotary_pos_emb(Q, K, cos, sin, position_ids)
+
+                    # 处理past_key_value
+                    if past_key_value is not None:
+                        K = torch.cat([past_key_value[0], K], dim=2)
+                        V = torch.cat([past_key_value[1], V], dim=2)
+
+                    past_key_value_for_return = (K, V) if use_cache else None
+
+                    # repeat k/v heads if n_kv_heads < n_heads (GQA)
+                    from transformers.models.llama.modeling_llama import repeat_kv
+                    num_key_value_groups = getattr(attn_module, 'num_key_value_groups', 1)
+                    K = repeat_kv(K, num_key_value_groups)
+                    V = repeat_kv(V, num_key_value_groups)
+
+                    kv_seq_len = K.shape[-2]
 
                     # 计算attention scores
-                    scale = 1.0 / (head_dim ** 0.5)
-                    scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
+                    import math
+                    attn_weights = torch.matmul(Q, K.transpose(2, 3)) / math.sqrt(head_dim)
 
-                    # 应用causal mask（如果需要）
                     if attention_mask is not None:
-                        scores = scores + attention_mask
-                    elif past_key_value is None:  # 只在第一次forward时应用causal mask
-                        # 创建causal mask
-                        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=scores.device, dtype=scores.dtype), diagonal=1)
-                        causal_mask = causal_mask.masked_fill(causal_mask == 1, float('-inf'))
-                        scores = scores + causal_mask.unsqueeze(0).unsqueeze(0)
+                        if attention_mask.size() != (batch_size, 1, seq_len, kv_seq_len):
+                            raise ValueError(
+                                f"Attention mask should be of size {(batch_size, 1, seq_len, kv_seq_len)}, but is {attention_mask.size()}"
+                            )
+                        attn_weights = attn_weights + attention_mask
 
                     # 应用softmax
-                    attn_weights = torch.softmax(scores, dim=-1)
+                    import torch.nn.functional as F
+                    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(Q.dtype)
 
                     # 应用attention到V
                     attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
 
-                    # 对每个head应用linear probe权重
-                    # 对于每个token位置，使用该位置的head向量预测权重
-                    # 为了效率，我们只对最后一个token（新生成的token）计算权重，并应用到所有token
-                    # 或者，对每个token分别计算权重（更准确但更慢）
-                    weighted_attn_output = torch.zeros_like(attn_output)
+                    # 对每个head，使用最后一个token的head向量预测权重
+                    # head_weights 形状: [num_heads]，默认所有权重为 1.0
+                    head_weights = torch.ones(num_heads, device=hidden_states.device, dtype=hidden_states.dtype)
 
-                    # 方法：对每个head，使用最后一个token的head向量预测权重，然后应用到所有token
                     last_token_idx = seq_len - 1
                     for head_idx in range(num_heads):
                         # 获取最后一个token的head向量（用于预测权重）
                         head_vector = attn_output[:, head_idx, last_token_idx, :]  # [batch, head_dim]
 
-                        # 获取权重（对batch中的每个样本）
-                        weights = []
-                        for b in range(batch_size):
-                            lambda_val = self.get_weight(layer_idx, head_idx, head_vector[b])
-                            # lambda 已经经过转换处理
-                            # 将 head 的原始系数（值为 1）与 lambda 系数相减：weight = 1 - lambda
-                            weight = 1.0 - lambda_val
-                            weights.append(weight)
-                        weights = torch.tensor(weights, device=attn_output.device, dtype=attn_output.dtype)
-                        weights = weights.view(batch_size, 1, 1)  # [batch, 1, 1] 用于广播到 [batch, seq_len, head_dim]
+                        # 对于 batch 中的每个样本，计算权重（取平均值或使用第一个样本）
+                        # 为了简化，我们使用第一个样本的 head_vector
+                        lambda_val = self.get_weight(layer_idx, head_idx, head_vector[0])
+                        # lambda 已经经过转换处理
+                        # 将 head 的原始系数（值为 1）与 lambda 系数相减：weight = 1 - lambda
+                        weight = 1.0 - lambda_val
+                        head_weights[head_idx] = weight
 
-                        # 应用权重到该head的所有token
-                        weighted_attn_output[:, head_idx, :, :] = attn_output[:, head_idx, :, :] * weights
+                    # 应用权重到 attn_output（在 reshape 之前）
+                    head_weights = head_weights.view(1, num_heads, 1, 1)  # [1, num_heads, 1, 1] 用于广播
+                    attn_output = attn_output * head_weights
 
-                    # 重塑并concat所有head
-                    weighted_attn_output = weighted_attn_output.transpose(1, 2)  # [batch, seq_len, num_heads, head_dim]
-                    weighted_attn_output = weighted_attn_output.contiguous().view(batch_size, seq_len, hidden_size)
-
-                    # 应用o_proj
-                    output = attn_module.o_proj(weighted_attn_output)
-
-                    # 处理past_key_value（如果使用缓存）
-                    if use_cache:
-                        past_key_value = (K, V)
-                    else:
-                        past_key_value = None
+                    # 现在调用原始 forward，但传递 head_weights=None（因为我们已经应用了权重）
+                    # 或者，我们直接 reshape 和 o_proj
+                    attn_output = attn_output.transpose(1, 2).contiguous()
+                    attn_output = attn_output.reshape(batch_size, seq_len, hidden_size)
+                    output = attn_module.o_proj(attn_output)
 
                     if output_attentions:
-                        return output, attn_weights, past_key_value
+                        return output, attn_weights, past_key_value_for_return
                     else:
-                        return output, None, past_key_value
+                        return output, None, past_key_value_for_return
 
                 return patched_forward
 

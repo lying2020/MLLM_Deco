@@ -117,8 +117,8 @@ class SPPHeadWeightManager:
                     self.original_forwards[layer_idx] = original_forward
 
                     # 创建新的 forward 方法
-                    # 使用 hook 机制在原始 forward 的中间结果上应用权重调整
-                    # 这样可以避免手动实现整个 attention 计算
+                    # 使用修改后的源码，直接传递 head_weights 参数
+                    # 这样就不需要手动实现整个 attention 计算了
                     def make_patched_forward(layer_idx, original_forward, num_heads_ref, spp_heads_ref):
                         def patched_forward(
                             hidden_states,
@@ -134,7 +134,7 @@ class SPPHeadWeightManager:
                                 for head_idx in range(num_heads_ref)
                             )
 
-                            # 如果没有权重调整，直接调用原始 forward
+                            # 如果没有权重调整，直接调用原始 forward（不传递 head_weights）
                             if not has_weight_adjustment:
                                 return original_forward(
                                     hidden_states,
@@ -145,149 +145,30 @@ class SPPHeadWeightManager:
                                     use_cache=use_cache,
                                 )
 
-                            # 如果有权重调整，使用 hook 机制拦截 o_proj 的输入
-                            # 方案：在 o_proj 之前使用 hook 获取 reshape 后的 attn_output，
-                            # 然后 reshape 回去，应用权重，再 reshape 回来，最后调用 o_proj
-                            # 注意：由于我们有完整的源码，也可以直接修改 LlamaAttention.forward 返回中间结果
-                            # 但为了不修改 transformers 库，我们使用 hook 机制
+                            # 如果有权重调整，构建 head_weights 并传递给原始 forward
+                            # head_weights 形状: [num_heads]，默认所有权重为 1.0
+                            head_weights = torch.ones(num_heads_ref, device=hidden_states.device, dtype=hidden_states.dtype)
 
-                            batch_size, seq_len, hidden_size = hidden_states.shape
-                            head_dim = hidden_size // num_heads_ref
-                            dtype = hidden_states.dtype
-
-                            # 存储 o_proj 的输入（即 reshape 后的 attn_output）
-                            attn_output_reshaped = None
-
-                            # Hook o_proj 来获取其输入（在 o_proj 被调用之前）
-                            def o_proj_pre_hook(module, input_tuple):
-                                nonlocal attn_output_reshaped
-                                if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                                    attn_output_reshaped = input_tuple[0].clone()
-
-                            # 注册 hook
-                            hook_handle = attn_module.o_proj.register_forward_pre_hook(o_proj_pre_hook)
-
-                            try:
-                                # 调用原始 forward，hook 会拦截 o_proj 的输入
-                                result = original_forward(
-                                    hidden_states,
-                                    attention_mask=attention_mask,
-                                    position_ids=position_ids,
-                                    past_key_value=past_key_value,
-                                    output_attentions=output_attentions,
-                                    use_cache=use_cache,
-                                )
-
-                                # 如果成功获取到中间结果，应用权重调整
-                                if attn_output_reshaped is not None:
-                                    # reshape 回去：从 [batch, seq_len, hidden_size] 到 [batch, num_heads, seq_len, head_dim]
-                                    attn_output = attn_output_reshaped.view(batch_size, seq_len, num_heads_ref, head_dim).transpose(1, 2)
-
-                                    # 应用 SPP head 权重调整
-                                    for head_idx in range(num_heads_ref):
-                                        if (layer_idx, head_idx) in spp_heads_ref:
-                                            g_u = spp_heads_ref[(layer_idx, head_idx)]
-                                            lambda_val = g_u
-                                            weight = 1.0 - lambda_val * 0.5
-                                            weight_tensor = torch.tensor(weight, device=attn_output.device, dtype=dtype)
-                                            attn_output[:, head_idx, :, :] = attn_output[:, head_idx, :, :] * weight_tensor
-
-                                    # reshape 回来：从 [batch, num_heads, seq_len, head_dim] 到 [batch, seq_len, hidden_size]
-                                    attn_output = attn_output.transpose(1, 2).contiguous()
-                                    attn_output = attn_output.reshape(batch_size, seq_len, hidden_size)
-
-                                    # 重新应用 o_proj
-                                    output = attn_module.o_proj(attn_output)
-
-                                    # 更新返回结果
-                                    if output_attentions:
-                                        attn_weights = result[1] if isinstance(result, tuple) and len(result) > 1 else None
-                                        past_kv = result[2] if isinstance(result, tuple) and len(result) > 2 else None
-                                        return output, attn_weights, past_kv
-                                    else:
-                                        past_kv = result[2] if isinstance(result, tuple) and len(result) > 2 else None
-                                        return output, None, past_kv
-
-                                # 如果 hook 没有成功拦截，回退到手动计算
-                                # （这种情况理论上不应该发生，但为了安全起见保留）
-                            except Exception as e:
-                                # 如果 hook 方法失败，回退到手动计算
-                                print(f"  ⚠️  Hook 方法失败，回退到手动计算: {e}")
-                                hook_handle.remove()
-
-                            # 回退到手动计算（保持原有逻辑）
-
-                            # 计算Q, K, V
-                            query_states = attn_module.q_proj(hidden_states)
-                            key_states = attn_module.k_proj(hidden_states)
-                            value_states = attn_module.v_proj(hidden_states)
-
-                            # 重塑为多头格式
-                            num_key_value_heads = getattr(attn_module, 'num_key_value_heads', num_heads_ref)
-                            query_states = query_states.view(batch_size, seq_len, num_heads_ref, head_dim).transpose(1, 2)
-                            key_states = key_states.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
-                            value_states = value_states.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
-
-                            # 计算 kv_seq_len
-                            kv_seq_len = key_states.shape[-2]
-                            if past_key_value is not None:
-                                kv_seq_len += past_key_value[0].shape[-2]
-
-                            # 应用 RoPE
-                            cos, sin = attn_module.rotary_emb(value_states, seq_len=kv_seq_len)
-                            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-                            # 处理past_key_value
-                            if past_key_value is not None:
-                                key_states = torch.cat([past_key_value[0], key_states], dim=2)
-                                value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-                            past_key_value = (key_states, value_states) if use_cache else None
-
-                            # repeat k/v heads if n_kv_heads < n_heads (GQA)
-                            from transformers.models.llama.modeling_llama import repeat_kv
-                            num_key_value_groups = getattr(attn_module, 'num_key_value_groups', 1)
-                            key_states = repeat_kv(key_states, num_key_value_groups)
-                            value_states = repeat_kv(value_states, num_key_value_groups)
-
-                            kv_seq_len = key_states.shape[-2]
-
-                            # 计算attention scores
-                            import math
-                            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-
-                            if attention_mask is not None:
-                                if attention_mask.size() != (batch_size, 1, seq_len, kv_seq_len):
-                                    raise ValueError(
-                                        f"Attention mask should be of size {(batch_size, 1, seq_len, kv_seq_len)}, but is {attention_mask.size()}"
-                                    )
-                                attn_weights = attn_weights + attention_mask
-
-                            # 应用softmax
-                            import torch.nn.functional as F
-                            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-
-                            # 应用attention到V
-                            attn_output = torch.matmul(attn_weights, value_states)  # [batch, num_heads, seq_len, head_dim]
-
-                            # 应用 SPP head 权重调整（关键步骤：在 reshape 之前对每个 head 单独应用权重）
+                            # 对 SPP head 应用调整后的权重
                             for head_idx in range(num_heads_ref):
                                 if (layer_idx, head_idx) in spp_heads_ref:
                                     g_u = spp_heads_ref[(layer_idx, head_idx)]
                                     lambda_val = g_u
-                                    weight = 1.0 - lambda_val * 0.5
-                                    weight_tensor = torch.tensor(weight, device=attn_output.device, dtype=dtype)
-                                    attn_output[:, head_idx, :, :] = attn_output[:, head_idx, :, :] * weight_tensor
+                                    weight = 1.0  - lambda_val * 0.5
+                                    head_weights[head_idx] = weight
 
-                            # reshape 和 o_proj（复用原始实现的 o_proj）
-                            attn_output = attn_output.transpose(1, 2).contiguous()
-                            attn_output = attn_output.reshape(batch_size, seq_len, hidden_size)
-                            output = attn_module.o_proj(attn_output)
-
-                            if output_attentions:
-                                return output, attn_weights, past_key_value
-                            else:
-                                return output, None, past_key_value
+                            # 调用原始 forward，传递 head_weights 参数
+                            # 注意：我们已经修改了 transformers/models/llama/modeling_llama.py，
+                            # 添加了 head_weights 参数支持
+                            return original_forward(
+                                hidden_states,
+                                attention_mask=attention_mask,
+                                position_ids=position_ids,
+                                past_key_value=past_key_value,
+                                output_attentions=output_attentions,
+                                use_cache=use_cache,
+                                head_weights=head_weights,
+                            )
 
                         return patched_forward
 
