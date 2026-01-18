@@ -514,10 +514,15 @@ def main():
     set_seed(args.seed)
 
     if args.train_file is None:
-        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_200.json")
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_20.json")
 
     if args.output_file is None:
-        args.output_file = os.path.join(coco_train_json_dir, "spp_head_weighting_test_results.json")
+        # 从训练文件名中提取基础名称（不含扩展名）
+        train_file_basename = os.path.basename(args.train_file)
+        train_file_name = os.path.splitext(train_file_basename)[0]  # 例如: "coco_train_20"
+        # 生成输出文件名，包含训练文件名
+        output_filename = f"{train_file_name}_spp_head_weighting_test_results.json"
+        args.output_file = os.path.join(coco_train_json_dir, output_filename)
 
     print("=" * 80)
     print("测试 SPP Head 权重调整对 CHAIR 基准的影响")

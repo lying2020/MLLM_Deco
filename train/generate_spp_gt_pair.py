@@ -298,177 +298,29 @@ def compute_log_probability_gain(
 
 
 class HeadOutputExtractor:
-    """使用hook机制提取每个head的输出"""
+    """
+    占位类，用于保持函数签名兼容性
+
+    注意：当前代码已完全使用模型内部的 attn_output（通过 output_attn_output=True），
+    不再需要 hook 机制或手动计算 Q、K、V。此类保留仅用于保持函数签名。
+    """
 
     def __init__(self, model, num_layers: int, num_heads: int):
         self.model = model
         self.num_layers = num_layers
         self.num_heads = num_heads
-        self.hooks = []
-        self.head_outputs = {}  # {(layer_idx, head_idx): output_tensor} (经过o_proj后的完整输出)
-        self.head_raw_outputs = {}  # {(layer_idx, head_idx): raw_output_tensor} (原始head输出，未经过o_proj，维度为head_dim)
-        self.hidden_states_before = {}  # {layer_idx: hidden_state}
-
-    def _make_attn_pre_hook(self, layer_idx: int):
-        """创建attention pre-hook来获取输入hidden_states
-
-        注意：当前代码已改用手动计算head输出，不再依赖hook机制。
-        此hook保留作为备用方案，但不会产生警告信息。
-        """
-        def attn_pre_hook(module, input_tuple):
-            # input_tuple是forward的参数，第一个是hidden_states
-            # 结构应该是: (hidden_states, attention_mask, position_ids, past_key_value, output_attentions, use_cache)
-            hidden_states = None
-
-            if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                # 第一个参数应该是hidden_states
-                first_arg = input_tuple[0]
-                if isinstance(first_arg, torch.Tensor):
-                    hidden_states = first_arg
-                elif isinstance(first_arg, tuple) and len(first_arg) > 0:
-                    # 有时候可能是嵌套的tuple
-                    hidden_states = first_arg[0] if isinstance(first_arg[0], torch.Tensor) else None
-
-            # 如果成功获取hidden_states，保存它；否则静默失败（不打印警告）
-            if isinstance(hidden_states, torch.Tensor):
-                self.hidden_states_before[layer_idx] = hidden_states
-            # 注意：不再打印警告，因为代码已改用手动计算方式，不依赖hook
-        return attn_pre_hook
-
-    def _make_attn_hook(self, layer_idx: int):
-        """创建attention hook来提取head输出"""
-        def attn_hook(module, input_tuple, output):
-            # 尝试从input_tuple获取hidden_states
-            # input_tuple的结构应该是: (hidden_states, attention_mask, position_ids, past_key_value, output_attentions, use_cache)
-            hidden_states = None
-
-            if isinstance(input_tuple, tuple) and len(input_tuple) > 0:
-                # 第一个参数应该是hidden_states
-                first_arg = input_tuple[0]
-                if isinstance(first_arg, torch.Tensor):
-                    hidden_states = first_arg
-                elif isinstance(first_arg, tuple) and len(first_arg) > 0:
-                    # 有时候可能是嵌套的tuple
-                    hidden_states = first_arg[0] if isinstance(first_arg[0], torch.Tensor) else None
-
-            # 如果input_tuple为空，尝试从之前保存的hidden_states_before获取
-            if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
-                hidden_states = self.hidden_states_before.get(layer_idx)
-
-            # 如果仍然无法获取，尝试从output中获取（某些实现可能返回hidden_states）
-            if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
-                if isinstance(output, tuple) and len(output) > 0:
-                    # output的结构通常是: (attn_output, attn_weights, past_key_value)
-                    # 但attn_output是经过o_proj的，不是我们需要的
-                    pass  # 不能从output获取，因为已经经过o_proj了
-
-            # 如果仍然无法获取，跳过这一层（静默失败，不打印警告）
-            # 注意：当前代码已改用手动计算head输出，不再依赖hook机制
-            if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
-                return
-
-            # 确保hidden_states是正确的格式
-            if len(hidden_states.shape) != 3:
-                return
-
-            # 获取attention层参数
-            batch_size, seq_len, hidden_size = hidden_states.shape
-            head_dim = hidden_size // self.num_heads
-
-            # 检查head_dim是否合理
-            if head_dim <= 0 or hidden_size % self.num_heads != 0:
-                return
-
-            # 计算Q, K, V
-            Q = module.q_proj(hidden_states)  # [batch, seq_len, hidden_size]
-            K = module.k_proj(hidden_states)
-            V = module.v_proj(hidden_states)
-
-            # 重塑为多头格式
-            Q = Q.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
-            K = K.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)
-            V = V.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)
-
-            # 计算attention scores
-            scale = 1.0 / np.sqrt(head_dim)
-            scores = torch.matmul(Q, K.transpose(-2, -1)) * scale  # [batch, num_heads, seq_len, seq_len]
-
-            # 应用softmax
-            attn_weights = torch.softmax(scores, dim=-1)
-
-            # 应用attention到V
-            attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
-
-            # 提取每个head的输出
-            # 重塑attn_output: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, num_heads, head_dim]
-            attn_output_reshaped = attn_output.transpose(1, 2)  # [batch, seq_len, num_heads, head_dim]
-            # Concatenate所有head: [batch, seq_len, num_heads * head_dim] = [batch, seq_len, hidden_size]
-            attn_output_concat = attn_output_reshaped.contiguous().view(batch_size, seq_len, hidden_size)
-
-            for head_idx in range(self.num_heads):
-                # 提取单个head的输出（原始输出，未经过o_proj）
-                head_attn_output = attn_output[:, head_idx, :, :]  # [batch, seq_len, head_dim]
-
-                # 保存原始head输出（用于训练linear probe）
-                self.head_raw_outputs[(layer_idx, head_idx)] = head_attn_output
-
-                # 创建一个只包含该head的完整attn_output（其他head为零）
-                head_only_concat = torch.zeros_like(attn_output_concat)
-                head_start = head_idx * head_dim
-                head_end = (head_idx + 1) * head_dim
-                head_only_concat[:, :, head_start:head_end] = head_attn_output
-
-                # 应用o_proj得到该head的完整输出
-                if hasattr(module, 'o_proj'):
-                    head_output_full = module.o_proj(head_only_concat)  # [batch, seq_len, hidden_size]
-                else:
-                    # 如果没有o_proj，直接使用head_only_concat
-                    head_output_full = head_only_concat
-
-                self.head_outputs[(layer_idx, head_idx)] = head_output_full
-
-        return attn_hook
 
     def register_hooks(self):
-        """注册所有层的hooks"""
-        lang_model = self.model.get_model()
-        if not hasattr(lang_model, 'layers'):
-            raise ValueError("模型没有layers属性")
-
-        for layer_idx in range(self.num_layers):
-            if layer_idx < len(lang_model.layers):
-                layer = lang_model.layers[layer_idx]
-                if hasattr(layer, 'self_attn'):
-                    # 注册pre-hook来获取输入hidden_states
-                    pre_hook = layer.self_attn.register_forward_pre_hook(self._make_attn_pre_hook(layer_idx))
-                    self.hooks.append(pre_hook)
-                    # 注册forward hook来提取head输出
-                    hook = layer.self_attn.register_forward_hook(self._make_attn_hook(layer_idx))
-                    self.hooks.append(hook)
+        """占位方法，不再注册任何 hooks"""
+        pass
 
     def remove_hooks(self):
-        """移除所有hooks"""
-        for hook in self.hooks:
-            hook.remove()
-        self.hooks.clear()
-
-    def get_head_output(self, layer_idx: int, head_idx: int) -> Optional[torch.Tensor]:
-        """获取特定head的输出（经过o_proj后的完整输出）"""
-        return self.head_outputs.get((layer_idx, head_idx))
-
-    def get_head_raw_output(self, layer_idx: int, head_idx: int) -> Optional[torch.Tensor]:
-        """获取特定head的原始输出（未经过o_proj，维度为head_dim）"""
-        return self.head_raw_outputs.get((layer_idx, head_idx))
-
-    def get_hidden_state_before(self, layer_idx: int) -> Optional[torch.Tensor]:
-        """获取该层之前的hidden state"""
-        return self.hidden_states_before.get(layer_idx)
+        """占位方法，不再需要移除 hooks"""
+        pass
 
     def clear(self):
-        """清空缓存"""
-        self.head_outputs.clear()
-        self.head_raw_outputs.clear()
-        self.hidden_states_before.clear()
+        """占位方法，不再需要清空缓存"""
+        pass
 
 
 def enable_attn_output_extraction(model, enable: bool = True):
@@ -584,8 +436,7 @@ def process_case_pope(
     bu_plus_tokens = get_vocab_tokens_for_words(tokenizer, bu_plus_words)
     bu_minus_tokens = get_vocab_tokens_for_words(tokenizer, bu_minus_words)
 
-    # 清空extractor缓存
-    extractor.clear()
+    # 不再需要清空extractor缓存（已移除hook机制）
 
     # Forward pass获取所有层的hidden states和head输出
     with torch.no_grad():
@@ -1217,23 +1068,9 @@ def process_case_chair(
         # step_idx=1 表示生成第2个token，所以需要 input_ids + generated_token_ids[0:2]
         # 注意：generated_token_ids[step_idx] 是当前步骤生成的token
 
-        # 清空extractor缓存，准备捕获新的head输出
-        # 注意：确保hook已经注册，并且每次forward前清空缓存
-        extractor.clear()
+        # 不再需要清空extractor缓存（已移除hook机制）
 
-        # 调试：检查hook是否已注册（只在第一个step检查一次）
-        if step_idx == target_steps[0]:
-            lang_model = model.get_model()
-            if hasattr(lang_model, 'layers') and len(lang_model.layers) > 0:
-                first_layer = lang_model.layers[0]
-                if hasattr(first_layer, 'self_attn'):
-                    # 检查是否有hook注册
-                    hooks = first_layer.self_attn._forward_hooks
-                    pre_hooks = first_layer.self_attn._forward_pre_hooks
-                    if not hooks and not pre_hooks:
-                        print(f"  ⚠️  警告: Layer 0 的attention层没有注册hook！")
-                    else:
-                        print(f"  ✓ Layer 0 的attention层已注册hook（forward_hooks: {len(hooks)}, pre_hooks: {len(pre_hooks)}）")
+        # 不再需要检查hook（已移除hook机制）
 
         # 构建当前步骤的完整序列
         # 如果inputs_embeds不为None，说明原始输入已经被转换为embeddings
@@ -1841,11 +1678,11 @@ def main():
 
     print(f"✓ 模型配置: {num_layers} 层, 每层 {num_heads} 个head, 总共 {num_layers * num_heads} 个head")
 
-    # 创建head输出提取器
+    # 创建head输出提取器（占位类，仅用于保持函数签名）
     print(f"\n[3/5] 初始化head输出提取器...")
     extractor = HeadOutputExtractor(model, num_layers, num_heads)
-    extractor.register_hooks()
-    print(f"✓ 已注册 {len(extractor.hooks)} 个hooks")
+    extractor.register_hooks()  # 占位方法，不再注册 hooks
+    print(f"✓ Head输出提取器已初始化（使用模型内部的 attn_output，不再使用 hook 机制）")
 
     # 初始化CHAIR评估器（使用缓存机制加速）
     print(f"\n[3.5/5] 初始化CHAIR评估器...")
@@ -1932,9 +1769,9 @@ def main():
             traceback.print_exc()
             # 继续处理下一个case，不中断整个流程
 
-    # 移除hooks
+    # 移除hooks（占位方法，不再需要移除 hooks）
     extractor.remove_hooks()
-    print(f"✓ 已移除所有hooks")
+    print(f"✓ Head输出提取器已清理")
 
     # 打印处理统计信息
     print(f"\n{'='*80}")

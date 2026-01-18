@@ -175,7 +175,7 @@ class LinearProbeManager:
             float: 处理后的 lambda 值
         """
         # 只对深层（layer_idx >= 16）使用 linear probe，前16层直接返回 0.0
-        if layer_idx < 33:
+        if layer_idx < 16:
             return 0.0
 
         key = (layer_idx, head_idx)
@@ -242,7 +242,7 @@ class LinearProbeManager:
             self.original_forwards[layer_idx] = original_forward
 
             # 创建修改后的forward方法
-            # 使用修改后的源码，通过 head_weights 参数应用权重
+            # 使用模型内部的 attn_output，通过 head_weights 参数应用权重
             def make_patched_forward(layer_idx, original_forward):
                 def patched_forward(
                     hidden_states,
@@ -257,66 +257,40 @@ class LinearProbeManager:
                     num_heads = self.num_heads
                     head_dim = hidden_size // num_heads
 
-                    # 为了获取最后一个 token 的 head 向量来计算权重，我们需要先计算到 attn_output
-                    # 但为了使用原始实现的正确性，我们使用一个临时调用
-                    # 方案：先调用原始 forward 获取中间结果（通过 hook），或者手动计算到 attn_output
-                    # 为了保持代码简洁和正确性，我们手动计算到 attn_output，然后使用 head_weights 参数
+                    # 先调用原始 forward 获取 attn_output（使用 output_attn_output=True）
+                    # 这样可以确保使用模型内部的正确计算，避免手动计算的错误
+                    attn_result = original_forward(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        output_attn_output=True,  # 启用 attn_output 输出
+                    )
 
-                    # 计算Q, K, V
-                    Q = attn_module.q_proj(hidden_states)
-                    K = attn_module.k_proj(hidden_states)
-                    V = attn_module.v_proj(hidden_states)
+                    # 解包返回值（应该是4个元素：output, attn_weights, past_key_value, attn_output_before_reshape）
+                    if len(attn_result) == 4:
+                        _, attn_weights, past_key_value_for_return, attn_output = attn_result
+                    else:
+                        raise ValueError(
+                            f"Expected 4 return values from attention forward (with output_attn_output=True), "
+                            f"but got {len(attn_result)}. This indicates the model's attention layer "
+                            f"does not support output_attn_output parameter."
+                        )
 
-                    # 重塑为多头格式
-                    num_key_value_heads = getattr(attn_module, 'num_key_value_heads', num_heads)
-                    Q = Q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-                    K = K.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
-                    V = V.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
+                    if attn_output is None:
+                        raise RuntimeError(
+                            f"Failed to get attn_output from layer {layer_idx}. "
+                            f"This should not happen if output_attn_output is enabled."
+                        )
 
-                    # 计算 kv_seq_len
-                    kv_seq_len = K.shape[-2]
-                    if past_key_value is not None:
-                        kv_seq_len += past_key_value[0].shape[-2]
-
-                    # 应用 RoPE
-                    cos, sin = attn_module.rotary_emb(V, seq_len=kv_seq_len)
-                    if position_ids is None:
-                        position_ids = torch.arange(seq_len, device=hidden_states.device, dtype=torch.long).unsqueeze(0)
-                    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-                    Q, K = apply_rotary_pos_emb(Q, K, cos, sin, position_ids)
-
-                    # 处理past_key_value
-                    if past_key_value is not None:
-                        K = torch.cat([past_key_value[0], K], dim=2)
-                        V = torch.cat([past_key_value[1], V], dim=2)
-
-                    past_key_value_for_return = (K, V) if use_cache else None
-
-                    # repeat k/v heads if n_kv_heads < n_heads (GQA)
-                    from transformers.models.llama.modeling_llama import repeat_kv
-                    num_key_value_groups = getattr(attn_module, 'num_key_value_groups', 1)
-                    K = repeat_kv(K, num_key_value_groups)
-                    V = repeat_kv(V, num_key_value_groups)
-
-                    kv_seq_len = K.shape[-2]
-
-                    # 计算attention scores
-                    import math
-                    attn_weights = torch.matmul(Q, K.transpose(2, 3)) / math.sqrt(head_dim)
-
-                    if attention_mask is not None:
-                        if attention_mask.size() != (batch_size, 1, seq_len, kv_seq_len):
-                            raise ValueError(
-                                f"Attention mask should be of size {(batch_size, 1, seq_len, kv_seq_len)}, but is {attention_mask.size()}"
-                            )
-                        attn_weights = attn_weights + attention_mask
-
-                    # 应用softmax
-                    import torch.nn.functional as F
-                    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(Q.dtype)
-
-                    # 应用attention到V
-                    attn_output = torch.matmul(attn_weights, V)  # [batch, num_heads, seq_len, head_dim]
+                    # 确保 attn_output 的形状正确: [batch, num_heads, seq_len, head_dim]
+                    if attn_output.shape != (batch_size, num_heads, seq_len, head_dim):
+                        raise ValueError(
+                            f"attn_output shape mismatch: expected {(batch_size, num_heads, seq_len, head_dim)}, "
+                            f"got {attn_output.shape}"
+                        )
 
                     # 对每个head，使用最后一个token的head向量预测权重
                     # head_weights 形状: [num_heads]，默认所有权重为 1.0
@@ -339,8 +313,7 @@ class LinearProbeManager:
                     head_weights = head_weights.view(1, num_heads, 1, 1)  # [1, num_heads, 1, 1] 用于广播
                     attn_output = attn_output * head_weights
 
-                    # 现在调用原始 forward，但传递 head_weights=None（因为我们已经应用了权重）
-                    # 或者，我们直接 reshape 和 o_proj
+                    # 现在 reshape 和 o_proj
                     attn_output = attn_output.transpose(1, 2).contiguous()
                     attn_output = attn_output.reshape(batch_size, seq_len, hidden_size)
                     output = attn_module.o_proj(attn_output)
