@@ -1390,8 +1390,8 @@ def process_case_chair(
                 if current_word is None:
                     continue
 
-                # 获取当前词汇的所有合理变体的token IDs
-                # 包括：原始形式、小写、大写、首字母大写等（如 people, People, PEOPLE, person, Person等）
+                # 获取当前词汇的大小写变体的token IDs
+                # 包括：原始形式、小写、大写、首字母大写等（如 bus, Bus, BUS等）
                 # 这样可以处理tokenizer可能以不同方式编码同一个概念的情况
                 current_token_ids = get_vocab_tokens_for_words(tokenizer, [current_word])
 
@@ -1487,6 +1487,7 @@ def process_case_chair(
 
                 # 获取top-K候选池 Ct（针对当前head的logits）
                 # 注意：不同head的top-K预测可能不同，因此每个head需要单独计算
+                # 只考虑概率值在 top-K 以内的 token
                 top_k_logits, top_k_indices = torch.topk(logits_with_head[0], k=TOP_K)
                 Ct_tokens = set(top_k_indices.detach().cpu().numpy().tolist())
 
@@ -1559,10 +1560,12 @@ def process_case_chair(
 
                 if current_token_type == 'grounded':
                     # 如果yt是Grounded（真实实例），例如"dog"
-                    # Bu^+ = {yt}，只包含当前真实词汇
-                    step_bu_plus_tokens = current_token_ids.copy()
+                    # Bu^+ = {yt}，包含当前真实词汇的大小写变体token及其同义词token，且这些token必须在top-K内
+                    # 注意：可以包含同义词，但只保留在 top-K 候选池中的 token
+                    step_bu_plus_tokens = current_token_ids & Ct_tokens
 
                     # Bu^- = top-K中的所有幻视词汇
+                    # 注意：这里仍然从top-K中筛选幻视词汇，用于对比（可以包含同义词）
                     step_bu_minus_tokens = Ct_hallucinated_tokens.copy()
 
                     # 如果top-K中没有幻视词汇，不再跳过，而是使用 delta_log_p_minus = 0（中性假设）
@@ -1579,10 +1582,12 @@ def process_case_chair(
 
                 elif current_token_type == 'hallucinated':
                     # 如果yt是Hallucinated（幻视），例如"cat"
-                    # Bu^- = {yt}，只包含当前幻视词汇
-                    step_bu_minus_tokens = current_token_ids.copy()
+                    # Bu^- = {yt}，包含当前幻视词汇的大小写变体token及其同义词token，且这些token必须在top-K内
+                    # 注意：可以包含同义词，但只保留在 top-K 候选池中的 token
+                    step_bu_minus_tokens = current_token_ids & Ct_tokens
 
                     # Bu^+ = top-K中的所有真实词汇
+                    # 注意：这里仍然从top-K中筛选真实词汇，用于对比（可以包含同义词）
                     step_bu_plus_tokens = Ct_grounded_tokens.copy()
 
                     # 如果top-K中没有真实实例词汇，不再跳过，而是使用 delta_log_p_plus = 0（中性假设）
