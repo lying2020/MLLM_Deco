@@ -1786,7 +1786,7 @@ def main():
                        help="随机种子")
     parser.add_argument("--chair-cache", type=str, default=None,
                        help="CHAIR评估器缓存文件路径（用于加速重复运行）")
-    parser.add_argument("--use-np-exp", type=lambda x: (str(x).lower() == 'true'), default=None,
+    parser.add_argument("--use-np-exp", type=lambda x: (str(x).lower() == 'true'), default=True,
                        help="是否使用np.exp计算概率增益（默认True，使用np.exp；False则使用np.log）")
 
     args = parser.parse_args()
@@ -1798,7 +1798,7 @@ def main():
         USE_NP_EXP = args.use_np_exp
 
     if args.train_file is None:
-        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_20.json")
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_500.json")
 
     print("=" * 80)
     print("生成 Head 级别真值对 (VPP版本)")

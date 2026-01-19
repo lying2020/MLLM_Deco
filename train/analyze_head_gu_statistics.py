@@ -413,7 +413,7 @@ def plot_histogram(stats: Dict[Tuple[int, int], Dict], output_path: str = None, 
 def main():
     parser = argparse.ArgumentParser(description="分析head级别的g_u统计信息")
     parser.add_argument("--ground-truth-dir", type=str,
-                       default="train/coco_train_json/coco_train_200_generate_spp_gt_pair_np_log",
+                       default="train/coco_train_json/coco_train_200_generate_vpp_gt_pair_np_exp",
                        help="真值对文件目录")
     parser.add_argument("--num-layers", type=int, default=32,
                        help="模型层数")
@@ -421,9 +421,9 @@ def main():
                        help="每层的head数")
     parser.add_argument("--bin-width", type=float, default=0.1,
                        help="柱状图区间宽度")
-    parser.add_argument("--threshold-max", type=float, default=0.1,
+    parser.add_argument("--threshold-max", type=float, default=0.15,
                        help="二值化阈值上限")
-    parser.add_argument("--threshold-min", type=float, default=-0.1,
+    parser.add_argument("--threshold-min", type=float, default=-0.15,
                        help="二值化阈值下限")
 
     args = parser.parse_args()

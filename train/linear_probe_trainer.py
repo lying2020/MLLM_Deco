@@ -767,7 +767,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="训练1024个Linear Probe")
-    parser.add_argument("--ground-truth-dir", type=str, default=os.path.join(current_dir, "coco_train_json/coco_train_20_generate_spp_gt_pair"),
+    parser.add_argument("--ground-truth-dir", type=str, default=os.path.join(current_dir, "coco_train_json/coco_train_200_generate_spp_gt_pair_np_log"),
                        help="真值对文件目录")
     parser.add_argument("--save-dir", type=str, default=os.path.join(current_dir, "ckpt"),
                        help="模型保存目录")

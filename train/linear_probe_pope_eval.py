@@ -175,7 +175,7 @@ class LinearProbeManager:
             float: 处理后的 lambda 值
         """
         # 只对深层（layer_idx >= 16）使用 linear probe，前16层直接返回 0.0
-        if layer_idx < 16:
+        if layer_idx < 33:
             return 0.0
 
         key = (layer_idx, head_idx)
@@ -204,16 +204,16 @@ class LinearProbeManager:
             else:
                 lambda_value = output.cpu().item() if output.numel() == 1 else output.cpu()
 
-            # 对 lambda 进行转换处理
-            # 1. 如果 lambda 在 [-0.3, 0.5] 之间，直接置为 0
-            if -0.3 <= lambda_value <= 0.5:
-                lambda_value = 0.0
-            # 2. 如果 lambda > 0.5，则将 lambda 置为 2*lambda - 1
-            elif lambda_value > 0.5:
-                lambda_value = 2.0 * lambda_value - 1.0
-            # 3. 如果 lambda < -0.3，则将 lambda 置为 (1.0/0.7)*lambda + 0.43
-            elif lambda_value < -0.3:
-                lambda_value = (1.0 / 0.7) * lambda_value + 0.43
+            # # 对 lambda 进行转换处理
+            # # 1. 如果 lambda 在 [-0.3, 0.5] 之间，直接置为 0
+            # if -0.3 <= lambda_value <= 0.5:
+            #     lambda_value = 0.0
+            # # 2. 如果 lambda > 0.5，则将 lambda 置为 2*lambda - 1
+            # elif lambda_value > 0.5:
+            #     lambda_value = 2.0 * lambda_value - 1.0
+            # # 3. 如果 lambda < -0.3，则将 lambda 置为 (1.0/0.7)*lambda + 0.43
+            # elif lambda_value < -0.3:
+            #     lambda_value = (1.0 / 0.7) * lambda_value + 0.43
 
             return lambda_value
 
@@ -307,7 +307,7 @@ class LinearProbeManager:
                         lambda_val = self.get_weight(layer_idx, head_idx, head_vector[0])
                         # lambda 已经经过转换处理
                         # 将 head 的原始系数（值为 1）与 lambda 系数相减：weight = 1 - lambda
-                        weight = 1.0 - lambda_val
+                        weight = 1.0 # - lambda_val
                         head_weights[head_idx] = weight
 
                     # 应用权重到 attn_output（在 reshape 之前）

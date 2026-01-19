@@ -1635,7 +1635,7 @@ def main():
                        help="随机种子")
     parser.add_argument("--chair-cache", type=str, default=None,
                        help="CHAIR评估器缓存文件路径（用于加速重复运行）")
-    parser.add_argument("--use-np-exp", type=lambda x: (str(x).lower() == 'true'), default=False,
+    parser.add_argument("--use-np-exp", type=lambda x: (str(x).lower() == 'true'), default=True,
                        help="是否使用np.exp计算概率增益（默认True，使用np.exp；False则使用np.log）")
 
     args = parser.parse_args()
