@@ -45,8 +45,16 @@ class HeadGroundTruthDataset(Dataset):
         for pair in pairs:
             if 'head_vector' in pair and 'g_u' in pair:
                 head_vector = pair['head_vector']
+                g_u = pair['g_u']
+                # 检查 head_vector 是否有效
                 if isinstance(head_vector, list) and len(head_vector) > 0:
-                    self.valid_pairs.append(pair)
+                    # 检查 g_u 是否为有效数值（不是 nan 或 inf）
+                    if isinstance(g_u, (int, float)):
+                        if not (np.isnan(g_u) or np.isinf(g_u)):
+                            self.valid_pairs.append(pair)
+                    else:
+                        # 如果不是数值类型，跳过
+                        continue
 
         print(f"  有效样本数: {len(self.valid_pairs)}/{len(pairs)}")
         print(f"  数据类型: {dtype}")
@@ -56,7 +64,20 @@ class HeadGroundTruthDataset(Dataset):
 
     def __getitem__(self, idx):
         pair = self.valid_pairs[idx]
-        head_vector = torch.tensor(pair['head_vector'], dtype=self.dtype)
+        head_vector = pair['head_vector']
+
+        # 处理 head_vector 可能是嵌套列表的情况
+        # 如果 head_vector 是 [[...]]，需要展平为 [...]
+        if isinstance(head_vector, list) and len(head_vector) > 0:
+            if isinstance(head_vector[0], list):
+                # 嵌套列表，展平为一维列表
+                head_vector = head_vector[0]
+
+        head_vector = torch.tensor(head_vector, dtype=self.dtype)
+        # 确保 head_vector 是一维的 [head_dim]
+        if head_vector.dim() > 1:
+            head_vector = head_vector.squeeze()
+
         g_u = torch.tensor(pair['g_u'], dtype=self.dtype)
         return head_vector, g_u
 
@@ -428,23 +449,59 @@ class LinearProbeTrainer:
                     pred = probe(head_vector)
                     loss = nn.MSELoss()(pred, g_u)
 
-                    test_loss += loss.item() * head_vector.size(0)
-                    test_count += head_vector.size(0)
+                    # 检查 loss 是否为 nan 或 inf
+                    if not (np.isnan(loss.item()) or np.isinf(loss.item())):
+                        test_loss += loss.item() * head_vector.size(0)
+                        test_count += head_vector.size(0)
 
-                    test_predictions.extend(pred.cpu().numpy().flatten().tolist())
-                    test_targets.extend(g_u.cpu().numpy().flatten().tolist())
+                        # 检查预测值和目标值是否为 nan/inf
+                        pred_np = pred.cpu().numpy().flatten()
+                        g_u_np = g_u.cpu().numpy().flatten()
 
-            avg_test_loss = test_loss / test_count if test_count > 0 else float('inf')
+                        # 只保留有效的预测值和目标值（不是 nan 或 inf）
+                        valid_mask = ~(np.isnan(pred_np) | np.isinf(pred_np) | np.isnan(g_u_np) | np.isinf(g_u_np))
+                        if np.any(valid_mask):
+                            test_predictions.extend(pred_np[valid_mask].tolist())
+                            test_targets.extend(g_u_np[valid_mask].tolist())
 
-            # 计算R²
-            test_predictions = np.array(test_predictions)
-            test_targets = np.array(test_targets)
-            ss_res = np.sum((test_targets - test_predictions) ** 2)
-            ss_tot = np.sum((test_targets - np.mean(test_targets)) ** 2)
-            r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+            # 处理空测试集或所有值都是 nan/inf 的情况
+            if test_count == 0 or len(test_predictions) == 0:
+                avg_test_loss = float('nan')
+                r2 = float('nan')
+                mae = float('nan')
+            else:
+                avg_test_loss = test_loss / test_count
 
-            # 计算MAE
-            mae = np.mean(np.abs(test_predictions - test_targets))
+                # 计算R²
+                test_predictions = np.array(test_predictions)
+                test_targets = np.array(test_targets)
+
+                # 再次检查是否有 nan/inf（防御性编程）
+                valid_mask = ~(np.isnan(test_predictions) | np.isinf(test_predictions) |
+                              np.isnan(test_targets) | np.isinf(test_targets))
+                if np.sum(valid_mask) == 0:
+                    # 所有值都是 nan/inf
+                    avg_test_loss = float('nan')
+                    r2 = float('nan')
+                    mae = float('nan')
+                else:
+                    test_predictions = test_predictions[valid_mask]
+                    test_targets = test_targets[valid_mask]
+
+                    ss_res = np.sum((test_targets - test_predictions) ** 2)
+                    ss_tot = np.sum((test_targets - np.mean(test_targets)) ** 2)
+                    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+                    # 检查 r2 是否为 nan/inf
+                    if np.isnan(r2) or np.isinf(r2):
+                        r2 = float('nan')
+
+                    # 计算MAE
+                    mae = np.mean(np.abs(test_predictions - test_targets))
+
+                    # 检查 mae 是否为 nan/inf
+                    if np.isnan(mae) or np.isinf(mae):
+                        mae = float('nan')
 
             results[key] = {
                 'status': 'trained',
@@ -484,10 +541,35 @@ class LinearProbeTrainer:
             test_r2s = [r['test_r2'] for r in results.values() if r.get('status') == 'trained']
             test_maes = [r['test_mae'] for r in results.values() if r.get('status') == 'trained']
 
+            # 过滤掉 nan 和 inf 值
+            test_losses_valid = [x for x in test_losses if not (np.isnan(x) or np.isinf(x))]
+            test_r2s_valid = [x for x in test_r2s if not (np.isnan(x) or np.isinf(x))]
+            test_maes_valid = [x for x in test_maes if not (np.isnan(x) or np.isinf(x))]
+
             print(f"\n测试集性能:")
-            print(f"  平均MSE: {np.mean(test_losses):.6f} ± {np.std(test_losses):.6f}")
-            print(f"  平均R²: {np.mean(test_r2s):.4f} ± {np.std(test_r2s):.4f}")
-            print(f"  平均MAE: {np.mean(test_maes):.6f} ± {np.std(test_maes):.6f}")
+            if len(test_losses_valid) > 0:
+                print(f"  平均MSE: {np.mean(test_losses_valid):.6f} ± {np.std(test_losses_valid):.6f} (有效样本: {len(test_losses_valid)}/{len(test_losses)})")
+            else:
+                print(f"  平均MSE: nan (所有样本都无效)")
+
+            if len(test_r2s_valid) > 0:
+                print(f"  平均R²: {np.mean(test_r2s_valid):.4f} ± {np.std(test_r2s_valid):.4f} (有效样本: {len(test_r2s_valid)}/{len(test_r2s)})")
+            else:
+                print(f"  平均R²: nan (所有样本都无效)")
+
+            if len(test_maes_valid) > 0:
+                print(f"  平均MAE: {np.mean(test_maes_valid):.6f} ± {np.std(test_maes_valid):.6f} (有效样本: {len(test_maes_valid)}/{len(test_maes)})")
+            else:
+                print(f"  平均MAE: nan (所有样本都无效)")
+
+            # 如果有很多无效样本，打印警告
+            if len(test_losses_valid) < len(test_losses):
+                nan_count = len(test_losses) - len(test_losses_valid)
+                print(f"\n  ⚠️  警告: {nan_count}/{len(test_losses)} 个probe的测试集指标为nan/inf")
+                print(f"     可能原因:")
+                print(f"     1. 测试集为空（数据量太少，分割后测试集为空）")
+                print(f"     2. 数据中包含nan/inf值（g_u或head_vector）")
+                print(f"     3. 模型预测产生了nan/inf值")
 
         # 保存模型和生成可视化
         subdir_name = None
@@ -779,13 +861,13 @@ if __name__ == "__main__":
                        help="使用Dropout")
     parser.add_argument("--batch-size", type=int, default=64,
                        help="批量大小")
-    parser.add_argument("--num-epochs", type=int, default=100,
+    parser.add_argument("--num-epochs", type=int, default=200,
                        help="最大训练轮数")
     parser.add_argument("--lr", type=float, default=0.001,
                        help="学习率")
     parser.add_argument("--weight-decay", type=float, default=0.01,
                        help="L2正则化系数")
-    parser.add_argument("--patience", type=int, default=10,
+    parser.add_argument("--patience", type=int, default=30,
                        help="早停patience")
     parser.add_argument("--dtype", type=str, default="float32",
                        choices=["float32", "float64"],
