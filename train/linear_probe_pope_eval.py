@@ -310,7 +310,7 @@ class LinearProbeManager:
                         lambda_val = self.get_weight(layer_idx, head_idx, head_vector[0])
                         # lambda 已经经过转换处理
                         # 将 head 的原始系数（值为 1）与 lambda 系数相减：weight = 1 - lambda
-                        weight = 1.0 - lambda_val
+                        weight = 1.0  - lambda_val
                         head_weights[head_idx] = weight
 
                     # 无论是否有权重调整，都使用原始 forward 并传递 head_weights 参数
@@ -566,7 +566,10 @@ def generate_response(model, tokenizer, input_ids, image_tensor, stopping_criter
     else:
         outputs = ""
 
-    return outputs, output_token_len, input_token_len
+    # 返回生成的 token IDs 用于调试
+    generated_token_ids = generated_ids[0].cpu().tolist() if output_token_len > 0 else []
+
+    return outputs, output_token_len, input_token_len, generated_token_ids
 
 
 def simplify_array_field(value):
@@ -1188,7 +1191,7 @@ def eval_model(args):
         )
 
         # 生成回答
-        outputs, output_token_len, input_token_len = generate_response(
+        outputs, output_token_len, input_token_len, generated_token_ids = generate_response(
             model, tokenizer, input_ids, image_tensor, stopping_criteria,
             args.temperature, args.top_p, args.max_new_tokens, device,
             use_deco=args.use_deco,
@@ -1210,12 +1213,25 @@ def eval_model(args):
         # 转换为 Yes/No 格式
         answer = recorder(outputs)
 
-        # 如果输出为空, 记录警告
+        # 如果输出为空, 记录警告并输出 token 信息
         if not outputs:
+            # 尝试不解码特殊 token 来查看原始 token
+            if generated_token_ids:
+                raw_outputs = tokenizer.batch_decode([generated_token_ids], skip_special_tokens=False)[0]
+                token_texts = [tokenizer.decode([tid]) for tid in generated_token_ids]
+            else:
+                raw_outputs = ""
+                token_texts = []
+
             if verbose:
                 print(f"\n  [Warning] Question {question_id} 生成结果为空, output_token_len={output_token_len}")
+                print(f"  [Debug] 生成的 token IDs: {generated_token_ids}")
+                print(f"  [Debug] Token IDs 对应的文本 (skip_special_tokens=False): {raw_outputs}")
+                print(f"  [Debug] 每个 token 的文本: {token_texts}")
             else:
                 print(f"  [Warning] Question {question_id} 生成结果为空, output_token_len={output_token_len}")
+                print(f"  [Debug] 生成的 token IDs: {generated_token_ids}")
+                print(f"  [Debug] Token IDs 对应的文本 (skip_special_tokens=False): {raw_outputs}")
 
         if verbose:
             print(f"\n  [生成结果] 答案:")
