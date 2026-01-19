@@ -174,8 +174,9 @@ class LinearProbeManager:
         Returns:
             float: 处理后的 lambda 值
         """
-        # 只对深层（layer_idx >= 16）使用 linear probe，前16层直接返回 0.0
-        if layer_idx < 33:
+        # 移除层限制，所有层都使用 linear probe
+        # 如果 layer_idx 超出范围，返回 0.0（即权重为 1.0）
+        if layer_idx < 16 or layer_idx >= self.num_layers:
             return 0.0
 
         key = (layer_idx, head_idx)
@@ -259,7 +260,7 @@ class LinearProbeManager:
                     head_dim = hidden_size // num_heads
 
                     # 先调用原始 forward 获取 attn_output（使用 output_attn_output=True）
-                    # 这样可以确保使用模型内部的正确计算，避免手动计算的错误
+                    # 这样可以获取 head_vector 用于计算权重
                     attn_result = original_forward(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
@@ -267,7 +268,7 @@ class LinearProbeManager:
                         past_key_value=past_key_value,
                         output_attentions=output_attentions,
                         use_cache=use_cache,
-                        output_attn_output=True,  # 启用 attn_output 输出（内部需要，忽略传入的值）
+                        output_attn_output=True,  # 启用 attn_output 输出以获取 head_vector
                     )
 
                     # 解包返回值（应该是4个元素：output, attn_weights, past_key_value, attn_output_before_reshape）
@@ -298,6 +299,8 @@ class LinearProbeManager:
                     head_weights = torch.ones(num_heads, device=hidden_states.device, dtype=hidden_states.dtype)
 
                     last_token_idx = seq_len - 1
+
+                    # 即使没有权重变更，也要走完整流程以验证链路正确性
                     for head_idx in range(num_heads):
                         # 获取最后一个token的head向量（用于预测权重）
                         head_vector = attn_output[:, head_idx, last_token_idx, :]  # [batch, head_dim]
@@ -307,22 +310,23 @@ class LinearProbeManager:
                         lambda_val = self.get_weight(layer_idx, head_idx, head_vector[0])
                         # lambda 已经经过转换处理
                         # 将 head 的原始系数（值为 1）与 lambda 系数相减：weight = 1 - lambda
-                        weight = 1.0 # - lambda_val
+                        weight = 1.0 - lambda_val
                         head_weights[head_idx] = weight
 
-                    # 应用权重到 attn_output（在 reshape 之前）
-                    head_weights = head_weights.view(1, num_heads, 1, 1)  # [1, num_heads, 1, 1] 用于广播
-                    attn_output = attn_output * head_weights
-
-                    # 现在 reshape 和 o_proj
-                    attn_output = attn_output.transpose(1, 2).contiguous()
-                    attn_output = attn_output.reshape(batch_size, seq_len, hidden_size)
-                    output = attn_module.o_proj(attn_output)
-
-                    if output_attentions:
-                        return output, attn_weights, past_key_value_for_return
-                    else:
-                        return output, None, past_key_value_for_return
+                    # 无论是否有权重调整，都使用原始 forward 并传递 head_weights 参数
+                    # 这样可以确保与原始模型完全一致，同时验证完整链路
+                    # 参考 test_spp_head_weighting.py 的实现方式
+                    # 注意：即使所有权重都是 1.0，也传递 head_weights 以验证链路
+                    return original_forward(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        output_attn_output=output_attn_output,  # 使用传入的原始值
+                        head_weights=head_weights,  # 传递计算好的权重（即使都是1.0，也传递以验证链路）
+                    )
 
                 return patched_forward
 
