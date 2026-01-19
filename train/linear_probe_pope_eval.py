@@ -1310,7 +1310,7 @@ def main():
         "coco_root": project.coco_data_path,
         "pope_file": "pope_coco/coco_pope_random.json",
         "use_linear_probe": True,
-        "linear_probe_dir": "train/ckpt/coco_train_20_generate_spp_gt_pair",
+        "linear_probe_dir": "train/ckpt/coco_train_200_generate_spp_gt_pair_np_log",
         "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
