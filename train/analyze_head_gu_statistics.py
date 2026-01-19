@@ -121,7 +121,8 @@ def plot_heatmap(stats: Dict[Tuple[int, int], Dict], num_layers: int = 32, num_h
         num_layers: 层数
         num_heads: 每层的head数
         output_path: 输出文件路径
-
+        threshold_min: 阈值下限（默认-0.5）
+        threshold_max: 阈值上限（默认0.5）
     Returns:
         np.ndarray: 热力图数据矩阵 [num_layers, num_heads]
     """
@@ -412,7 +413,7 @@ def plot_histogram(stats: Dict[Tuple[int, int], Dict], output_path: str = None, 
 def main():
     parser = argparse.ArgumentParser(description="分析head级别的g_u统计信息")
     parser.add_argument("--ground-truth-dir", type=str,
-                       default="train/coco_train_json/coco_train_200_generate_spp_gt_pair",
+                       default="train/coco_train_json/coco_train_200_generate_spp_gt_pair_np_log",
                        help="真值对文件目录")
     parser.add_argument("--num-layers", type=int, default=32,
                        help="模型层数")
@@ -420,6 +421,10 @@ def main():
                        help="每层的head数")
     parser.add_argument("--bin-width", type=float, default=0.1,
                        help="柱状图区间宽度")
+    parser.add_argument("--threshold-max", type=float, default=0.1,
+                       help="二值化阈值上限")
+    parser.add_argument("--threshold-min", type=float, default=-0.1,
+                       help="二值化阈值下限")
 
     args = parser.parse_args()
 
@@ -496,7 +501,7 @@ def main():
     binarized_heatmap_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_binarized_heatmap.png")
     print(f"\n[2/3] 生成二值化热力图...")
     plot_binarized_heatmap(stats, args.num_layers, args.num_heads, str(binarized_heatmap_path),
-                          threshold_min=-0.5, threshold_max=0.5)
+                          threshold_min=args.threshold_min, threshold_max=args.threshold_max)
 
     # 3. 柱状图
     histogram_path = os.path.join(output_dir, f"{ground_truth_dir_name}_head_gu_histogram.png")

@@ -1798,7 +1798,7 @@ def main():
         USE_NP_EXP = args.use_np_exp
 
     if args.train_file is None:
-        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_200.json")
+        args.train_file = os.path.join(coco_train_json_dir, f"coco_train_20.json")
 
     print("=" * 80)
     print("生成 Head 级别真值对 (VPP版本)")
