@@ -200,7 +200,7 @@ def plot_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, num_heads:
     # 设置坐标轴标签
     ax.set_xlabel('Attention Heads', fontsize=40, fontweight='bold')
     ax.set_ylabel('Transformer Layers', fontsize=40, fontweight='bold')
-    ax.set_title('Attention Head Suppression Score', fontsize=40, fontweight='bold', pad=30)
+    ax.set_title('Attn Head Suppression Score', fontsize=40, fontweight='bold', pad=30)
 
     # 设置坐标轴范围（包含边界，使得可以显示0刻度）
     ax.set_xlim(0, num_heads + 1.0)
@@ -304,7 +304,7 @@ def plot_binarized_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, 
     # 设置坐标轴标签
     ax.set_xlabel('Attention Heads', fontsize=40, fontweight='bold')
     ax.set_ylabel('Transformer Layers', fontsize=40, fontweight='bold')
-    ax.set_title(f'Critical Attention Head Suppression Score',
+    ax.set_title(f'Critical Attn Head Suppression Score',
                  fontsize=40, fontweight='bold', pad=30)
 
     # 设置坐标轴范围（包含边界，使得可以显示0刻度）

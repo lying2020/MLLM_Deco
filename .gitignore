@@ -17,6 +17,7 @@ LLaVA_7B/
 .Python
 build/
 develop-eggs/
+tmp/
 dist/
 downloads/
 eggs/

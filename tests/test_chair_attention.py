@@ -1168,6 +1168,10 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     # 添加colorbar
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label('Probability', fontsize=18, fontweight='bold')
+    # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+    vmin_prob = np.nanmin(probability_matrix)
+    vmax_prob = np.nanmax(probability_matrix)
+    cbar.set_ticks([vmin_prob, (vmin_prob + vmax_prob) / 2, vmax_prob])
     # 设置colorbar刻度标签加粗
     for label in cbar.ax.yaxis.get_majorticklabels():
         label.set_fontweight('bold')
@@ -1253,6 +1257,13 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
         output_dir: 输出目录
         predicted_token_word: 该层预测的token词汇（用于文件名）
     """
+    # 创建自定义colormap：从淡蓝色到深红色渐变
+    # 原来的jet colormap（深蓝到深红）已注释：
+    # cmap_attn = 'jet'
+    colors_attn = ['#E6F3FF', '#B3D9FF', '#80BFFF', '#4DA6FF', '#FF6B6B', '#FF4757', '#FF3838', '#DC143C']
+    n_bins_attn = 256
+    cmap_attn = LinearSegmentedColormap.from_list('light_blue_to_dark_red', colors_attn, N=n_bins_attn)
+
     # 增强attention map，使像素点差异更明显
     attn_values_enhanced = enhance_attention_map(attention_map.copy(), method='min_max_normalize')
 
@@ -1285,7 +1296,10 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     # 3. 单独保存增强后的attention map（图3）
     fig3 = plt.figure(figsize=(8, 8))
     ax3 = plt.subplot(1, 1, 1)
-    im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='nearest',
+    # 原来的jet colormap（深蓝到深红）已注释：
+    # im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='nearest',
+    #                  vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
+    im3 = ax3.imshow(attn_values_enhanced, cmap=cmap_attn, interpolation='nearest',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
     ax3.set_title(f'Attn Map - "{token_text}"', fontsize=40, fontweight='bold')  # 14 * 1.5 = 21
     ax3.axis('off')
@@ -1304,10 +1318,19 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
         ax_cbar3 = plt.subplot(1, 1, 1)
         ax_cbar3.axis('off')
         # 创建colorbar
-        sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+        # 原来的jet colormap（深蓝到深红）已注释：
+        # sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+        sm3 = plt.cm.ScalarMappable(cmap=cmap_attn, norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
         sm3.set_array([])
         cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
+        # 显式设置colorbar的colormap为新的淡蓝到深红渐变
+        cbar3.set_cmap(cmap_attn)
+        # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+        cbar3.set_ticks([attn_enhanced_min, (attn_enhanced_min + attn_enhanced_max) / 2, attn_enhanced_max])
         cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
+        # 设置colorbar刻度标签加粗
+        for label in cbar3.ax.yaxis.get_majorticklabels():
+            label.set_fontweight('bold')
         plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"    ✓ 图3 Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
@@ -1321,7 +1344,10 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     scale_factor = display_size // patch_size
     attn_upsampled = np.repeat(np.repeat(attn_values_enhanced, scale_factor, axis=0), scale_factor, axis=1)
     # 使用较低的alpha值，让原图更可见
-    im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
+    # 原来的jet colormap（深蓝到深红）已注释：
+    # im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
+    #                  vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
+    im4 = ax4.imshow(attn_upsampled, cmap=cmap_attn, alpha=0.4, interpolation='bilinear',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
     ax4.set_title(f'Attn Map Overlay - "{token_text}"', fontsize=40, fontweight='bold')  # 14 * 1.5 = 21
     ax4.axis('off')
@@ -1340,11 +1366,20 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
         ax_cbar4 = plt.subplot(1, 1, 1)
         ax_cbar4.axis('off')
         # 创建colorbar
-        sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+        # 原来的jet colormap（深蓝到深红）已注释：
+        # sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
+        sm4 = plt.cm.ScalarMappable(cmap=cmap_attn, norm=plt.Normalize(vmin=attn_enhanced_min, vmax=attn_enhanced_max))
         sm4.set_array([])
         cbar4 = plt.colorbar(sm4, ax=ax_cbar4, orientation='vertical', fraction=1.0)
+        # 显式设置colorbar的colormap为新的淡蓝到深红渐变
+        cbar4.set_cmap(cmap_attn)
+        # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+        cbar4.set_ticks([attn_enhanced_min, (attn_enhanced_min + attn_enhanced_max) / 2, attn_enhanced_max])
         cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
         cbar4.set_label('Normalized Value', fontsize=18, fontweight='bold')  # 10 * 1.2 = 12
+        # 设置colorbar刻度标签加粗
+        for label in cbar4.ax.yaxis.get_majorticklabels():
+            label.set_fontweight('bold')
         plt.savefig(output_file_cbar4, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"    ✓ 图4 Colorbar 已保存: {os.path.basename(output_file_cbar4)}")
@@ -1371,6 +1406,13 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
         global_max: 全局最大值（用于归一化）
         predicted_token_word: 该层预测的token词汇（用于文件名）
     """
+    # 创建自定义colormap：从淡蓝色到深红色渐变
+    # 原来的jet colormap（深蓝到深红）已注释：
+    # cmap_attn = 'jet'
+    colors_attn = ['#E6F3FF', '#B3D9FF', '#80BFFF', '#4DA6FF', '#FF6B6B', '#FF4757', '#FF3838', '#DC143C']
+    n_bins_attn = 256
+    cmap_attn = LinearSegmentedColormap.from_list('light_blue_to_dark_red', colors_attn, N=n_bins_attn)
+
     # 使用全局最值进行归一化
     attn_values = attention_map.copy()
 
@@ -1406,7 +1448,10 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
     # 3. 单独保存归一化后的attention map（图3）
     fig3 = plt.figure(figsize=(8, 8))
     ax3 = plt.subplot(1, 1, 1)
-    im3 = ax3.imshow(attn_values_normalized, cmap='jet', interpolation='nearest',
+    # 原来的jet colormap（深蓝到深红）已注释：
+    # im3 = ax3.imshow(attn_values_normalized, cmap='jet', interpolation='nearest',
+    #                  vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
+    im3 = ax3.imshow(attn_values_normalized, cmap=cmap_attn, interpolation='nearest',
                      vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
     ax3.set_title(f'Attn Map - "{token_text}"', fontsize=40, fontweight='bold')
     ax3.axis('off')
@@ -1425,11 +1470,20 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
         ax_cbar3 = plt.subplot(1, 1, 1)
         ax_cbar3.axis('off')
         # 创建colorbar（显示原始值范围）
-        sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
+        # 原来的jet colormap（深蓝到深红）已注释：
+        # sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
+        sm3 = plt.cm.ScalarMappable(cmap=cmap_attn, norm=plt.Normalize(vmin=global_min, vmax=global_max))
         sm3.set_array([])
         cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
+        # 显式设置colorbar的colormap为新的淡蓝到深红渐变
+        cbar3.set_cmap(cmap_attn)
+        # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+        cbar3.set_ticks([global_min, (global_min + global_max) / 2, global_max])
         cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
         cbar3.set_label('Attention Value', fontsize=18, fontweight='bold')
+        # 设置colorbar刻度标签加粗
+        for label in cbar3.ax.yaxis.get_majorticklabels():
+            label.set_fontweight('bold')
         plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"    ✓ 图3 Global Colorbar 已保存: {os.path.basename(output_file_cbar3)}")
@@ -1443,7 +1497,10 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
     scale_factor = display_size // patch_size
     attn_upsampled = np.repeat(np.repeat(attn_values_normalized, scale_factor, axis=0), scale_factor, axis=1)
     # 使用较低的alpha值，让原图更可见
-    im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
+    # 原来的jet colormap（深蓝到深红）已注释：
+    # im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
+    #                  vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
+    im4 = ax4.imshow(attn_upsampled, cmap=cmap_attn, alpha=0.4, interpolation='bilinear',
                      vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
     ax4.set_title(f'Overlay, Token: "{token_text}"', fontsize=28, fontweight='bold')
     ax4.axis('off')
@@ -1462,11 +1519,20 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
         ax_cbar4 = plt.subplot(1, 1, 1)
         ax_cbar4.axis('off')
         # 创建colorbar（显示原始值范围）
-        sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
+        # 原来的jet colormap（深蓝到深红）已注释：
+        # sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
+        sm4 = plt.cm.ScalarMappable(cmap=cmap_attn, norm=plt.Normalize(vmin=global_min, vmax=global_max))
         sm4.set_array([])
         cbar4 = plt.colorbar(sm4, ax=ax_cbar4, orientation='vertical', fraction=1.0)
+        # 显式设置colorbar的colormap为新的淡蓝到深红渐变
+        cbar4.set_cmap(cmap_attn)
+        # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+        cbar4.set_ticks([global_min, (global_min + global_max) / 2, global_max])
         cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
         cbar4.set_label('Attention Value', fontsize=18, fontweight='bold')
+        # 设置colorbar刻度标签加粗
+        for label in cbar4.ax.yaxis.get_majorticklabels():
+            label.set_fontweight('bold')
         plt.savefig(output_file_cbar4, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"    ✓ 图4 Global Colorbar 已保存: {os.path.basename(output_file_cbar4)}")
@@ -2287,7 +2353,7 @@ def _calculate_head_concentrations(layer_head_data_list, num_heads=32):
     return head_concentrations_array
 
 
-def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers=32, num_heads=32):
+def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers=32, num_heads=32, hallucinated_node_words=None, object_tokens_info=None):
     """
     为所有目标词汇生成32×32 head-layer heatmap
 
@@ -2297,6 +2363,8 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
         output_dir: 输出目录
         num_total_layers: 总层数（默认32）
         num_heads: head数量（默认32）
+        hallucinated_node_words: 幻视词汇的node_word集合（用于判断词汇颜色，None表示不区分）
+        object_tokens_info: 物体token信息字典，用于获取node_word
     """
     if not all_words_attention_data:
         return
@@ -2432,12 +2500,15 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
             ax.set_yticks(tick_indices_y + 0.5)
             ax.set_yticklabels([f'L{i+1}' for i in tick_indices_y], fontsize=40, fontweight='bold')
 
-            # 添加colorbar
-            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label('Concentration Index', fontsize=40, fontweight='bold')
-            # 设置colorbar刻度标签加粗
-            for label in cbar.ax.yaxis.get_majorticklabels():
-                label.set_fontweight('bold')
+            # 原来的colorbar（已注释，改为单独保存）：
+            # # 添加colorbar
+            # cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            # cbar.set_label('Concentration Index', fontsize=40, fontweight='bold')
+            # # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+            # cbar.set_ticks([global_min, (global_min + global_max) / 2, global_max])
+            # # 设置colorbar刻度标签加粗
+            # for label in cbar.ax.yaxis.get_majorticklabels():
+            #     label.set_fontweight('bold')
 
             # 设置坐标轴范围
             ax.set_xlim(0, num_heads)
@@ -2505,6 +2576,29 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
                 heatmap_file = os.path.join(step_output_dir, f"head_layer_heatmap_{safe_word}.png")
             plt.savefig(heatmap_file, dpi=200, bbox_inches='tight')
             plt.close()
+
+            # 单独保存colorbar和标签
+            # 检查是否已经保存过colorbar，避免重复保存
+            colorbar_file = os.path.join(step_output_dir, "head_layer_heatmap_colorbar.png")
+            if not os.path.exists(colorbar_file):
+                fig_cbar = plt.figure(figsize=(1.5, 8))
+                ax_cbar = plt.subplot(1, 1, 1)
+                ax_cbar.axis('off')
+                # 创建colorbar
+                sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=global_min, vmax=global_max))
+                sm.set_array([])
+                cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
+                cbar.set_label('Concentration Index', fontsize=40, fontweight='bold')
+                # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+                cbar.set_ticks([global_min, (global_min + global_max) / 2, global_max])
+                # 设置colorbar刻度标签字体大小和加粗（与其他标签保持一致）
+                for label in cbar.ax.yaxis.get_majorticklabels():
+                    label.set_fontsize(40)
+                    label.set_fontweight('bold')
+                # 保存colorbar
+                plt.savefig(colorbar_file, dpi=200, bbox_inches='tight')
+                plt.close()
+                print(f"  ✓ Colorbar已单独保存: {os.path.basename(colorbar_file)}")
 
             # 保存JSON文件（包含所有数据，方便后续重新生成）
             json_data = {
@@ -2757,6 +2851,10 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             # 添加colorbar
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cbar.set_label('Probability', fontsize=18, fontweight='bold')
+            # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+            vmin_prob = np.nanmin(probability_matrix)
+            vmax_prob = np.nanmax(probability_matrix)
+            cbar.set_ticks([vmin_prob, (vmin_prob + vmax_prob) / 2, vmax_prob])
             # 设置colorbar刻度标签加粗
             for label in cbar.ax.yaxis.get_majorticklabels():
                 label.set_fontweight('bold')
@@ -2910,6 +3008,8 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             sm = plt.cm.ScalarMappable(cmap='Greens', norm=plt.Normalize(vmin=vmin, vmax=vmax))
             sm.set_array([])
             cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
+            # 设置colorbar只显示3个刻度：最小值、中间值、最大值
+            cbar.set_ticks([vmin, (vmin + vmax) / 2, vmax])
             cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
             cbar.set_label('Probability', fontsize=18, fontweight='bold')
             # 设置colorbar刻度标签加粗
@@ -2959,7 +3059,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
 
 def extract_object_attention_maps(model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                                   output_ids, input_token_len, all_attentions, object_tokens_info,
-                                  image_tensor, output_dir, target_layers=None, all_hidden_states=None, outputs_text=None):
+                                  image_tensor, output_dir, target_layers=None, all_hidden_states=None, outputs_text=None, chair_info=None):
     """
     提取名词/物体token的attention map
 
@@ -3061,7 +3161,13 @@ def extract_object_attention_maps(model, tokenizer, image_processor, image_file,
     _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, output_dir, num_total_layers)
 
     # 生成32×32 head-layer heatmap
-    _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers, num_heads=32)
+    # 提取幻视词汇的node_word集合（用于判断词汇颜色）
+    hallucinated_node_words = None
+    if chair_info is not None:
+        hallucinated_words = chair_info.get('mscoco_hallucinated_words', [])
+        # 提取所有幻视词汇的node_word（规范化后的词汇）
+        hallucinated_node_words = {node_word.lower() for _, node_word in hallucinated_words}
+    _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, output_dir, num_total_layers, num_heads=32, hallucinated_node_words=hallucinated_node_words, object_tokens_info=object_tokens_info)
 
     # 生成推理步attention统计可视化
     _visualize_step_attention_statistics(
@@ -3940,7 +4046,7 @@ def eval_model(args):
                     model, tokenizer, image_processor, image_file, prompt, conv_mode, device,
                     output_ids, input_token_len, all_attentions, object_tokens_info,
                     image_tensor, image_output_dir, target_layers=target_layers,
-                    all_hidden_states=all_hidden_states, outputs_text=outputs
+                    all_hidden_states=all_hidden_states, outputs_text=outputs, chair_info=chair_info
                 )
 
                 if verbose:

@@ -16,6 +16,8 @@ import os
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.colors import LinearSegmentedColormap
 import string
 from datetime import datetime
 
@@ -161,8 +163,37 @@ def regenerate_heatmap(data, output_dir, output_filename_prefix):
     Y = np.arange(num_all_tokens + 2)
     X_grid, Y_grid = np.meshgrid(X, Y)
 
+    # 原来的绿色colormap代码（已注释）：
+    # # 创建自定义绿色colormap：类似原来的Greens，但最深的墨绿色改为中等绿色
+    # # 原来的Greens colormap（最深墨绿色太深）已注释：
+    # # cmap = 'Greens'
+    # # 使用类似Greens的颜色序列，但最深色从墨绿色改为中等绿色
+    # colors_green = ['#F7FCF5', '#E5F5E0', '#C7E9C0', '#A1D99B', '#74C476', '#41AB5D', '#238B45', '#228B22']
+    # n_bins_green = 256
+    # cmap = LinearSegmentedColormap.from_list('greens_light_to_medium', colors_green, N=n_bins_green)
+
+    # 原来的白色到蓝色渐变（已注释，改为更优雅的蓝紫色渐变）：
+    # colors_blue = ['#FFFFFF', '#E6F2FF', '#CCE5FF', '#99CCFF', '#66B2FF', '#3399FF', '#0080FF', '#0066CC']
+    # n_bins_blue = 256
+    # cmap = LinearSegmentedColormap.from_list('white_to_blue', colors_blue, N=n_bins_blue)
+
+    # 创建从白色到中等深蓝色的渐变色colormap（基于用户提供的colorbar截图）
+    # 从纯白色平滑过渡到中等深度、稍微柔和的蓝色，既专业又美观
+    colors_white_to_blue = [
+        '#FFFFFF',  # 纯白色
+        '#F0F5FF',  # 极淡蓝色
+        '#D6E5FF',  # 淡蓝色
+        '#B8D4FF',  # 浅蓝色
+        '#96C0FF',  # 中浅蓝色
+        '#6FA8FF',  # 中蓝色
+        '#4A8CFF',  # 中深蓝色
+        '#2E6FCC'   # 中等深蓝色（稍微柔和，不刺眼）
+    ]
+    n_bins_white_to_blue = 256
+    cmap = LinearSegmentedColormap.from_list('white_to_medium_blue', colors_white_to_blue, N=n_bins_white_to_blue)
+
     # 绘制heatmap
-    im = ax.pcolormesh(X_grid, Y_grid, probability_extended, cmap='Greens',
+    im = ax.pcolormesh(X_grid, Y_grid, probability_extended, cmap=cmap,
                        edgecolors='white', linewidths=2.0,
                        vmin=vmin, vmax=vmax,
                        shading='flat')
@@ -233,7 +264,9 @@ def regenerate_heatmap(data, output_dir, output_filename_prefix):
     # ax_cbar = plt.subplot(1, 1, 1)
     # ax_cbar.axis('off')
     # # 创建colorbar
-    # sm = plt.cm.ScalarMappable(cmap='Greens', norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    # # 原来的Greens colormap（最深绿色太深）已注释：
+    # # sm = plt.cm.ScalarMappable(cmap='Greens', norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    # sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
     # sm.set_array([])
     # cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
     # cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
