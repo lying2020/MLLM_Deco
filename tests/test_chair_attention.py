@@ -1111,7 +1111,7 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
                        shading='flat')
 
     # 设置坐标轴
-    ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')
+    ax.set_xlabel('Transformer Layers', fontsize=18, fontweight='bold')
     ax.set_ylabel('Top 5 Rank', fontsize=18, fontweight='bold')
     ax.set_title(f'Top 5 Probability Heatmap - Step {step_idx+1}',
                  fontsize=18, fontweight='bold')
@@ -1168,6 +1168,9 @@ def visualize_top5_logits_heatmap(layer_lm_head_outputs, output_dir, step_idx, n
     # 添加colorbar
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label('Probability', fontsize=18, fontweight='bold')
+    # 设置colorbar刻度标签加粗
+    for label in cbar.ax.yaxis.get_majorticklabels():
+        label.set_fontweight('bold')
 
     # 设置坐标轴范围，确保显示所有单元格
     ax.set_xlim(0, num_layers)
@@ -1284,7 +1287,7 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     ax3 = plt.subplot(1, 1, 1)
     im3 = ax3.imshow(attn_values_enhanced, cmap='jet', interpolation='nearest',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
-    ax3.set_title(f'Attention Map, Token: "{token_text}"', fontsize=21, fontweight='bold')  # 14 * 1.5 = 21
+    ax3.set_title(f'Attn Map - "{token_text}"', fontsize=40, fontweight='bold')  # 14 * 1.5 = 21
     ax3.axis('off')
     # 保存图3
     filename_parts_3 = filename_base + ["attention_map.png"]
@@ -1320,7 +1323,7 @@ def visualize_object_attention_map(attention_map, image, layer_idx, step_idx, to
     # 使用较低的alpha值，让原图更可见
     im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
                      vmin=attn_enhanced_min, vmax=attn_enhanced_max, extent=unified_extent, aspect='equal')
-    ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=21, fontweight='bold')  # 14 * 1.5 = 21
+    ax4.set_title(f'Attn Map Overlay - "{token_text}"', fontsize=40, fontweight='bold')  # 14 * 1.5 = 21
     ax4.axis('off')
     # 保存图4（使用前缀）
     filename_parts_4 = filename_base + ["attention_map_overlay.png"]
@@ -1405,7 +1408,7 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
     ax3 = plt.subplot(1, 1, 1)
     im3 = ax3.imshow(attn_values_normalized, cmap='jet', interpolation='nearest',
                      vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
-    ax3.set_title(f'Attention Map, Token: "{token_text}"', fontsize=21, fontweight='bold')
+    ax3.set_title(f'Attn Map - "{token_text}"', fontsize=40, fontweight='bold')
     ax3.axis('off')
     # 保存图3
     filename_parts_3 = filename_base + ["attention_map.png"]
@@ -1425,7 +1428,7 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
         sm3 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
         sm3.set_array([])
         cbar3 = plt.colorbar(sm3, ax=ax_cbar3, orientation='vertical', fraction=1.0)
-        cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.6e}'))
+        cbar3.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
         cbar3.set_label('Attention Value', fontsize=18, fontweight='bold')
         plt.savefig(output_file_cbar3, dpi=200, bbox_inches='tight')
         plt.close()
@@ -1442,7 +1445,7 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
     # 使用较低的alpha值，让原图更可见
     im4 = ax4.imshow(attn_upsampled, cmap='jet', alpha=0.4, interpolation='bilinear',
                      vmin=0.0, vmax=1.0, extent=unified_extent, aspect='equal')
-    ax4.set_title(f'Attention Map Overlay, Token: "{token_text}"', fontsize=21, fontweight='bold')
+    ax4.set_title(f'Overlay, Token: "{token_text}"', fontsize=28, fontweight='bold')
     ax4.axis('off')
     # 保存图4（使用前缀）
     filename_parts_4 = filename_base + ["attention_map_overlay.png"]
@@ -1462,7 +1465,7 @@ def visualize_object_attention_map_global(attention_map, image, layer_idx, step_
         sm4 = plt.cm.ScalarMappable(cmap='jet', norm=plt.Normalize(vmin=global_min, vmax=global_max))
         sm4.set_array([])
         cbar4 = plt.colorbar(sm4, ax=ax_cbar4, orientation='vertical', fraction=1.0)
-        cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.6e}'))
+        cbar4.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
         cbar4.set_label('Attention Value', fontsize=18, fontweight='bold')
         plt.savefig(output_file_cbar4, dpi=200, bbox_inches='tight')
         plt.close()
@@ -2390,11 +2393,17 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
             Y = np.arange(num_total_layers + 2)
             X_grid, Y_grid = np.meshgrid(X, Y)
 
-            # 使用淡黄到深橙色的colormap
-            # 创建自定义colormap：从淡黄色到深橙色
-            colors = ['#FFF8DC', '#FFE4B5', '#FFD700', '#FFA500', '#FF8C00', '#FF7F50', '#FF6347', '#FF4500']
+            # 使用白色到爱马仕橙色的colormap
+            # 创建自定义colormap：从白色到爱马仕橙色
+            # 原来的橙色方案（已注释）：
+            # colors = ['#FFF8DC', '#FFE4B5', '#FFD700', '#FFA500', '#FF8C00', '#FF7F50', '#FF6347', '#FF4500']
+            # cmap = LinearSegmentedColormap.from_list('yellow_to_orange', colors, N=n_bins)
+            # 原来的紫色方案（已注释）：
+            # colors = ['#F3E5F5', '#E1BEE7', '#CE93D8', '#BA68C8', '#AB47BC', '#9C27B0', '#8E24AA', '#7B1FA2']
+            # cmap = LinearSegmentedColormap.from_list('light_to_dark_purple', colors, N=n_bins)
+            colors = ['#FFFFFF', '#FFF4E6', '#FFE8CC', '#FFD9B3', '#FFCC99', '#FFB366', '#FF9933', '#FF6600']
             n_bins = 256
-            cmap = LinearSegmentedColormap.from_list('yellow_to_orange', colors, N=n_bins)
+            cmap = LinearSegmentedColormap.from_list('white_to_hermes_orange', colors, N=n_bins)
 
             im = ax.pcolormesh(X_grid, Y_grid, heatmap_extended, cmap=cmap,
                                edgecolors='white', linewidths=0.5,
@@ -2402,31 +2411,33 @@ def _visualize_head_layer_heatmaps(step_target_words, all_words_attention_data, 
                                shading='flat')
 
             # 设置坐标轴
-            ax.set_xlabel('Head Index', fontsize=18, fontweight='bold')
-            ax.set_ylabel('Layer Index', fontsize=18, fontweight='bold')
+            ax.set_xlabel('Attention Heads', fontsize=40, fontweight='bold')
+            ax.set_ylabel('Transformer Layers', fontsize=40, fontweight='bold')
 
             # 标题
-            if len(token_groups) > 1:
-                title = f'Head-Layer Attention Heatmap - {word}, Group {group_idx+1}'
-            else:
-                title = f'Head-Layer Attention Heatmap - {word}'
-            ax.set_title(title, fontsize=18, fontweight='bold')
+            title = f'Attn Heatmap - "{word}"'
+            ax.set_title(title, fontsize=40, fontweight='bold', pad=10)
 
             # 设置x轴刻度（head索引）
             num_ticks_x = 8
-            tick_indices_x = np.linspace(0, num_heads - 1, num_ticks_x, dtype=int)
+            # tick_indices_x = np.linspace(0, num_heads - 1, num_ticks_x, dtype=int)
+            tick_indices_x = np.array([0, 15, 31])
             ax.set_xticks(tick_indices_x + 0.5)
-            ax.set_xticklabels([f'H{i}' for i in tick_indices_x], fontsize=15, fontweight='bold')
+            ax.set_xticklabels([f'H{i+1}' for i in tick_indices_x], fontsize=40, fontweight='bold')
 
             # 设置y轴刻度（层索引）
             num_ticks_y = 8
-            tick_indices_y = np.linspace(0, num_total_layers - 1, num_ticks_y, dtype=int)
+            # tick_indices_y = np.linspace(0, num_total_layers - 1, num_ticks_y, dtype=int)
+            tick_indices_y = np.array([0, 15, 31])
             ax.set_yticks(tick_indices_y + 0.5)
-            ax.set_yticklabels([f'L{i}' for i in tick_indices_y], fontsize=15, fontweight='bold')
+            ax.set_yticklabels([f'L{i+1}' for i in tick_indices_y], fontsize=40, fontweight='bold')
 
             # 添加colorbar
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label('Concentration Index', fontsize=18, fontweight='bold')
+            cbar.set_label('Concentration Index', fontsize=40, fontweight='bold')
+            # 设置colorbar刻度标签加粗
+            for label in cbar.ax.yaxis.get_majorticklabels():
+                label.set_fontweight('bold')
 
             # 设置坐标轴范围
             ax.set_xlim(0, num_heads)
@@ -2683,7 +2694,7 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                shading='flat')
 
             # 设置坐标轴
-            ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')
+            ax.set_xlabel('Transformer Layers', fontsize=18, fontweight='bold')
             # ax.set_ylabel('Token Index', fontsize=18, fontweight='bold')
 
             # 标题：如果有多个group，在标题中标注group信息
@@ -2695,13 +2706,14 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
 
             # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗
             num_ticks = 6
-            tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
+            # tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
+            tick_indices = np.array([0, 7, 15, 23, 31])
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=15, fontweight='bold')
+            ax.set_xticklabels([f'L{i+1}' for i in tick_indices], fontsize=18, fontweight='bold')
 
             # 设置y轴刻度（token）
             ax.set_yticks(np.arange(num_tokens) + 0.5)
-            ax.set_yticklabels(token_labels, fontsize=15, fontweight='bold')
+            ax.set_yticklabels(token_labels, fontsize=18, fontweight='bold')
 
             # 在每个单元格中心标注token文本（词汇），而不是概率值
             for row_idx in range(num_tokens):
@@ -2745,6 +2757,9 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             # 添加colorbar
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cbar.set_label('Probability', fontsize=18, fontweight='bold')
+            # 设置colorbar刻度标签加粗
+            for label in cbar.ax.yaxis.get_majorticklabels():
+                label.set_fontweight('bold')
 
             # 设置坐标轴范围
             ax.set_xlim(0, num_total_layers)
@@ -2818,20 +2833,21 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
                                shading='flat')
 
             # 设置坐标轴（增大到1.5倍）
-            ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
+            ax.set_xlabel('Transformer Layers', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
             ax.set_ylabel('Token Index', fontsize=18, fontweight='bold')  # 12 * 1.5 = 18
-            ax.set_title(f'Rank1 Probability Heatmap - All Words ({num_all_tokens} tokens)',
-                         fontsize=18, fontweight='bold')
+            ax.set_title(f'Rank1 Probability Heatmap - All Instances ({num_all_tokens} tokens)',
+                         fontsize=18, fontweight='bold', pad=10)
 
             # 设置x轴刻度（层索引）- 只显示6个刻度，并加粗（增大到1.5倍）
             num_ticks = 6
-            tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
+            # tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
+            tick_indices = np.array([0, 7, 15, 23, 31])
             ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=15, fontweight='bold')  # 8 * 1.5 = 12
+            ax.set_xticklabels([f'L{i+1}' for i in tick_indices], fontsize=18, fontweight='bold')  # 8 * 1.5 = 12
 
             # 设置y轴刻度（token）- 加粗并增大到1.5倍
             ax.set_yticks(np.arange(num_all_tokens) + 0.5)
-            ax.set_yticklabels(all_token_labels, fontsize=15, fontweight='bold')  # 9 * 1.5 = 13.5，约14
+            ax.set_yticklabels(all_token_labels, fontsize=18, fontweight='bold')  # 9 * 1.5 = 13.5，约14
 
             # 在每个单元格中心标注token文本（词汇），而不是概率值
             for row_idx in range(num_all_tokens):
@@ -2894,8 +2910,11 @@ def _generate_rank1_heatmaps_for_words(step_target_words, step_lm_head_outputs, 
             sm = plt.cm.ScalarMappable(cmap='Greens', norm=plt.Normalize(vmin=vmin, vmax=vmax))
             sm.set_array([])
             cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
-            cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
+            cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
             cbar.set_label('Probability', fontsize=18, fontweight='bold')
+            # 设置colorbar刻度标签加粗
+            for label in cbar.ax.yaxis.get_majorticklabels():
+                label.set_fontweight('bold')
             # 保存colorbar和标签
             combined_colorbar_file = os.path.join(output_dir, "rank1_probability_heatmap_all_words_colorbar.png")
             plt.savefig(combined_colorbar_file, dpi=200, bbox_inches='tight')
@@ -3272,7 +3291,7 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     # 创建heatmap：x轴是推理步，y轴是层索引（转置后：行=层，列=推理步）
     im4 = ax4.imshow(step_att_visual.T, aspect='auto', cmap='YlOrRd', interpolation='nearest')
     ax4.set_xlabel('Generation Step', fontsize=12, fontweight='bold')
-    ax4.set_ylabel('Layer Index', fontsize=12, fontweight='bold')
+    ax4.set_ylabel('Transformer Layers', fontsize=12, fontweight='bold')
     ax4.set_title('Visual Attention per Step and Layer\n(att_visual)', fontsize=14, fontweight='bold')
     ax4.set_yticks(np.arange(num_total_layers))
     ax4.set_yticklabels([f'L{i}' for i in range(num_total_layers)], fontsize=8)
@@ -3285,7 +3304,7 @@ def _visualize_step_attention_statistics(all_attentions, image_token_start, num_
     # 创建heatmap：x轴是推理步，y轴是层索引（转置后：行=层，列=推理步）
     im5 = ax5.imshow(step_att_all.T, aspect='auto', cmap='Blues', interpolation='nearest')
     ax5.set_xlabel('Generation Step', fontsize=12, fontweight='bold')
-    ax5.set_ylabel('Layer Index', fontsize=12, fontweight='bold')
+    ax5.set_ylabel('Transformer Layers', fontsize=12, fontweight='bold')
     ax5.set_title('All Attention per Step and Layer\n(att_all)', fontsize=14, fontweight='bold')
     ax5.set_yticks(np.arange(num_total_layers))
     ax5.set_yticklabels([f'L{i}' for i in range(num_total_layers)], fontsize=8)
@@ -4131,7 +4150,7 @@ def main():
         "max_new_tokens": 512,  # CHAIR 需要详细描述
         "num_beams": 1,
         "num_samples": 0,  # 默认只处理1个图像（用于测试 attention map）
-        "single_image_id": None,  # 13348,  # 6153,  # 6153
+        "single_image_id": 569839,  # 13348,  # 6153,  # 6153
         "seed": 42,
         "extract_object_attention": True,  # 默认启用物体 attention map 提取
         "target_layers": [15, 17, 23, 29, 31]  # 默认只处理偶数层（减少输出）

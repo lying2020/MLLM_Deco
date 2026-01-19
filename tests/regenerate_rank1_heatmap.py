@@ -168,20 +168,20 @@ def regenerate_heatmap(data, output_dir, output_filename_prefix):
                        shading='flat')
 
     # 设置坐标轴
-    ax.set_xlabel('Layer Index', fontsize=18, fontweight='bold')
+    ax.set_xlabel('Transformer Layers', fontsize=18, fontweight='bold')
     ax.set_ylabel('Token Index', fontsize=18, fontweight='bold')
-    ax.set_title(f'Rank1 Probability Heatmap - All Words ({num_all_tokens} tokens)',
-                 fontsize=18, fontweight='bold')
+    ax.set_title(f'Rank1 Probability Heatmap - All Instances ({num_all_tokens} tokens)',
+                 fontsize=18, fontweight='bold', pad=10)
 
-    # 设置x轴刻度（层索引）- 只显示6个刻度
+    # 设置x轴刻度（层索引）- 只显示6个刻度，索引从1开始（1到32）
     num_ticks = 6
-    tick_indices = np.linspace(0, num_total_layers - 1, num_ticks, dtype=int)
+    tick_indices = np.array([0, 7, 15, 23, 31])
     ax.set_xticks(tick_indices + 0.5)
-    ax.set_xticklabels([f'L{i}' for i in tick_indices], fontsize=15, fontweight='bold')
+    ax.set_xticklabels([f'L{i+1}' for i in tick_indices], fontsize=18, fontweight='bold')
 
     # 设置y轴刻度（token）
     ax.set_yticks(np.arange(num_all_tokens) + 0.5)
-    ax.set_yticklabels(all_token_labels, fontsize=15, fontweight='bold')
+    ax.set_yticklabels(all_token_labels, fontsize=18, fontweight='bold')
 
     # 在每个单元格中心标注token文本（词汇）
     for row_idx in range(num_all_tokens):
@@ -224,7 +224,7 @@ def regenerate_heatmap(data, output_dir, output_filename_prefix):
     ax.set_ylim(0, num_all_tokens)
 
     # 保存heatmap
-    combined_heatmap_file = os.path.join(output_dir, f"{output_filename_prefix}_heatmap.png")
+    combined_heatmap_file = os.path.join(output_dir, f"{output_filename_prefix}.png")
     plt.savefig(combined_heatmap_file, dpi=200, bbox_inches='tight')
     plt.close()
 
