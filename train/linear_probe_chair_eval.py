@@ -86,13 +86,63 @@ class LinearProbeManager:
         model_dir = Path(self.model_dir)
 
         loaded_count = 0
+        detected_hidden_dim = None
+        detected_use_dropout = None
+
+        # 首先尝试检测模型架构（从第一个存在的模型文件）
         for layer_idx in range(self.num_layers):
             for head_idx in range(self.num_heads):
                 key = f"layer_{layer_idx}_head_{head_idx}"
                 model_path = model_dir / f"{key}.pth"
 
                 if model_path.exists():
-                    probe = LinearProbe(input_dim=self.input_dim, hidden_dim=None, use_dropout=False)
+                    # 加载state_dict来检测架构
+                    state_dict = torch.load(model_path, map_location=self.device)
+
+                    # 检测架构类型
+                    if "linear.weight" in state_dict:
+                        # 简单线性映射架构
+                        detected_hidden_dim = None
+                        detected_use_dropout = False
+                    elif "fc1.weight" in state_dict:
+                        # 有隐藏层的架构
+                        # 从fc1.weight的形状推断hidden_dim
+                        fc1_weight_shape = state_dict["fc1.weight"].shape
+                        detected_hidden_dim = fc1_weight_shape[0]  # [hidden_dim, input_dim]
+                        # 检测是否有dropout（通过检查是否有dropout层，但通常dropout不保存参数）
+                        # 这里假设如果有fc2，则可能有dropout，但dropout参数不保存在state_dict中
+                        # 我们默认不使用dropout，因为dropout在eval模式下不影响
+                        detected_use_dropout = False
+                    else:
+                        # 未知架构，使用默认
+                        detected_hidden_dim = None
+                        detected_use_dropout = False
+
+                    print(f"✓ 检测到模型架构: hidden_dim={detected_hidden_dim}, use_dropout={detected_use_dropout}")
+                    break
+
+            if detected_hidden_dim is not None or detected_use_dropout is not None:
+                break
+
+        # 如果没找到任何模型，使用默认架构
+        if detected_hidden_dim is None and detected_use_dropout is None:
+            detected_hidden_dim = None
+            detected_use_dropout = False
+            print(f"⚠️  未找到模型文件，将使用默认架构: hidden_dim=None")
+
+        # 加载所有模型
+        for layer_idx in range(self.num_layers):
+            for head_idx in range(self.num_heads):
+                key = f"layer_{layer_idx}_head_{head_idx}"
+                model_path = model_dir / f"{key}.pth"
+
+                if model_path.exists():
+                    # 使用检测到的架构创建probe
+                    probe = LinearProbe(
+                        input_dim=self.input_dim,
+                        hidden_dim=detected_hidden_dim,
+                        use_dropout=detected_use_dropout
+                    )
                     probe.load_state_dict(torch.load(model_path, map_location=self.device))
                     probe.to(self.device)
                     probe.eval()
@@ -100,7 +150,12 @@ class LinearProbeManager:
                     loaded_count += 1
                 else:
                     # 如果模型不存在，创建一个默认的probe（输出0，即权重为1）
-                    probe = LinearProbe(input_dim=self.input_dim, hidden_dim=None, use_dropout=False)
+                    # 使用检测到的架构（如果已检测到），否则使用简单架构
+                    probe = LinearProbe(
+                        input_dim=self.input_dim,
+                        hidden_dim=detected_hidden_dim if detected_hidden_dim is not None else None,
+                        use_dropout=detected_use_dropout if detected_use_dropout is not None else False
+                    )
                     probe.to(self.device)
                     probe.eval()
                     self.probes[(layer_idx, head_idx)] = probe
@@ -132,7 +187,13 @@ class LinearProbeManager:
         with torch.no_grad():
             if head_vector.dim() == 1:
                 head_vector = head_vector.unsqueeze(0)
-            head_vector = head_vector.to(self.device)
+
+            # 获取 probe 的参数数据类型（通常是 float32）
+            # 从第一个参数获取 dtype
+            probe_dtype = next(probe.parameters()).dtype
+
+            # 将 head_vector 转换为与 probe 相同的数据类型和设备
+            head_vector = head_vector.to(device=self.device, dtype=probe_dtype)
 
             # LinearProbe 输出经过 tanh，范围在 [-1, 1]
             # 直接使用输出作为 lambda（已经是 tanh 的结果）
@@ -140,7 +201,7 @@ class LinearProbeManager:
             if output.size(0) == 1:
                 lambda_value = output.cpu().item()
             else:
-                lambda_value = output.cpu()
+                lambda_value = output.cpu().item() if output.numel() == 1 else output.cpu()
 
             return lambda_value
 
@@ -1315,7 +1376,9 @@ def main():
         "device": device,
         "coco_root": project.coco_data_path,  # 需要根据实际情况修改
         "image_id_list_file": "pope_coco/coco_baseline_500.json",
-        "use_deco": True,
+        "use_linear_probe": True,
+        "linear_probe_dir": "train/ckpt/coco_train_200_generate_spp_gt_pair_np_log",
+        "use_deco": False,
         "alpha": 0.6,
         "threshold_top_p": 0.9,
         "threshold_top_k": 20,
@@ -1375,10 +1438,10 @@ def main():
                        help="允许早退的结束层索引")
 
     # Linear Probe 参数
-    parser.add_argument("--use-linear-probe", action="store_true", default=False,
+    parser.add_argument("--use-linear-probe", default=default_config["use_linear_probe"],
                        help="启用 Linear Probe 网络进行加权(默认: False)")
-    parser.add_argument("--linear-probe-dir", type=str, default=None,
-                       help="Linear Probe 模型保存目录(例如: ./train/ckpt/)")
+    parser.add_argument("--linear-probe-dir", type=str, default=default_config["linear_probe_dir"],
+                       help="Linear Probe 模型保存目录(例如: train/ckpt/)")
 
     # 其他参数
     parser.add_argument("--seed", type=int, default=default_config["seed"], help="随机种子")
@@ -1398,11 +1461,91 @@ def main():
     output_dir = os.path.join(project_root, "results", "chair")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 如果使用 Deco, 需要同时运行 vanilla 版本进行对比
+    # 如果使用 Linear Probe, 需要同时运行 vanilla 版本进行对比
     vanilla_output_file = None
     vanilla_results = None
 
-    if args.use_deco:
+    if args.use_linear_probe:
+        print("\n" + "=" * 80)
+        print("检测到使用 Linear Probe, 将同时运行 Vanilla 版本进行对比")
+        print("=" * 80)
+
+        # 先运行 Linear Probe 版本
+        print("\n" + "-" * 80)
+        print("[1/2] 先运行 Linear Probe 版本")
+        print("-" * 80)
+        if args.output_file is None:
+            args.output_file = os.path.join(output_dir, f"chair_captions_linear_probe_{timestamp}.jsonl")
+
+        eval_model(args)
+
+        # 再运行 Vanilla 版本（不使用 linear probe）
+        print("\n" + "-" * 80)
+        print("[2/2] 再运行 Vanilla 版本（不使用 Linear Probe）")
+        print("-" * 80)
+        vanilla_args = argparse.Namespace(**vars(args))
+        vanilla_args.use_linear_probe = False
+
+        vanilla_args.output_file = os.path.join(output_dir, f"chair_captions_vanilla_{timestamp}.jsonl")
+        vanilla_args.auto_evaluate = args.auto_evaluate
+
+        eval_model(vanilla_args)
+        vanilla_output_file = vanilla_args.output_file
+
+        # 如果两个版本都完成了评估, 进行对比
+        if vanilla_args.auto_evaluate and args.auto_evaluate:
+            print("\n" + "=" * 80)
+            print("对比 Linear Probe vs Vanilla")
+            print("=" * 80)
+
+            # 加载两个版本的结果
+            vanilla_results_file = vanilla_output_file.replace('.jsonl', '_chair_results.json')
+            linear_probe_results_file = args.output_file.replace('.jsonl', '_chair_results.json')
+
+            if os.path.exists(vanilla_results_file) and os.path.exists(linear_probe_results_file):
+                with open(vanilla_results_file, 'r', encoding='utf-8') as f:
+                    vanilla_results = json.load(f)
+                with open(linear_probe_results_file, 'r', encoding='utf-8') as f:
+                    linear_probe_results = json.load(f)
+
+                # 生成对比 JSON 文件(CHAIRs/CHAIRi 不一致的 case)
+                comparison_file = args.output_file.replace('.jsonl', '_comparison.json')
+                comparison_result = compare_deco_vs_vanilla(
+                    deco_results=linear_probe_results,
+                    vanilla_results=vanilla_results,
+                    deco_captions_file=args.output_file,
+                    vanilla_captions_file=vanilla_output_file,
+                    output_file=comparison_file
+                )
+
+                # 保存两个方法都出现幻视的 error 例子
+                both_hallucinated_file = args.output_file.replace('.jsonl', '_both_hallucinated_errors.json')
+                both_hallucinated_result = save_both_hallucinated_errors(
+                    deco_results=linear_probe_results,
+                    vanilla_results=vanilla_results,
+                    deco_captions_file=args.output_file,
+                    vanilla_captions_file=vanilla_output_file,
+                    output_file=both_hallucinated_file
+                )
+
+                # 打印对比表格
+                print("\n" + "=" * 80)
+                print("Linear Probe vs Vanilla 对比")
+                print("=" * 80)
+                print_comparison_table(deco_results=linear_probe_results, vanilla_results=vanilla_results)
+
+                print(f"\n✓ 对比结果已保存到: {comparison_file}")
+                print(f"  - 总样本数: {comparison_result['summary']['total_cases']}")
+                print(f"  - CHAIRs/CHAIRi 不一致样本数: {comparison_result['summary']['inconsistent_cases']}")
+                print(f"  - 不一致率: {comparison_result['summary']['inconsistency_rate']:.2%}")
+
+                print(f"\n✓ 两个方法都出现幻视的错误例子已保存到: {both_hallucinated_file}")
+                print(f"  - 总样本数: {both_hallucinated_result['summary']['total_cases']}")
+                print(f"  - 都出现幻视的样本数: {both_hallucinated_result['summary']['both_hallucinated_cases']}")
+                print(f"  - 都出现幻视的比例: {both_hallucinated_result['summary']['both_hallucinated_rate']:.2%}")
+            else:
+                print("⚠️  无法找到评估结果文件, 跳过对比")
+    elif args.use_deco:
         print("\n" + "=" * 80)
         print("检测到使用 Deco, 将同时运行 Vanilla 版本进行对比")
         print("=" * 80)

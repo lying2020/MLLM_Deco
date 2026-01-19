@@ -14,9 +14,112 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import TwoSlopeNorm, Normalize
 from pathlib import Path
 import argparse
+
+
+class CompressedCenterNorm(Normalize):
+    """
+    自定义归一化类，压缩中心区域 [-0.5, 0.5] 的色域，扩展两端区域的色域
+
+    映射规则：
+    - [-1.0, -0.5] -> [0.0, 0.4] (占用40%的色域)
+    - [-0.5, 0.5] -> [0.4, 0.6] (占用20%的色域，压缩)
+    - [0.5, 1.0] -> [0.6, 1.0] (占用40%的色域)
+
+    这样使得 [-0.5, 0.5] 范围内的颜色变化更快，而两端的颜色变化更慢，
+    从而在二值化热力图中，> 0.5 或 < -0.5 的像素点颜色差异更明显。
+    """
+    def __init__(self, vmin=-1.0, vmax=1.0, clip=False):
+        super().__init__(vmin=vmin, vmax=vmax, clip=clip)
+        # 定义分段点
+        self.threshold_low = -0.5
+        self.threshold_high = 0.5
+
+        # 定义颜色索引映射范围
+        # [-1.0, -0.5] -> [0.0, 0.4]
+        # [-0.5, 0.5] -> [0.4, 0.6]
+        # [0.5, 1.0] -> [0.6, 1.0]
+        self.idx_low_end = 0.4
+        self.idx_high_start = 0.6
+
+    def __call__(self, value, clip=None):
+        if clip is None:
+            clip = self.clip
+
+        # 将输入值转换为numpy数组
+        is_scalar = not isinstance(value, np.ndarray)
+        if is_scalar:
+            value = np.array([value])
+
+        # 处理NaN值
+        mask_valid = ~np.isnan(value)
+        if not mask_valid.any():
+            if is_scalar:
+                return np.nan
+            return np.full_like(value, np.nan, dtype=float)
+
+        # 创建结果数组
+        result = np.zeros_like(value, dtype=float)
+
+        # 裁剪到有效范围
+        if clip:
+            value = np.clip(value, self.vmin, self.vmax)
+
+        # 分段映射
+        # 第一段: [-1.0, -0.5] -> [0.0, 0.4]
+        mask1 = (value <= self.threshold_low) & mask_valid
+        if mask1.any():
+            # 线性映射: value从[-1.0, -0.5]映射到[0.0, 0.4]
+            result[mask1] = 0.0 + (value[mask1] - self.vmin) / (self.threshold_low - self.vmin) * self.idx_low_end
+
+        # 第二段: [-0.5, 0.5] -> [0.4, 0.6]
+        mask2 = (value > self.threshold_low) & (value <= self.threshold_high) & mask_valid
+        if mask2.any():
+            # 线性映射: value从[-0.5, 0.5]映射到[0.4, 0.6]
+            result[mask2] = self.idx_low_end + (value[mask2] - self.threshold_low) / (self.threshold_high - self.threshold_low) * (self.idx_high_start - self.idx_low_end)
+
+        # 第三段: [0.5, 1.0] -> [0.6, 1.0]
+        mask3 = (value > self.threshold_high) & mask_valid
+        if mask3.any():
+            # 线性映射: value从[0.5, 1.0]映射到[0.6, 1.0]
+            result[mask3] = self.idx_high_start + (value[mask3] - self.threshold_high) / (self.vmax - self.threshold_high) * (1.0 - self.idx_high_start)
+
+        # 处理NaN值
+        result[~mask_valid] = np.nan
+
+        # 确保结果在 [0, 1] 范围内
+        result = np.clip(result, 0.0, 1.0)
+
+        # 如果是标量输入，返回标量
+        if is_scalar:
+            return result[0]
+        return result
+
+    def inverse(self, value):
+        """
+        反向映射：从颜色索引 [0, 1] 映射回原始值 [-1.0, 1.0]
+        """
+        value = np.asarray(value)
+        result = np.zeros_like(value, dtype=float)
+
+        # 第一段: [0.0, 0.4] -> [-1.0, -0.5]
+        mask1 = value <= self.idx_low_end
+        if mask1.any():
+            result[mask1] = self.vmin + (value[mask1] - 0.0) / self.idx_low_end * (self.threshold_low - self.vmin)
+
+        # 第二段: [0.4, 0.6] -> [-0.5, 0.5]
+        mask2 = (value > self.idx_low_end) & (value <= self.idx_high_start)
+        if mask2.any():
+            result[mask2] = self.threshold_low + (value[mask2] - self.idx_low_end) / (self.idx_high_start - self.idx_low_end) * (self.threshold_high - self.threshold_low)
+
+        # 第三段: [0.6, 1.0] -> [0.5, 1.0]
+        mask3 = value > self.idx_high_start
+        if mask3.any():
+            result[mask3] = self.threshold_high + (value[mask3] - self.idx_high_start) / (1.0 - self.idx_high_start) * (self.vmax - self.threshold_high)
+
+        return result
 
 
 def load_heatmap_data(json_path: str) -> tuple:
@@ -79,40 +182,58 @@ def plot_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, num_heads:
     fig, ax = plt.subplots(figsize=(12, 12))
 
     # 创建自定义colormap：深蓝 -> 白色 -> 深绿
-    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
     colors = ['#000080', '#4169E1', '#87CEEB', '#FFFFFF', '#90EE90', '#228B22', '#006400']
     n_bins = 256
     cmap = mcolors.LinearSegmentedColormap.from_list('blue_white_green', colors, N=n_bins)
 
-    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
-    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+    # 使用 CompressedCenterNorm 压缩中心区域色域，扩展两端色域
+    # 这样使得 [-0.5, 0.5] 范围内的颜色变化更快，而两端的颜色变化更慢
+    norm = CompressedCenterNorm(vmin=-1.0, vmax=1.0)
 
     # 绘制热力图（反转y轴，使layer 1在底部，layer 32在顶部）
+    # extent设置为[0.5, num_heads+0.5, 0.5, num_layers+0.5]，使得第(i,j)个像素的中心在(i+1, j+1)
+    # 这样x=0和y=0是边界，第0列的中心在x=1.0，第1列的中心在x=2.0，以此类推
     im = ax.imshow(heatmap_data, cmap=cmap, norm=norm, aspect='equal',
                    interpolation='nearest', origin='lower',
-                   extent=[-0.5, num_heads - 0.5, -0.5, num_layers - 0.5])
+                   extent=[0.5, num_heads + 0.5, 0.5, num_layers + 0.5])
 
     # 设置坐标轴标签
-    ax.set_xlabel('Head Index', fontsize=24, fontweight='bold')
-    ax.set_ylabel('Layer Index', fontsize=24, fontweight='bold')
-    ax.set_title('Head g_u Mean Value Heatmap', fontsize=28, fontweight='bold', pad=20)
+    ax.set_xlabel('Attention Heads', fontsize=40, fontweight='bold')
+    ax.set_ylabel('Transformer Layers', fontsize=40, fontweight='bold')
+    ax.set_title('Attention Head Suppression Score', fontsize=40, fontweight='bold', pad=30)
 
-    # 设置坐标轴范围
-    ax.set_xlim(-0.5, num_heads - 0.5)
-    ax.set_ylim(-0.5, num_layers - 0.5)
+    # 设置坐标轴范围（包含边界，使得可以显示0刻度）
+    ax.set_xlim(0, num_heads + 1.0)
+    ax.set_ylim(0, num_layers + 1.0)
 
-    # 设置刻度：只显示 [8, 16, 24, 32]
-    major_ticks = [7, 15, 23, 31]
-    major_labels = [8, 16, 24, 32]
+    # 设置刻度：原点显示 0，x 轴和 y 轴分别显示 16, 32
+    # 由于像素中心在(i+1, j+1)，所以：
+    # - 0在边界x=0
+    # - 16对应第15列中心x=16
+    # - 32对应第31列中心x=32
+    major_ticks = [0, 16, 32]
+    # x轴标签：0位置显示空字符串，避免与原点0重复
+    x_labels = ['', '16', '32']
+    # y轴标签：0位置也显示空字符串，原点0将手动添加在左下方
+    y_labels = ['', '16', '32']
 
     ax.set_xticks(major_ticks)
-    ax.set_xticklabels(major_labels, fontsize=24, fontweight='bold')
+    ax.set_xticklabels(x_labels, fontsize=40, fontweight='bold')
     ax.set_yticks(major_ticks)
-    ax.set_yticklabels(major_labels, fontsize=24, fontweight='bold')
+    ax.set_yticklabels(y_labels, fontsize=40, fontweight='bold')
 
     # 设置刻度线加粗
-    ax.tick_params(axis='x', which='major', width=2, length=6, labelsize=24)
-    ax.tick_params(axis='y', which='major', width=2, length=6, labelsize=24)
+    ax.tick_params(axis='x', which='major', width=2, length=6, labelsize=40)
+    ax.tick_params(axis='y', which='major', width=2, length=6, labelsize=40)
+
+    # 设置边框（spine）加粗并使用浅灰色
+    for spine in ax.spines.values():
+        spine.set_linewidth(3)
+        spine.set_color('#CCCCCC')  # 浅灰色
+
+    # 在原点(0, 0)的左下方手动添加"0"标签
+    ax.text(-1.0, -0.3, '0', fontsize=40, fontweight='bold',
+            ha='left', va='top', transform=ax.transData)
 
     # 隐藏次要刻度标签
     ax.set_xticks(range(num_heads), minor=True)
@@ -121,7 +242,10 @@ def plot_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, num_heads:
     # 添加colorbar（只显示 [-1.0, 0.0, 1.0] 三个刻度）
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_ticks([-1.0, 0.0, 1.0])
-    cbar.ax.tick_params(labelsize=24, width=2)
+    cbar.ax.tick_params(labelsize=28, width=2)
+    # 设置colorbar刻度标签加粗
+    for label in cbar.ax.yaxis.get_majorticklabels():
+        label.set_fontweight('bold')
 
     # 调整布局
     plt.tight_layout()
@@ -165,36 +289,56 @@ def plot_binarized_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, 
     n_bins = 256
     cmap = mcolors.LinearSegmentedColormap.from_list('blue_white_green', colors, N=n_bins)
 
-    # 使用 TwoSlopeNorm 确保在 0 处是白色中心点
-    norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+    # 使用 CompressedCenterNorm 压缩中心区域色域，扩展两端色域
+    # 这样使得 [-0.5, 0.5] 范围内的颜色变化更快，而两端的颜色变化更慢
+    # 在二值化热力图中，> 0.5 或 < -0.5 的像素点颜色差异会更明显
+    norm = CompressedCenterNorm(vmin=-1.0, vmax=1.0)
 
     # 绘制二值化热力图
+    # extent设置为[0.5, num_heads+0.5, 0.5, num_layers+0.5]，使得第(i,j)个像素的中心在(i+1, j+1)
+    # 这样x=0和y=0是边界，第0列的中心在x=1.0，第1列的中心在x=2.0，以此类推
     im = ax.imshow(binarized_data, cmap=cmap, norm=norm, aspect='equal',
                    interpolation='nearest', origin='lower',
-                   extent=[-0.5, num_heads - 0.5, -0.5, num_layers - 0.5])
+                   extent=[0.5, num_heads + 0.5, 0.5, num_layers + 0.5])
 
     # 设置坐标轴标签
-    ax.set_xlabel('Head Index', fontsize=24, fontweight='bold')
-    ax.set_ylabel('Layer Index', fontsize=24, fontweight='bold')
-    ax.set_title(f'Head g_u Mean Value Heatmap (Binarized: [{threshold_min}, {threshold_max}] → 0)',
-                 fontsize=28, fontweight='bold', pad=20)
+    ax.set_xlabel('Attention Heads', fontsize=40, fontweight='bold')
+    ax.set_ylabel('Transformer Layers', fontsize=40, fontweight='bold')
+    ax.set_title(f'Critical Attention Head Suppression Score',
+                 fontsize=40, fontweight='bold', pad=30)
 
-    # 设置坐标轴范围
-    ax.set_xlim(-0.5, num_heads - 0.5)
-    ax.set_ylim(-0.5, num_layers - 0.5)
+    # 设置坐标轴范围（包含边界，使得可以显示0刻度）
+    ax.set_xlim(0, num_heads + 1.0)
+    ax.set_ylim(0, num_layers + 1.0)
 
-    # 设置刻度：只显示 [8, 16, 24, 32]
-    major_ticks = [7, 15, 23, 31]
-    major_labels = [8, 16, 24, 32]
+    # 设置刻度：原点显示 0，x 轴和 y 轴分别显示 16, 32
+    # 由于像素中心在(i+1, j+1)，所以：
+    # - 0在边界x=0
+    # - 16对应第15列中心x=16
+    # - 32对应第31列中心x=32
+    major_ticks = [0, 16, 32]
+    # x轴标签：0位置显示空字符串，避免与原点0重复
+    x_labels = ['', '16', '32']
+    # y轴标签：0位置也显示空字符串，原点0将手动添加在左下方
+    y_labels = ['', '16', '32']
 
     ax.set_xticks(major_ticks)
-    ax.set_xticklabels(major_labels, fontsize=24, fontweight='bold')
+    ax.set_xticklabels(x_labels, fontsize=40, fontweight='bold')
     ax.set_yticks(major_ticks)
-    ax.set_yticklabels(major_labels, fontsize=24, fontweight='bold')
+    ax.set_yticklabels(y_labels, fontsize=40, fontweight='bold')
 
     # 设置刻度线加粗
-    ax.tick_params(axis='x', which='major', width=2, length=6, labelsize=24)
-    ax.tick_params(axis='y', which='major', width=2, length=6, labelsize=24)
+    ax.tick_params(axis='x', which='major', width=2, length=6, labelsize=40)
+    ax.tick_params(axis='y', which='major', width=2, length=6, labelsize=40)
+
+    # 设置边框（spine）加粗并使用浅灰色
+    for spine in ax.spines.values():
+        spine.set_linewidth(3)
+        spine.set_color('#CCCCCC')  # 浅灰色
+
+    # 在原点(0, 0)的左下方手动添加"0"标签
+    ax.text(-1.0, -0.3, '0', fontsize=40, fontweight='bold',
+            ha='left', va='top', transform=ax.transData)
 
     # 隐藏次要刻度标签
     ax.set_xticks(range(num_heads), minor=True)
@@ -203,7 +347,10 @@ def plot_binarized_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, 
     # 添加colorbar
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_ticks([-1.0, 0.0, 1.0])
-    cbar.ax.tick_params(labelsize=24, width=2)
+    cbar.ax.tick_params(labelsize=32, width=2)
+    # 设置colorbar刻度标签加粗
+    for label in cbar.ax.yaxis.get_majorticklabels():
+        label.set_fontweight('bold')
 
     # 调整布局
     plt.tight_layout()
