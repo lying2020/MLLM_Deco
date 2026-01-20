@@ -18,6 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.cm import ScalarMappable
 import string
 from datetime import datetime
 
@@ -259,28 +260,31 @@ def regenerate_heatmap(data, output_dir, output_filename_prefix):
     plt.savefig(combined_heatmap_file, dpi=200, bbox_inches='tight')
     plt.close()
 
-    # # 单独保存colorbar和标签
-    # fig_cbar = plt.figure(figsize=(1.5, 8))
-    # ax_cbar = plt.subplot(1, 1, 1)
-    # ax_cbar.axis('off')
-    # # 创建colorbar
-    # # 原来的Greens colormap（最深绿色太深）已注释：
-    # # sm = plt.cm.ScalarMappable(cmap='Greens', norm=plt.Normalize(vmin=vmin, vmax=vmax))
-    # sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
-    # sm.set_array([])
-    # cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
-    # cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
-    # cbar.set_label('Probability', fontsize=18, fontweight='bold')
-    # # 保存colorbar
-    # combined_colorbar_file = os.path.join(output_dir, f"{output_filename_prefix}_colorbar.png")
-    # plt.savefig(combined_colorbar_file, dpi=200, bbox_inches='tight')
-    # plt.close()
+    # 单独保存colorbar和标签
+    fig_cbar = plt.figure(figsize=(1.5, 8))
+    ax_cbar = plt.subplot(1, 1, 1)
+    ax_cbar.axis('off')
+    # 创建colorbar，使用相同的cmap和norm确保颜色一致
+    sm = ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
+    cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
+    cbar.set_label('Probability', fontsize=18, fontweight='bold')
+    # 设置colorbar刻度标签字体大小
+    cbar.ax.tick_params(labelsize=18)
+    # 设置colorbar刻度标签加粗
+    for label in cbar.ax.yaxis.get_majorticklabels():
+        label.set_fontweight('bold')
+    # 保存colorbar
+    combined_colorbar_file = os.path.join(output_dir, f"{output_filename_prefix}_colorbar.png")
+    plt.savefig(combined_colorbar_file, dpi=200, bbox_inches='tight')
+    plt.close()
 
     # 打印统计信息
     valid_count = np.sum(~np.isnan(all_probability_matrix))
     total_count = num_all_tokens * num_total_layers
     print(f"  ✓ Rank1 Probability Heatmap已重新生成: {os.path.basename(combined_heatmap_file)}")
-    # print(f"  ✓ Colorbar和标签已重新生成: {os.path.basename(combined_colorbar_file)}")
+    print(f"  ✓ Colorbar和标签已重新生成: {os.path.basename(combined_colorbar_file)}")
     print(f"    有效值数量: {valid_count}/{total_count}")
     print(f"    概率值范围: [{all_valid_probabilities.min():.4f}, {all_valid_probabilities.max():.4f}]")
 

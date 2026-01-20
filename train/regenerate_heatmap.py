@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import TwoSlopeNorm, Normalize
+from matplotlib.cm import ScalarMappable
 from pathlib import Path
 import argparse
 
@@ -239,22 +240,32 @@ def plot_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, num_heads:
     ax.set_xticks(range(num_heads), minor=True)
     ax.set_yticks(range(num_layers), minor=True)
 
-    # 添加colorbar（只显示 [-1.0, 0.0, 1.0] 三个刻度）
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    # 调整布局
+    plt.tight_layout()
+
+    # 保存主图（不包含colorbar）
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"✓ 热力图已保存到: {output_path}")
+    plt.close()
+
+    # 单独保存colorbar
+    colorbar_path = str(output_path).replace('.png', '_colorbar.png')
+    fig_cbar = plt.figure(figsize=(1.5, 8))
+    ax_cbar = plt.subplot(1, 1, 1)
+    ax_cbar.axis('off')
+    # 创建colorbar，使用相同的cmap和norm确保颜色一致
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
     cbar.set_ticks([-1.0, 0.0, 1.0])
     cbar.ax.tick_params(labelsize=28, width=2)
     # 设置colorbar刻度标签加粗
     for label in cbar.ax.yaxis.get_majorticklabels():
         label.set_fontweight('bold')
-
-    # 调整布局
-    plt.tight_layout()
-
-    # 保存图片
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"✓ 热力图已保存到: {output_path}")
-
+    # 保存colorbar
+    plt.savefig(colorbar_path, dpi=300, bbox_inches='tight')
     plt.close()
+    print(f"✓ Colorbar已单独保存到: {colorbar_path}")
 
 
 def plot_binarized_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, num_heads: int,
@@ -344,20 +355,32 @@ def plot_binarized_heatmap_from_data(heatmap_data: np.ndarray, num_layers: int, 
     ax.set_xticks(range(num_heads), minor=True)
     ax.set_yticks(range(num_layers), minor=True)
 
-    # 添加colorbar
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    # 调整布局
+    plt.tight_layout()
+
+    # 保存主图（不包含colorbar）
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"✓ 二值化热力图已保存到: {output_path}")
+    plt.close()
+
+    # 单独保存colorbar
+    colorbar_path = str(output_path).replace('.png', '_colorbar.png')
+    fig_cbar = plt.figure(figsize=(1.5, 8))
+    ax_cbar = plt.subplot(1, 1, 1)
+    ax_cbar.axis('off')
+    # 创建colorbar，使用相同的cmap和norm确保颜色一致
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax_cbar, orientation='vertical', fraction=1.0)
     cbar.set_ticks([-1.0, 0.0, 1.0])
     cbar.ax.tick_params(labelsize=32, width=2)
     # 设置colorbar刻度标签加粗
     for label in cbar.ax.yaxis.get_majorticklabels():
         label.set_fontweight('bold')
-
-    # 调整布局
-    plt.tight_layout()
-
-    # 保存图片
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"✓ 二值化热力图已保存到: {output_path}")
+    # 保存colorbar
+    plt.savefig(colorbar_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Colorbar已单独保存到: {colorbar_path}")
 
     # 打印统计信息
     total_heads = num_layers * num_heads
@@ -430,7 +453,9 @@ def main():
     print("=" * 80)
     print(f"输出文件:")
     print(f"  1. 原始热力图: {heatmap_path}")
-    print(f"  2. 二值化热力图: {binarized_heatmap_path}")
+    print(f"  2. 原始热力图Colorbar: {heatmap_path.parent / f'{heatmap_path.stem}_colorbar.png'}")
+    print(f"  3. 二值化热力图: {binarized_heatmap_path}")
+    print(f"  4. 二值化热力图Colorbar: {binarized_heatmap_path.parent / f'{binarized_heatmap_path.stem}_colorbar.png'}")
     print("=" * 80)
 
 
